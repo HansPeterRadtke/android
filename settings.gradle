@@ -1,0 +1,29 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        maven { url "https://jitpack.io" }
+    }
+}
+rootProject.name = 'android'
+include ':apps:android01'
+project(':apps:android01').projectDir = file('apps/android01/app')
+include ':apps:android02'
+project(':apps:android02').projectDir = file('apps/android02/app')
+include ':apps:android03'
+project(':apps:android03').projectDir = file('apps/android03/app')
+include ':modules:audio'
+include ':modules:onnx'
+include ':modules:stt'
+include ':modules:tts'
+include ':modules:network'
+include ':modules:model_downloader'
+include ':modules:common_ui'

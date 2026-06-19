@@ -1,0 +1,9 @@
+<resources>
+  <string name="app_name">android_01</string>
+  <string name="toggle_background">Toggle Background</string>
+  <string name="exit_app">Exit</string>
+  <string name="record">Record</string>
+  <string name="to_text">To Text</string>
+  <string name="read_text">Read Text</string>
+  <string name="speech_hint">Speech-to-text result</string>
+</resources>

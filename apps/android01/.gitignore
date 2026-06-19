@@ -1,0 +1,8 @@
+.git-credentials
+*log*
+.gradle/
+repo.json
+tags.json
+releases.json
+gradle/wrapper/gradle-wrapper.jar
+app/debug.keystore

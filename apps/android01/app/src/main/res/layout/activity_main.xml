@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+  android:layout_width="match_parent"
+  android:layout_height="match_parent">
+
+  <ImageView
+    android:id="@+id/backgroundImage"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:scaleType="centerCrop"
+    android:src="@drawable/background"
+    android:visibility="gone" />
+
+  <LinearLayout
+    android:id="@+id/audioButtonLayout"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:layout_alignParentTop="true"
+    android:padding="16dp" />
+
+  <LinearLayout
+    android:id="@+id/ttsSttLayout"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:layout_below="@id/audioButtonLayout"
+    android:layout_above="@id/toggleButton"
+    android:padding="16dp">
+
+    <EditText
+      android:id="@+id/textOutput"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:hint="@string/speech_hint" />
+
+    <LinearLayout
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:orientation="horizontal"
+      android:layout_marginTop="8dp">
+
+      <Button
+        android:id="@+id/recordButton"
+        android:layout_width="0dp"
+        android:layout_weight="1"
+        android:layout_height="wrap_content"
+        android:text="@string/record" />
+
+      <Button
+        android:id="@+id/toTextButton"
+        android:layout_width="0dp"
+        android:layout_weight="1"
+        android:layout_height="wrap_content"
+        android:text="@string/to_text" />
+
+      <Button
+        android:id="@+id/readTextButton"
+        android:layout_width="0dp"
+        android:layout_weight="1"
+        android:layout_height="wrap_content"
+        android:text="@string/read_text" />
+    </LinearLayout>
+  </LinearLayout>
+
+  <LinearLayout
+    android:id="@+id/bottomButtons"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:layout_alignParentBottom="true"
+    android:padding="16dp"
+    android:gravity="center">
+
+    <Button
+      android:id="@+id/toggleButton"
+      android:layout_width="wrap_content"
+      android:layout_height="wrap_content"
+      android:text="@string/toggle_background" />
+
+    <Button
+      android:id="@+id/exitButton"
+      android:layout_width="wrap_content"
+      android:layout_height="wrap_content"
+      android:text="@string/exit_app"
+      android:layout_marginStart="16dp" />
+  </LinearLayout>
+</RelativeLayout>

@@ -1,0 +1,12 @@
+plugins {
+    id 'com.android.library'
+}
+
+android {
+    namespace 'com.hans.android.model_downloader'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 24
+    }
+}

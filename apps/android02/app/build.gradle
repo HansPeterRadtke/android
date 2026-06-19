@@ -1,0 +1,122 @@
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace  'myapp.app'
+    compileSdk 34
+
+    defaultConfig {
+        ndk { abiFilters "arm64-v8a" }
+        applicationId "myapp.app"
+        minSdk       24
+        targetSdk    34
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+
+    packagingOptions {
+        resources {
+            excludes += ['META-INF/LGPL2.1']
+        }
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+}
+
+dependencies {
+    implementation('org.jetbrains.bio:npy:0.3.5') {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    }
+
+    implementation "androidx.core:core:1.12.0"
+    implementation "androidx.appcompat:appcompat:1.6.1"
+    implementation "com.google.android.material:material:1.11.0"
+
+    implementation "com.alphacephei:vosk-android:0.3.47"
+    implementation "org.kamranzafar:jtar:2.3"
+    implementation "com.microsoft.onnxruntime:onnxruntime-android:1.23.2"
+}
+
+tasks.withType(KotlinCompile).configureEach {
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+}
+
+def EXPLORER_UPLOAD_DIR = "/var/www/html/explorer/upload"
+def KOKORO_MODEL_NAME = "kokoro.onnx"
+def KOKORO_SOURCE_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+
+tasks.register("publishKokoroOnnx") {
+    doLast {
+        def outDir = file(EXPLORER_UPLOAD_DIR)
+        if (!outDir.exists()) outDir.mkdirs()
+
+        def outFile = file("${EXPLORER_UPLOAD_DIR}/${KOKORO_MODEL_NAME}")
+        if (outFile.exists() && outFile.length() > (1L << 20)) {
+            println("publishKokoroOnnx: already present: ${outFile} (${outFile.length()} bytes)")
+            return
+        }
+
+        def candidates = [
+                file("${rootProject.projectDir}/${KOKORO_MODEL_NAME}"),
+                file("${rootProject.projectDir}/models/${KOKORO_MODEL_NAME}"),
+                file("${project.projectDir}/${KOKORO_MODEL_NAME}"),
+                file("${project.projectDir}/models/${KOKORO_MODEL_NAME}")
+        ]
+
+        def src = candidates.find { it.exists() && it.isFile() && it.length() > 0 }
+        if (src != null) {
+            println("publishKokoroOnnx: copying ${src} -> ${outFile}")
+            copy {
+                from src
+                into outDir
+                rename { KOKORO_MODEL_NAME }
+            }
+        } else {
+            println("publishKokoroOnnx: downloading ${KOKORO_SOURCE_URL} -> ${outFile}")
+
+            def tmp = file("${outFile.absolutePath}.tmp")
+            if (tmp.exists()) tmp.delete()
+
+            def conn = new URL(KOKORO_SOURCE_URL).openConnection()
+            conn.connectTimeout = 60_000
+            conn.readTimeout = 600_000
+
+            tmp.withOutputStream { out ->
+                conn.getInputStream().withCloseable { input ->
+                    out << input
+                }
+            }
+
+            java.nio.file.Files.move(
+                    tmp.toPath(),
+                    outFile.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING
+            )
+        }
+
+        println("publishKokoroOnnx: ready: ${outFile} (${outFile.length()} bytes)")
+    }
+}
+
+tasks.matching { it.name == "assembleDebug" }.configureEach {
+    finalizedBy(tasks.named("publishKokoroOnnx"))
+}

@@ -1,0 +1,8 @@
+# Ignore build artifacts and temporary files
+build/
+*.log
+*.tmp
+.idea/
+*.iml
+.gradle/
+local.properties

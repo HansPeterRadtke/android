@@ -1,0 +1,28 @@
+plugins {
+    id 'com.android.application'
+}
+dependencies {
+    implementation("org.jetbrains.kotlin:kotlin-stdlib:1.8.10")
+    implementation('androidx.core:core:1.12.0')
+    implementation 'org.java-websocket:Java-WebSocket:1.5.2'
+    implementation 'com.github.gkonovalov:android-vad:2.0.10'
+}
+android {
+    namespace 'myapp.app'
+    compileSdk 34
+    defaultConfig {
+        applicationId "myapp.app"
+        minSdk 24
+        targetSdk 34
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+    packagingOptions {
+        resources {
+            excludes += ['META-INF/LGPL2.1']
+        }
+    }
+}
