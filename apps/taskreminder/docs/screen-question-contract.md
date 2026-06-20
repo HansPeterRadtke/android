@@ -1,39 +1,44 @@
-Screen purpose: Task Reminder answers what needs action now, whether reminders can be trusted, and how the user can configure or audit tasks without reading raw logs.
+Screen purpose: Task Reminder answers what needs action now, whether reminders can be trusted, and how the user can configure or audit tasks on a phone without raw logs or oversized modal workflows.
 
 Primary questions:
-- Can I trust reminders on this phone right now?
-- What needs action today?
-- What reminder is next?
-- What can I safely do now?
-- Where do I configure tasks?
-- Where is the audit trail when I need proof?
+Can I trust reminders on this phone right now?
+What needs action today?
+What reminder is next?
+What can I safely do now?
+How do I configure one selected task?
+Where is the audit trail when I need proof?
 
 Immediate visible answers:
-- A trust banner at the top with plain OK/BLOCKED language for notification permission and exact-alarm permission.
-- A Today cockpit shown by default with enabled task count, due/missed/completed/snoozed counts from today's history, and the next scheduled reminder.
-- Task cards show one primary action first, then secondary actions.
-- Empty state explains the next safe step instead of showing a blank list.
+The Today mode shows a trust banner, today metrics, next reminder, and safe actions.
+The Manage mode shows task cards and configuration entry points.
+The Edit mode shows one selected task as a full-screen phone workflow, not a large modal dialog.
+The History mode shows readable recent events first, with raw log as explicit drill-down.
 
 Hidden by default:
-- Raw append-only history log.
-- Internal task ids, raw boolean names, and implementation details.
-- Full audit details until the History mode is opened.
+Raw log lines, internal task ids, implementation booleans, and full audit detail are hidden until History drill-down.
+Secondary task configuration is behind focused selection dialogs.
 
 Primary actions:
-- Today mode: Complete today, Snooze, Add first task, Fix permissions.
-- Manage mode: Add task, edit schedule, disable/enable by editing, delete task.
-- History mode: View today summary, recent readable events, open raw log.
-- Delete remains attached to one task card and is not the primary action.
+Complete today and Snooze are visible on task cards when the task is enabled.
+Edit schedule opens a selected-object edit screen.
+Due time uses a focused time picker.
+Repeat mode uses a focused single-choice dialog.
+Snooze duration uses a focused single-choice dialog plus custom value field.
+Delete shows a consequence preview and keeps history.
+Disabled task actions show a human-readable reason.
 
 Trust signals:
-- The top banner shows notification and exact-alarm state in words, not color only.
-- The header shows last refresh time.
-- The next reminder shows a concrete weekday and time.
+The top banner uses OK/BLOCKED words and explains notification and exact-alarm state.
+The screen shows last refresh time.
+The next reminder shows weekday and time.
+After actions, visible feedback appears below the trust banner.
 
 Acceptance gates:
-- The app compiles with Gradle.
-- The first screen is Today, not a raw form and not a raw log.
-- Top-level navigation is by user work mode: Today, Manage, History.
-- Raw logs are hidden by default.
-- Critical states are visible outside logs.
-- Primary actions are visible and labeled by consequence.
+The app compiles with Gradle.
+The first screen is Today, not a raw form and not a raw log.
+Top-level navigation is by work mode: Today, Manage, History.
+Editing one task is a selected-object screen, not a large modal dialog.
+Dialogs are only focused choices or consequence confirmations.
+Raw logs are hidden by default.
+Critical states are visible outside logs.
+Primary actions are visible and disabled actions explain why.
