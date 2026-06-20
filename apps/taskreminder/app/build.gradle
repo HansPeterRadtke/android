@@ -17,5 +17,6 @@ android {
 
 dependencies {
     implementation project(':modules:reminder_core')
+    implementation project(':modules:common_ui')
     implementation 'androidx.core:core:1.12.0'
 }
