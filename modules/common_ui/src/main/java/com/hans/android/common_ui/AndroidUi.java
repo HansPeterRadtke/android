@@ -3,44 +3,41 @@ package com.hans.android.common_ui;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.view.View;
 import android.widget.*;
 
 public final class AndroidUi {
+    public static final int BG = Color.rgb(248, 249, 251);
+    public static final int SURFACE = Color.WHITE;
+    public static final int INK = Color.rgb(28, 33, 40);
+    public static final int MUTED = Color.rgb(92, 103, 115);
+    public static final int BLUE = Color.rgb(32, 95, 210);
+    public static final int GREEN = Color.rgb(24, 128, 72);
+    public static final int ORANGE = Color.rgb(181, 103, 21);
+    public static final int RED = Color.rgb(184, 54, 54);
+
     private AndroidUi() {}
 
+    public static int dp(Context c, int v) { return (int)(v * c.getResources().getDisplayMetrics().density + 0.5f); }
+
     public static TextView title(Context c, String text) {
-        TextView v = text(c, text, 26, true);
-        v.setPadding(0, 10, 0, 12);
+        TextView v = text(c, text, 28, true, INK);
+        v.setPadding(0, dp(c, 4), 0, dp(c, 2));
         return v;
     }
 
-    public static TextView section(Context c, String text) {
-        TextView v = text(c, text, 20, true);
-        v.setPadding(0, 22, 0, 8);
-        return v;
-    }
+    public static TextView subtitle(Context c, String text) { return text(c, text, 14, false, MUTED); }
+    public static TextView section(Context c, String text) { return text(c, text, 20, true, INK); }
+    public static TextView body(Context c, String text) { return text(c, text, 15, false, INK); }
+    public static TextView small(Context c, String text) { return text(c, text, 12, false, MUTED); }
 
-    public static TextView body(Context c, String text) {
-        return text(c, text, 14, false);
-    }
-
-    public static TextView small(Context c, String text) {
-        return text(c, text, 12, false);
-    }
-
-    public static TextView status(Context c, String text, boolean ok) {
-        TextView v = text(c, text, 15, true);
-        v.setPadding(18, 14, 18, 14);
-        v.setTextColor(ok ? Color.rgb(20, 100, 45) : Color.rgb(160, 50, 35));
-        return v;
-    }
-
-    public static TextView text(Context c, String text, int sp, boolean bold) {
+    public static TextView text(Context c, String text, int sp, boolean bold, int color) {
         TextView v = new TextView(c);
         v.setText(text);
         v.setTextSize(sp);
-        v.setPadding(0, 6, 0, 6);
+        v.setTextColor(color);
+        v.setPadding(0, dp(c, 4), 0, dp(c, 4));
         if (bold) v.setTypeface(Typeface.DEFAULT_BOLD);
         return v;
     }
@@ -49,17 +46,61 @@ public final class AndroidUi {
         Button b = new Button(c);
         b.setText(text);
         b.setAllCaps(false);
+        b.setMinHeight(dp(c, 44));
+        return b;
+    }
+
+    public static Button modeButton(Context c, String text, boolean selected) {
+        Button b = button(c, text);
+        b.setTextColor(selected ? Color.WHITE : BLUE);
+        GradientDrawable g = round(selected ? BLUE : Color.WHITE, selected ? BLUE : Color.rgb(205, 214, 225), dp(c, 18));
+        b.setBackground(g);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(c, 44), 1);
+        lp.setMargins(dp(c, 3), dp(c, 6), dp(c, 3), dp(c, 6));
+        b.setLayoutParams(lp);
         return b;
     }
 
     public static LinearLayout card(Context c) {
         LinearLayout box = new LinearLayout(c);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(18, 18, 18, 18);
+        box.setPadding(dp(c, 16), dp(c, 14), dp(c, 16), dp(c, 14));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        lp.setMargins(0, 10, 0, 10);
+        lp.setMargins(0, dp(c, 8), 0, dp(c, 8));
         box.setLayoutParams(lp);
-        box.setBackgroundColor(Color.rgb(245, 245, 245));
+        box.setBackground(round(SURFACE, Color.rgb(225, 230, 236), dp(c, 16)));
         return box;
+    }
+
+    public static LinearLayout banner(Context c, int color) {
+        LinearLayout box = card(c);
+        box.setBackground(round(tint(color), color, dp(c, 16)));
+        return box;
+    }
+
+    public static LinearLayout metric(Context c, String label, String value, int color) {
+        LinearLayout box = new LinearLayout(c);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(c, 12), dp(c, 10), dp(c, 12), dp(c, 10));
+        box.setBackground(round(tint(color), Color.rgb(228, 232, 238), dp(c, 14)));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+        lp.setMargins(dp(c, 3), dp(c, 3), dp(c, 3), dp(c, 3));
+        box.setLayoutParams(lp);
+        box.addView(text(c, value, 22, true, color));
+        box.addView(text(c, label, 12, false, MUTED));
+        return box;
+    }
+
+    public static GradientDrawable round(int fill, int stroke, int radius) {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(fill);
+        g.setCornerRadius(radius);
+        g.setStroke(1, stroke);
+        return g;
+    }
+
+    private static int tint(int color) {
+        int r = Color.red(color), g = Color.green(color), b = Color.blue(color);
+        return Color.rgb((r + 255 * 7) / 8, (g + 255 * 7) / 8, (b + 255 * 7) / 8);
     }
 }
