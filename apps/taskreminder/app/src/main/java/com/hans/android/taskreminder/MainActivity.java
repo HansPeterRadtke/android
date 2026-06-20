@@ -200,7 +200,13 @@ public class MainActivity extends Activity {
 
     private void renderEdit() {
         if (draft == null) draft = new ReminderTask();
-        root.addView(AndroidUi.section(this, draft.title == null || draft.title.equals("New task") ? "Create reminder" : "Edit reminder"));
+        root.addView(AndroidUi.section(this, draft.title == null || draft.title.equals("New task") ? "Create reminder" : "Edit selected reminder"));
+        LinearLayout context = AndroidUi.banner(this, AndroidUi.BLUE);
+        context.addView(AndroidUi.text(this, "Selected task", 14, true, AndroidUi.BLUE));
+        context.addView(AndroidUi.body(this, (draft.title == null || draft.title.trim().isEmpty() ? "Untitled task" : draft.title) + " · " + String.format(Locale.US, "%02d:%02d", draft.hour, draft.minute) + " · " + (draft.daily ? "Daily" : "One-shot")));
+        context.addView(AndroidUi.small(this, "Configure one object here. Focused pickers are used for time, repeat mode, and snooze duration."));
+        root.addView(context);
+
         LinearLayout card = AndroidUi.card(this);
         EditText title = input(draft.title); card.addView(label("Task name")); card.addView(title);
         EditText notes = input(draft.notes); notes.setMinLines(3); card.addView(label("Notification notes")); card.addView(notes);
@@ -208,6 +214,8 @@ public class MainActivity extends Activity {
         card.addView(summaryRow("Repeat", draft.daily ? "Daily" : "One-shot", "Choose repeat mode", v -> showRepeatPicker(title, notes)));
         card.addView(summaryRow("Snooze", draft.defaultSnoozeMinutes + " minutes", "Choose snooze", v -> showSnoozePicker(title, notes)));
         CheckBox enabled = new CheckBox(this); enabled.setText("Enabled and scheduled"); enabled.setChecked(draft.enabled); card.addView(enabled);
+        TextView validation = AndroidUi.small(this, "Save is enabled when the task has a name and a snooze duration of at least one minute.");
+        card.addView(validation);
         Button save = AndroidUi.button(this, "Save and schedule");
         save.setOnClickListener(v -> saveDraft(title, notes, enabled));
         card.addView(save);
@@ -228,7 +236,7 @@ public class MainActivity extends Activity {
     }
 
     private void captureDraft(EditText title, EditText notes) {
-        draft.title = title.getText().toString().trim().isEmpty() ? "Task" : title.getText().toString().trim();
+        draft.title = title.getText().toString().trim();
         draft.notes = notes.getText().toString();
     }
 
@@ -274,18 +282,36 @@ public class MainActivity extends Activity {
             .setMessage("Enter a whole number of minutes. This affects future Snooze actions for this task.")
             .setView(input)
             .setNegativeButton("Cancel", null)
-            .setPositiveButton("Use this snooze", (d, w) -> { draft.defaultSnoozeMinutes = Math.max(1, Integer.parseInt(input.getText().toString().trim())); feedback = "Custom snooze selected: " + draft.defaultSnoozeMinutes + " minutes"; render(); })
+            .setPositiveButton("Use this snooze", (d, w) -> {
+                try {
+                    draft.defaultSnoozeMinutes = Math.max(1, Integer.parseInt(input.getText().toString().trim()));
+                    feedback = "Custom snooze selected: " + draft.defaultSnoozeMinutes + " minutes";
+                } catch (Exception e) {
+                    feedback = "Cannot use custom snooze: enter a whole number of minutes.";
+                }
+                render();
+            })
             .show();
     }
 
     private void saveDraft(EditText title, EditText notes, CheckBox enabled) {
         captureDraft(title, notes);
+        if (draft.title == null || draft.title.trim().isEmpty() || draft.title.equals("Task")) {
+            feedback = "Cannot save yet: enter a specific task name.";
+            render();
+            return;
+        }
+        if (draft.defaultSnoozeMinutes < 1) {
+            feedback = "Cannot save yet: snooze must be at least one minute.";
+            render();
+            return;
+        }
         draft.enabled = enabled.isChecked();
         store.upsert(draft);
         store.appendHistory(draft.id, "saved", draft.title + " at " + String.format(Locale.US, "%02d:%02d", draft.hour, draft.minute));
         ReminderScheduler.cancelTask(this, draft.id);
         if (draft.enabled) ReminderScheduler.scheduleTask(this, draft, true);
-        feedback = draft.enabled ? "Saved and scheduled: " + draft.title : "Saved disabled task: " + draft.title;
+        feedback = draft.enabled ? "Saved and scheduled: " + draft.title : "Saved disabled task: " + draft.title + ". Reason: Enabled and scheduled is off.";
         draft = null;
         mode = MODE_TODAY;
         render();
@@ -344,8 +370,9 @@ public class MainActivity extends Activity {
 
     private void openEdit(ReminderTask task) {
         draft = copyTask(task);
+        if (task.title == null || task.title.equals("New task")) draft.title = "";
         mode = MODE_EDIT;
-        feedback = task.title == null || task.title.equals("New task") ? "Creating a new selected task." : "Editing selected task: " + task.title;
+        feedback = draft.title == null || draft.title.trim().isEmpty() ? "Creating a new selected task." : "Editing selected task: " + draft.title;
         render();
     }
 
