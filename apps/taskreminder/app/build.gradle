@@ -1,0 +1,21 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.hans.android.taskreminder'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.hans.android.taskreminder'
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName '0.1'
+    }
+}
+
+dependencies {
+    implementation project(':modules:reminder_core')
+    implementation 'androidx.core:core:1.12.0'
+}

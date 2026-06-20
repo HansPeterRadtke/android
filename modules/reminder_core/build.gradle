@@ -1,0 +1,12 @@
+plugins {
+    id 'com.android.library'
+}
+
+android {
+    namespace 'com.hans.android.reminder_core'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 24
+    }
+}

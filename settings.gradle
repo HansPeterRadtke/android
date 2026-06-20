@@ -27,3 +27,7 @@ include ':modules:tts'
 include ':modules:network'
 include ':modules:model_downloader'
 include ':modules:common_ui'
+
+include ':apps:taskreminder'
+project(':apps:taskreminder').projectDir = file('apps/taskreminder/app')
+include ':modules:reminder_core'
