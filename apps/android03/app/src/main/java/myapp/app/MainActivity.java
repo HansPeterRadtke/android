@@ -40,7 +40,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MainActivity extends Activity {
-  private static final String BASE_URL = "https://jetsonsystem.jimmyandjonny.work";
+  private static final String BASE_URL = "https://jetson-fdx.jimmyandjonny.work";
   private static final int SAMPLE_RATE = 16000;
   private static final int CHANNEL_CONFIG_IN = AudioFormat.CHANNEL_IN_MONO;
   private static final int CHANNEL_CONFIG_OUT = AudioFormat.CHANNEL_OUT_MONO;
@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
     layout.setPadding(18, 18, 18, 18);
 
     statusView = new TextView(this);
-    statusView.setText("BASE_URL: " + BASE_URL + "\nJetson FDX endpoint through Cloudflare: /fdx/*");
+    statusView.setText("BASE_URL: " + BASE_URL + "\nDedicated Jetson FDX Cloudflare endpoint. System Server is not used.");
     statusView.setTextSize(15);
     layout.addView(statusView, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
@@ -104,7 +104,7 @@ public class MainActivity extends Activity {
 
   private void healthCheck() {
     try {
-      JSONObject json = httpGetJson(BASE_URL + "/fdx/health");
+      JSONObject json = httpGetJson(BASE_URL + "/health");
       log("[HEALTH] " + json.toString());
     } catch (Exception e) {
       log("[HEALTH ERROR] " + e);
@@ -123,7 +123,7 @@ public class MainActivity extends Activity {
     runOnUiThread(() -> startButton.setText("Stop full-duplex session"));
     new Thread(() -> {
       try {
-        JSONObject start = httpPostBytesJson(BASE_URL + "/fdx/start", new byte[0], "application/octet-stream");
+        JSONObject start = httpPostBytesJson(BASE_URL + "/start", new byte[0], "application/octet-stream");
         sid = start.getString("sid");
         log("[START] sid=" + sid);
         initPlayback();
@@ -184,7 +184,7 @@ public class MainActivity extends Activity {
   private void uploadPcmChunk(byte[] pcm, int len, boolean finalChunk) throws Exception {
     int seq = nextSeq++;
     byte[] wav = wavFromPcm16Mono16k(pcm, len);
-    String url = BASE_URL + "/fdx/upload?sid=" + enc(sid) + "&seq=" + seq + "&final=" + (finalChunk ? "1" : "0");
+    String url = BASE_URL + "/upload?sid=" + enc(sid) + "&seq=" + seq + "&final=" + (finalChunk ? "1" : "0");
     long startMs = System.currentTimeMillis();
     JSONObject res = httpPostBytesJson(url, wav, "audio/wav");
     long doneMs = System.currentTimeMillis();
@@ -195,7 +195,7 @@ public class MainActivity extends Activity {
     log("[DOWNLINK] Polling every 150 ms.");
     while (running.get() || sid != null) {
       try {
-        JSONObject poll = httpGetJson(BASE_URL + "/fdx/poll?sid=" + enc(sid));
+        JSONObject poll = httpGetJson(BASE_URL + "/poll?sid=" + enc(sid));
         JSONArray q = poll.optJSONArray("audio_queue");
         if (q != null) {
           for (int i = 0; i < q.length(); i++) {
@@ -206,7 +206,7 @@ public class MainActivity extends Activity {
               seenChunks.add(chunkId);
             }
             log("[AUDIO QUEUED] " + chunkId + " bytes=" + chunk.optInt("bytes", -1) + " text=" + chunk.optString("text", ""));
-            byte[] wav = httpGetBytes(BASE_URL + "/fdx/audio?sid=" + enc(sid) + "&chunk=" + enc(chunkId));
+            byte[] wav = httpGetBytes(BASE_URL + "/audio?sid=" + enc(sid) + "&chunk=" + enc(chunkId));
             log("[AUDIO DOWNLOADED] " + chunkId + " wav=" + wav.length);
             playWavImmediately(wav);
           }
