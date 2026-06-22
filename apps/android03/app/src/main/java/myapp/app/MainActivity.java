@@ -221,7 +221,7 @@ public class MainActivity extends Activity {
         sid = null;
       }
     }
-    log("[DOWNLINK] stopped.");
+    log("[DOWNLINK] stopped after grace window.");
   }
 
   private void initPlayback() {
