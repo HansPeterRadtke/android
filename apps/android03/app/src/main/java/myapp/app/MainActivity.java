@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
     layout.setPadding(18, 18, 18, 18);
 
     statusView = new TextView(this);
-    statusView.setText("BASE_URL: " + BASE_URL + "\nDedicated Jetson FDX Cloudflare endpoint. System Server is not used.");
+    statusView.setText("BASE_URL: " + BASE_URL + "\nDedicated Jetson FDX endpoint. Health=/health, session API=/fdx/*.");
     statusView.setTextSize(15);
     layout.addView(statusView, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
@@ -104,7 +104,7 @@ public class MainActivity extends Activity {
 
   private void healthCheck() {
     try {
-      JSONObject json = httpGetJson(BASE_URL + "/fdx/health");
+      JSONObject json = httpGetJson(BASE_URL + "/health");
       log("[HEALTH] " + json.toString());
     } catch (Exception e) {
       log("[HEALTH ERROR] " + e);
