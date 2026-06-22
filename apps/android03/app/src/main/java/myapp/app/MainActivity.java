@@ -40,7 +40,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MainActivity extends Activity {
-  private static final String BASE_URL = "http://10.8.0.3:13482";
+  private static final String BASE_URL = "https://jetsonsystem.jimmyandjonny.work/fdx";
   private static final int SAMPLE_RATE = 16000;
   private static final int CHANNEL_CONFIG_IN = AudioFormat.CHANNEL_IN_MONO;
   private static final int CHANNEL_CONFIG_OUT = AudioFormat.CHANNEL_OUT_MONO;
