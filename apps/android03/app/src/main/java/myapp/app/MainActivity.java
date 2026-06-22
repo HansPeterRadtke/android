@@ -40,7 +40,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MainActivity extends Activity {
-  private static final String BASE_URL = "http://127.0.0.1:13483";
+  private static final String BASE_URL = "http://10.8.0.3:13482";
   private static final int SAMPLE_RATE = 16000;
   private static final int CHANNEL_CONFIG_IN = AudioFormat.CHANNEL_IN_MONO;
   private static final int CHANNEL_CONFIG_OUT = AudioFormat.CHANNEL_OUT_MONO;
@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
     layout.setPadding(18, 18, 18, 18);
 
     statusView = new TextView(this);
-    statusView.setText("BASE_URL: " + BASE_URL + "\nNeeds: adb reverse tcp:13483 tcp:13483 on G3");
+    statusView.setText("BASE_URL: " + BASE_URL + "\nDirect Jetson target. LAN fallback if needed: http://192.168.8.52:13482");
     statusView.setTextSize(15);
     layout.addView(statusView, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 

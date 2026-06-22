@@ -1,45 +1,63 @@
-# Android Full-Duplex App Contract
+# Android Full-Duplex App Contract, Corrected
 
-## Current working dev URL from the Android app
-
-`BASE_URL = http://127.0.0.1:13483`
-
-This is the current tested phone path.
-
-It requires this ADB reverse on G3:
-
-`adb reverse tcp:13483 tcp:13483`
-
-And this G3 relay:
-
-G3 listens on `127.0.0.1:13483`.
-G3 forwards to `10.8.0.3:13482`.
-Jetson listens on `0.0.0.0:13482`.
-
-Direct URL only if the phone can route to Jetson:
+## Direct Jetson target
 
 `BASE_URL = http://10.8.0.3:13482`
 
-Use plain HTTP, not HTTPS, for this dev endpoint.
+Use this when the phone can route to Jetson's tunnel address.
 
-Jetson port `13482` is inside infra agent range `13000-13999`.
-G3 relay port `13483` is the phone-facing dev relay port.
-The old `18182` path is not the app target anymore.
+If the phone is on Jetson's physical LAN instead, use:
 
-## Endpoints
+`BASE_URL = http://192.168.8.52:13482`
 
-Health: `GET {BASE_URL}/health` returns `ok`, `service=no_omni_full_duplex`, and `model_ready=true`.
+Do not use G3 in the Android app. Do not use ADB reverse in the Android app. Do not use `https://jetsonsystem.jimmyandjonny.work/fdx` right now; that public URL currently routes only the System Server and returns 404 for `/fdx`.
 
-Start session: `POST {BASE_URL}/fdx/start` with an empty body returns `sid`.
+## Server
 
-Upload audio chunk: `POST {BASE_URL}/fdx/upload?sid={sid}&seq={seq}&final={0_or_1}` with `Content-Type: audio/wav` and complete RIFF/WAVE PCM signed 16-bit little-endian, mono, 16000 Hz.
+`full_duplex_server.py --host 0.0.0.0 --port 13482`
 
-Poll loop: `GET {BASE_URL}/fdx/poll?sid={sid}` every 100 to 250 ms. Download unseen chunk ids immediately.
+Port `13482` is inside the infra agent range `13000-13999`.
 
-Download reply audio: `GET {BASE_URL}/fdx/audio?sid={sid}&chunk={chunk_id}` returns WAV bytes, PCM signed 16-bit little-endian, mono, 16000 Hz.
+## Health
 
-## Full-duplex requirement
+`GET {BASE_URL}/health`
 
-The app must run two independent loops. The uplink loop keeps recording and uploading while playback is active. The downlink loop polls, downloads, and plays reply audio without blocking or stopping the uplink loop.
+Expected: `ok=true`, `service=no_omni_full_duplex`, `model_ready=true`.
 
-Pass condition: the phone receives and starts playing reply audio before the final microphone upload has completed.
+## Start session
+
+`POST {BASE_URL}/fdx/start`
+
+Body is empty. Response contains `sid`.
+
+## Upload audio
+
+`POST {BASE_URL}/fdx/upload?sid={sid}&seq={seq}&final={0_or_1}`
+
+Header: `Content-Type: audio/wav`.
+
+Body is complete WAV bytes, including header: RIFF/WAVE, PCM signed 16-bit little-endian, mono, 16000 Hz.
+
+Do not send raw PCM. Do not send Opus, AAC, MP3, Ogg, WebM, or MediaRecorder compressed output.
+
+## Downlink poll
+
+Run this in a second thread while upload continues:
+
+`GET {BASE_URL}/fdx/poll?sid={sid}`
+
+Poll every 100 to 250 ms. When `audio_queue` contains a new `chunk_id`, download it.
+
+## Download reply audio
+
+`GET {BASE_URL}/fdx/audio?sid={sid}&chunk={chunk_id}`
+
+Response is `audio/wav`, RIFF/WAVE PCM signed 16-bit little-endian, mono, 16000 Hz.
+
+## Full-duplex rule
+
+One thread records and uploads WAV chunks. A second thread polls and downloads reply WAV chunks. Playback starts immediately and must not stop the microphone upload thread.
+
+## Pass condition
+
+The phone starts playing downloaded reply audio before the final microphone upload completes.
