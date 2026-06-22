@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
     layout.setPadding(18, 18, 18, 18);
 
     statusView = new TextView(this);
-    statusView.setText("BASE_URL: " + BASE_URL + "\nDirect Jetson target. LAN fallback if needed: http://192.168.8.52:13482");
+    statusView.setText("BASE_URL: " + BASE_URL + "\nJetson FDX endpoint through Cloudflare: /fdx/*");
     statusView.setTextSize(15);
     layout.addView(statusView, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
@@ -104,7 +104,7 @@ public class MainActivity extends Activity {
 
   private void healthCheck() {
     try {
-      JSONObject json = httpGetJson(BASE_URL + "/health");
+      JSONObject json = httpGetJson(BASE_URL + "/fdx/health");
       log("[HEALTH] " + json.toString());
     } catch (Exception e) {
       log("[HEALTH ERROR] " + e);
