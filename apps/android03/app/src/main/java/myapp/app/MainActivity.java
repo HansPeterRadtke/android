@@ -53,6 +53,8 @@ public class MainActivity extends Activity {
   private Button startButton;
   private Button healthButton;
   private final AtomicBoolean running = new AtomicBoolean(false);
+  private volatile boolean stopRequested = false;
+  private volatile long stopRequestedAtMs = 0L;
   private Thread uplinkThread;
   private Thread downlinkThread;
   private volatile String sid = null;
@@ -118,6 +120,8 @@ public class MainActivity extends Activity {
       return;
     }
     running.set(true);
+    stopRequested = false;
+    stopRequestedAtMs = 0L;
     seenChunks.clear();
     nextSeq = 0;
     runOnUiThread(() -> startButton.setText("Stop full-duplex session"));
@@ -141,8 +145,10 @@ public class MainActivity extends Activity {
 
   private void stopSession() {
     running.set(false);
+    stopRequested = true;
+    stopRequestedAtMs = System.currentTimeMillis();
     runOnUiThread(() -> startButton.setText("Start full-duplex session"));
-    log("[STOP] Stopping. Uplink will send final WAV chunk.");
+    log("[STOP] Stopping recording. Downlink will keep polling for late streaming audio.");
   }
 
   private void uplinkLoop() {
@@ -182,6 +188,10 @@ public class MainActivity extends Activity {
   }
 
   private void uploadPcmChunk(byte[] pcm, int len, boolean finalChunk) throws Exception {
+    if (sid == null || sid.length() == 0) {
+      log("[UPLOAD SKIP] sid is empty final=" + finalChunk);
+      return;
+    }
     int seq = nextSeq++;
     byte[] wav = wavFromPcm16Mono16k(pcm, len);
     String url = BASE_URL + "/fdx/upload?sid=" + enc(sid) + "&seq=" + seq + "&final=" + (finalChunk ? "1" : "0");
@@ -192,10 +202,19 @@ public class MainActivity extends Activity {
   }
 
   private void downlinkLoop() {
-    log("[DOWNLINK] Polling every 150 ms.");
-    while (running.get() || sid != null) {
+    log("[DOWNLINK] Polling every 150 ms. It stays alive after Stop for streaming audio.");
+    long lastAudioAt = System.currentTimeMillis();
+    long idleAfterStopMs = 45000L;
+    while (true) {
+      String activeSid = sid;
+      boolean shouldContinue = running.get() || (stopRequested && activeSid != null && System.currentTimeMillis() - lastAudioAt < idleAfterStopMs);
+      if (!shouldContinue) break;
+      if (activeSid == null || activeSid.length() == 0) {
+        try { Thread.sleep(150); } catch (Exception ignored) {}
+        continue;
+      }
       try {
-        JSONObject poll = httpGetJson(BASE_URL + "/fdx/poll?sid=" + enc(sid));
+        JSONObject poll = httpGetJson(BASE_URL + "/fdx/poll?sid=" + enc(activeSid));
         JSONArray q = poll.optJSONArray("audio_queue");
         if (q != null) {
           for (int i = 0; i < q.length(); i++) {
@@ -205,8 +224,9 @@ public class MainActivity extends Activity {
               if (seenChunks.contains(chunkId)) continue;
               seenChunks.add(chunkId);
             }
-            log("[AUDIO QUEUED] " + chunkId + " bytes=" + chunk.optInt("bytes", -1) + " text=" + chunk.optString("text", ""));
-            byte[] wav = httpGetBytes(BASE_URL + "/fdx/audio?sid=" + enc(sid) + "&chunk=" + enc(chunkId));
+            lastAudioAt = System.currentTimeMillis();
+            log("[AUDIO QUEUED] " + chunkId + " bytes=" + chunk.optInt("bytes", -1) + " engine=" + chunk.optString("engine", "") + " text=" + chunk.optString("text", ""));
+            byte[] wav = httpGetBytes(BASE_URL + "/fdx/audio?sid=" + enc(activeSid) + "&chunk=" + enc(chunkId));
             log("[AUDIO DOWNLOADED] " + chunkId + " wav=" + wav.length);
             playWavImmediately(wav);
           }
@@ -216,12 +236,10 @@ public class MainActivity extends Activity {
         log("[DOWNLINK ERROR] " + e);
         try { Thread.sleep(500); } catch (Exception ignored) {}
       }
-      if (!running.get() && sid != null) {
-        try { Thread.sleep(1200); } catch (Exception ignored) {}
-        sid = null;
-      }
     }
-    log("[DOWNLINK] stopped after grace window.");
+    sid = null;
+    stopRequested = false;
+    log("[DOWNLINK] stopped after streaming grace window.");
   }
 
   private void initPlayback() {
