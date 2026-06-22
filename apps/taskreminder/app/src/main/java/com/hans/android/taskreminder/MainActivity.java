@@ -128,7 +128,7 @@ public class MainActivity extends Activity {
         }
         ReminderTask next = tasks.get(0);
         LinearLayout hero = AndroidUi.banner(this, AndroidUi.BLUE);
-        Calendar c = DayUtil.nextTime(next.hour, next.minute);
+        Calendar c = RepeatCalculator.nextDue(next, System.currentTimeMillis());
         hero.addView(AndroidUi.text(this, "Next reminder", 14, true, AndroidUi.BLUE));
         hero.addView(AndroidUi.text(this, next.title, 24, true, AndroidUi.INK));
         hero.addView(AndroidUi.body(this, new SimpleDateFormat("EEEE HH:mm", Locale.US).format(c.getTime()) + " · snooze " + next.defaultSnoozeMinutes + " min"));
@@ -138,7 +138,7 @@ public class MainActivity extends Activity {
         done.setOnClickListener(v -> completeTask(next));
         Button snooze = AndroidUi.button(this, "Snooze " + next.defaultSnoozeMinutes + " min");
         snooze.setOnClickListener(v -> snoozeTask(next));
-        row.addView(done); row.addView(snooze);
+        row.addView(done); row.addView(snooze); Button dismiss = AndroidUi.button(this, "Dismiss"); dismiss.setOnClickListener(v -> dismissTask(next)); row.addView(dismiss);
         hero.addView(row);
         root.addView(hero);
         root.addView(AndroidUi.section(this, "Upcoming"));
@@ -168,10 +168,11 @@ public class MainActivity extends Activity {
 
     private View taskCard(ReminderTask t, boolean management) {
         LinearLayout box = AndroidUi.card(this);
-        Calendar next = DayUtil.nextTime(t.hour, t.minute);
+        Calendar next = RepeatCalculator.nextDue(t, System.currentTimeMillis());
         box.addView(AndroidUi.text(this, t.title, 19, true, t.enabled ? AndroidUi.INK : AndroidUi.MUTED));
-        box.addView(AndroidUi.body(this, (t.enabled ? "Enabled" : "Disabled") + " · " + (t.daily ? "Daily" : "One-shot") + " · " + new SimpleDateFormat("EEE HH:mm", Locale.US).format(next.getTime()) + " · snooze " + t.defaultSnoozeMinutes + " min"));
+        box.addView(AndroidUi.body(this, (t.enabled ? "Enabled" : "Disabled") + " · " + t.repeatSummary() + " · " + new SimpleDateFormat("EEE HH:mm", Locale.US).format(next.getTime()) + " · snooze " + t.defaultSnoozeMinutes + " min"));
         if (!t.enabled) box.addView(AndroidUi.small(this, "Actions disabled: this task is not scheduled. Use Edit schedule to enable it."));
+        box.addView(AndroidUi.small(this, "History totals: completed " + t.completedCount + " · dismissed " + t.dismissedCount + " · not completed " + t.missedCount + " · current snoozes " + t.openSnoozeCount));
         if (t.notes != null && !t.notes.trim().isEmpty()) box.addView(AndroidUi.small(this, t.notes));
         LinearLayout primary = new LinearLayout(this);
         primary.setOrientation(LinearLayout.HORIZONTAL);
@@ -183,6 +184,10 @@ public class MainActivity extends Activity {
         snooze.setEnabled(t.enabled);
         snooze.setOnClickListener(v -> snoozeTask(t));
         primary.addView(snooze);
+        Button dismiss = AndroidUi.button(this, "Dismiss");
+        dismiss.setEnabled(t.enabled);
+        dismiss.setOnClickListener(v -> dismissTask(t));
+        primary.addView(dismiss);
         box.addView(primary);
         if (management) {
             LinearLayout secondary = new LinearLayout(this);
@@ -203,7 +208,7 @@ public class MainActivity extends Activity {
         root.addView(AndroidUi.section(this, draft.title == null || draft.title.equals("New task") ? "Create reminder" : "Edit selected reminder"));
         LinearLayout context = AndroidUi.banner(this, AndroidUi.BLUE);
         context.addView(AndroidUi.text(this, "Selected task", 14, true, AndroidUi.BLUE));
-        context.addView(AndroidUi.body(this, (draft.title == null || draft.title.trim().isEmpty() ? "Untitled task" : draft.title) + " · " + String.format(Locale.US, "%02d:%02d", draft.hour, draft.minute) + " · " + (draft.daily ? "Daily" : "One-shot")));
+        context.addView(AndroidUi.body(this, (draft.title == null || draft.title.trim().isEmpty() ? "Untitled task" : draft.title) + " · " + String.format(Locale.US, "%02d:%02d", draft.hour, draft.minute) + " · " + draft.repeatSummary()));
         context.addView(AndroidUi.small(this, "Configure one object here. Focused pickers are used for time, repeat mode, and snooze duration."));
         root.addView(context);
 
@@ -211,7 +216,7 @@ public class MainActivity extends Activity {
         EditText title = input(draft.title); card.addView(label("Task name")); card.addView(title);
         EditText notes = input(draft.notes); notes.setMinLines(3); card.addView(label("Notification notes")); card.addView(notes);
         card.addView(summaryRow("Due time", String.format(Locale.US, "%02d:%02d", draft.hour, draft.minute), "Choose due time", v -> showTimePicker(title, notes)));
-        card.addView(summaryRow("Repeat", draft.daily ? "Daily" : "One-shot", "Choose repeat mode", v -> showRepeatPicker(title, notes)));
+        card.addView(summaryRow("Repeat", draft.repeatSummary(), "Choose repeat mode", v -> showRepeatPicker(title, notes)));
         card.addView(summaryRow("Snooze", draft.defaultSnoozeMinutes + " minutes", "Choose snooze", v -> showSnoozePicker(title, notes)));
         CheckBox enabled = new CheckBox(this); enabled.setText("Enabled and scheduled"); enabled.setChecked(draft.enabled); card.addView(enabled);
         TextView validation = AndroidUi.small(this, "Save is enabled when the task has a name and a snooze duration of at least one minute.");
@@ -249,12 +254,100 @@ public class MainActivity extends Activity {
 
     private void showRepeatPicker(EditText title, EditText notes) {
         captureDraft(title, notes);
-        String[] choices = new String[]{"Daily", "One-shot"};
-        int checked = draft.daily ? 0 : 1;
+        String[] choices = new String[]{"Hourly", "Daily", "Weekly", "Monthly", "Every N days", "Every N hours", "Custom interval", "One-shot"};
+        String[] modes = new String[]{ReminderTask.REPEAT_HOURLY, ReminderTask.REPEAT_DAILY, ReminderTask.REPEAT_WEEKLY, ReminderTask.REPEAT_MONTHLY, ReminderTask.REPEAT_EVERY_N_DAYS, ReminderTask.REPEAT_EVERY_N_HOURS, ReminderTask.REPEAT_CUSTOM_INTERVAL, ReminderTask.REPEAT_ONCE};
+        int checked = 1;
+        for (int i = 0; i < modes.length; i++) if (modes[i].equals(draft.repeatMode)) checked = i;
         new AlertDialog.Builder(this)
-            .setTitle("Choose repeat mode")
-            .setSingleChoiceItems(choices, checked, (dialog, which) -> { draft.daily = which == 0; feedback = "Repeat mode selected: " + choices[which]; dialog.dismiss(); render(); })
+            .setTitle("Choose repeat pattern")
+            .setSingleChoiceItems(choices, checked, (dialog, which) -> {
+                draft.repeatMode = modes[which];
+                draft.daily = ReminderTask.REPEAT_DAILY.equals(draft.repeatMode);
+                if (ReminderTask.REPEAT_HOURLY.equals(draft.repeatMode)) { draft.intervalHours = 1; draft.intervalDays = 0; draft.intervalMinutes = 0; }
+                if (ReminderTask.REPEAT_WEEKLY.equals(draft.repeatMode) && draft.weekdaysMask == 0) draft.weekdaysMask = 1 << (Calendar.getInstance().get(Calendar.DAY_OF_WEEK) - 1);
+                if (ReminderTask.REPEAT_MONTHLY.equals(draft.repeatMode) && draft.dayOfMonth < 1) draft.dayOfMonth = Calendar.getInstance().get(Calendar.DAY_OF_MONTH);
+                if (ReminderTask.REPEAT_EVERY_N_DAYS.equals(draft.repeatMode) && draft.intervalDays < 1) draft.intervalDays = 1;
+                if (ReminderTask.REPEAT_EVERY_N_HOURS.equals(draft.repeatMode) && draft.intervalHours < 1) draft.intervalHours = 1;
+                if (ReminderTask.REPEAT_CUSTOM_INTERVAL.equals(draft.repeatMode) && draft.intervalDays == 0 && draft.intervalHours == 0 && draft.intervalMinutes == 0) draft.intervalHours = 1;
+                feedback = "Repeat pattern selected: " + draft.repeatSummary();
+                dialog.dismiss();
+                if (ReminderTask.REPEAT_WEEKLY.equals(draft.repeatMode)) showWeekdayPicker(title, notes);
+                else if (ReminderTask.REPEAT_MONTHLY.equals(draft.repeatMode)) showMonthDayPicker(title, notes);
+                else if (ReminderTask.REPEAT_EVERY_N_DAYS.equals(draft.repeatMode) || ReminderTask.REPEAT_EVERY_N_HOURS.equals(draft.repeatMode) || ReminderTask.REPEAT_CUSTOM_INTERVAL.equals(draft.repeatMode)) showIntervalEditor(title, notes);
+                else render();
+            })
             .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    private void showWeekdayPicker(EditText title, EditText notes) {
+        captureDraft(title, notes);
+        String[] labels = new String[]{"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+        boolean[] checked = new boolean[7];
+        for (int i = 0; i < 7; i++) checked[i] = (draft.weekdaysMask & (1 << i)) != 0;
+        new AlertDialog.Builder(this)
+            .setTitle("Choose weekdays")
+            .setMultiChoiceItems(labels, checked, (dialog, which, isChecked) -> {
+                if (isChecked) draft.weekdaysMask |= (1 << which); else draft.weekdaysMask &= ~(1 << which);
+            })
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Use weekdays", (dialog, which) -> {
+                if (draft.weekdaysMask == 0) draft.weekdaysMask = 1 << (Calendar.getInstance().get(Calendar.DAY_OF_WEEK) - 1);
+                feedback = "Weekly repeat selected: " + draft.weekdaySummary();
+                render();
+            })
+            .show();
+    }
+
+    private void showMonthDayPicker(EditText title, EditText notes) {
+        captureDraft(title, notes);
+        final EditText input = new EditText(this);
+        input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        input.setSingleLine(true);
+        input.setText(String.valueOf(Math.max(1, Math.min(31, draft.dayOfMonth))));
+        new AlertDialog.Builder(this)
+            .setTitle("Choose day of month")
+            .setMessage("Use 1 to 31. Months with fewer days use the last valid day.")
+            .setView(input)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Use day", (dialog, which) -> {
+                try { draft.dayOfMonth = Math.max(1, Math.min(31, Integer.parseInt(input.getText().toString().trim()))); feedback = "Monthly repeat selected: day " + draft.dayOfMonth; }
+                catch (Exception e) { feedback = "Cannot use month day: enter a number from 1 to 31."; }
+                render();
+            })
+            .show();
+    }
+
+    private void showIntervalEditor(EditText title, EditText notes) {
+        captureDraft(title, notes);
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(AndroidUi.dp(this, 12), AndroidUi.dp(this, 8), AndroidUi.dp(this, 12), AndroidUi.dp(this, 4));
+        EditText days = input(String.valueOf(Math.max(0, draft.intervalDays))); days.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        EditText hours = input(String.valueOf(Math.max(0, draft.intervalHours))); hours.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        EditText minutes = input(String.valueOf(Math.max(0, draft.intervalMinutes))); minutes.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        if (ReminderTask.REPEAT_EVERY_N_DAYS.equals(draft.repeatMode)) { hours.setText("0"); minutes.setText("0"); }
+        if (ReminderTask.REPEAT_EVERY_N_HOURS.equals(draft.repeatMode)) { days.setText("0"); minutes.setText("0"); }
+        form.addView(label("Days")); form.addView(days);
+        form.addView(label("Hours")); form.addView(hours);
+        form.addView(label("Minutes")); form.addView(minutes);
+        new AlertDialog.Builder(this)
+            .setTitle("Choose repeat interval")
+            .setMessage("Examples: every 23 days, or every 16 hours and 25 minutes. At least one value must be greater than zero.")
+            .setView(form)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Use interval", (dialog, which) -> {
+                try {
+                    draft.intervalDays = Math.max(0, Integer.parseInt(days.getText().toString().trim()));
+                    draft.intervalHours = Math.max(0, Integer.parseInt(hours.getText().toString().trim()));
+                    draft.intervalMinutes = Math.max(0, Integer.parseInt(minutes.getText().toString().trim()));
+                    if (ReminderTask.REPEAT_EVERY_N_DAYS.equals(draft.repeatMode) && draft.intervalDays < 1) draft.intervalDays = 1;
+                    if (ReminderTask.REPEAT_EVERY_N_HOURS.equals(draft.repeatMode) && draft.intervalHours < 1) draft.intervalHours = 1;
+                    if (draft.intervalDays == 0 && draft.intervalHours == 0 && draft.intervalMinutes == 0) draft.intervalHours = 1;
+                    feedback = "Repeat interval selected: " + draft.repeatSummary();
+                } catch (Exception e) { feedback = "Cannot use interval: enter whole numbers only."; }
+                render();
+            })
             .show();
     }
 
@@ -301,12 +394,20 @@ public class MainActivity extends Activity {
             render();
             return;
         }
+        if (ReminderTask.REPEAT_CUSTOM_INTERVAL.equals(draft.repeatMode) && draft.intervalDays == 0 && draft.intervalHours == 0 && draft.intervalMinutes == 0) {
+            feedback = "Cannot save yet: custom repeat interval needs at least one day, hour, or minute.";
+            render();
+            return;
+        }
         if (draft.defaultSnoozeMinutes < 1) {
             feedback = "Cannot save yet: snooze must be at least one minute.";
             render();
             return;
         }
         draft.enabled = enabled.isChecked();
+        draft.daily = ReminderTask.REPEAT_DAILY.equals(draft.repeatMode);
+        draft.openOccurrenceDueAt = 0;
+        draft.openSnoozeCount = 0;
         store.upsert(draft);
         store.appendHistory(draft.id, "saved", draft.title + " at " + String.format(Locale.US, "%02d:%02d", draft.hour, draft.minute));
         ReminderScheduler.cancelTask(this, draft.id);
@@ -347,8 +448,13 @@ public class MainActivity extends Activity {
 
     private void completeTask(ReminderTask t) {
         ReminderScheduler.cancelTask(this, t.id);
-        store.appendHistory(t.id, "completed_manual", t.title);
-        if (t.daily) ReminderScheduler.scheduleTask(this, t, true);
+        t.completedCount += 1;
+        store.appendHistory(t.id, "completed_manual", "Completed from app · occurrence due " + new Date(t.openOccurrenceDueAt) + " · snoozes " + t.openSnoozeCount);
+        t.openOccurrenceDueAt = 0;
+        t.openSnoozeCount = 0;
+        if (ReminderTask.REPEAT_ONCE.equals(t.repeatMode)) t.enabled = false;
+        store.upsert(t);
+        if (!ReminderTask.REPEAT_ONCE.equals(t.repeatMode) && t.enabled) ReminderScheduler.scheduleTask(this, t, true);
         feedback = "Completed and logged: " + t.title;
         render();
     }
@@ -356,6 +462,19 @@ public class MainActivity extends Activity {
     private void snoozeTask(ReminderTask t) {
         ReminderScheduler.scheduleSnooze(this, t, t.defaultSnoozeMinutes);
         feedback = "Snoozed " + t.title + " for " + t.defaultSnoozeMinutes + " minutes.";
+        render();
+    }
+
+    private void dismissTask(ReminderTask t) {
+        ReminderScheduler.cancelTask(this, t.id);
+        t.dismissedCount += 1;
+        store.appendHistory(t.id, "dismissed_manual", "Dismissed from app · occurrence due " + new Date(t.openOccurrenceDueAt) + " · snoozes " + t.openSnoozeCount);
+        t.openOccurrenceDueAt = 0;
+        t.openSnoozeCount = 0;
+        if (ReminderTask.REPEAT_ONCE.equals(t.repeatMode)) t.enabled = false;
+        store.upsert(t);
+        if (!ReminderTask.REPEAT_ONCE.equals(t.repeatMode) && t.enabled) ReminderScheduler.scheduleTask(this, t, true);
+        feedback = "Dismissed without completion: " + t.title;
         render();
     }
 
@@ -378,14 +497,14 @@ public class MainActivity extends Activity {
 
     private ReminderTask copyTask(ReminderTask t) {
         ReminderTask c = new ReminderTask();
-        c.id = t.id; c.title = t.title; c.notes = t.notes; c.hour = t.hour; c.minute = t.minute; c.daily = t.daily; c.enabled = t.enabled; c.defaultSnoozeMinutes = t.defaultSnoozeMinutes; c.createdAt = t.createdAt; c.lastScheduledAt = t.lastScheduledAt;
+        c.id = t.id; c.title = t.title; c.notes = t.notes; c.hour = t.hour; c.minute = t.minute; c.daily = t.daily; c.enabled = t.enabled; c.defaultSnoozeMinutes = t.defaultSnoozeMinutes; c.createdAt = t.createdAt; c.lastScheduledAt = t.lastScheduledAt; c.repeatMode = t.repeatMode; c.weekdaysMask = t.weekdaysMask; c.dayOfMonth = t.dayOfMonth; c.intervalDays = t.intervalDays; c.intervalHours = t.intervalHours; c.intervalMinutes = t.intervalMinutes; c.lastDueAt = t.lastDueAt; c.openOccurrenceDueAt = t.openOccurrenceDueAt; c.openSnoozeCount = t.openSnoozeCount; c.completedCount = t.completedCount; c.dismissedCount = t.dismissedCount; c.missedCount = t.missedCount;
         return c;
     }
 
     private ArrayList<ReminderTask> sortedTasks(boolean enabledOnly) {
         ArrayList<ReminderTask> out = new ArrayList<>();
         for (ReminderTask t : store.loadTasks()) if (!enabledOnly || t.enabled) out.add(t);
-        Collections.sort(out, (a, b) -> Long.compare(DayUtil.nextTime(a.hour, a.minute).getTimeInMillis(), DayUtil.nextTime(b.hour, b.minute).getTimeInMillis()));
+        Collections.sort(out, (a, b) -> Long.compare(RepeatCalculator.nextDue(a, System.currentTimeMillis()).getTimeInMillis(), RepeatCalculator.nextDue(b, System.currentTimeMillis()).getTimeInMillis()));
         return out;
     }
 
@@ -401,7 +520,7 @@ public class MainActivity extends Activity {
             if (line.trim().isEmpty() || line.equals("No history yet.")) continue;
             if (line.contains("\t" + today + "\t") && line.contains("\tcompleted")) s.completedToday++;
             if (line.contains("\t" + today + "\t") && line.contains("\tsnoozed")) s.snoozedToday++;
-            if (line.contains("\t" + today + "\t") && line.contains("\tmissed")) s.missedToday++;
+            if (line.contains("\t" + today + "\t") && (line.contains("\tmissed") || line.contains("\tauto_not_completed"))) s.missedToday++;
             if (shown < 12) { recent.append(humanEvent(line)).append("\n"); shown++; }
         }
         s.recentText = recent.length() == 0 ? "No history yet." : recent.toString();

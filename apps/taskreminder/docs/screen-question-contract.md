@@ -42,3 +42,7 @@ Dialogs are only focused choices or consequence confirmations.
 Raw logs are hidden by default.
 Critical states are visible outside logs.
 Primary actions are visible and disabled actions explain why.
+
+
+Deep configuration update:
+Repeat supports Hourly, Daily, Weekly with weekday selection, Monthly with day-of-month selection, Every N days, Every N hours, Custom interval with days/hours/minutes, and One-shot. Reminder outcomes are Complete, Snooze, Dismiss, and automatic not-completed closure when a new due occurrence replaces an unresolved previous occurrence. History records notified, scheduled, snoozed count, completed, dismissed, auto-not-completed, deleted, and save events.
