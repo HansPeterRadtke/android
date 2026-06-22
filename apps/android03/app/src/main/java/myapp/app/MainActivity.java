@@ -41,6 +41,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MainActivity extends Activity {
   private static final String BASE_URL = "https://jetson-fdx.jimmyandjonny.work";
+  private static final String APP_BUILD_LABEL = "android03 async-upload visibility 2026-06-22 20:31";
   private static final int SAMPLE_RATE = 16000;
   private static final int CHANNEL_CONFIG_IN = AudioFormat.CHANNEL_IN_MONO;
   private static final int CHANNEL_CONFIG_OUT = AudioFormat.CHANNEL_OUT_MONO;
@@ -60,6 +61,7 @@ public class MainActivity extends Activity {
   private volatile String sid = null;
   private volatile int nextSeq = 0;
   private final Set<String> seenChunks = new HashSet<>();
+  private final Set<String> seenEvents = new HashSet<>();
   private AudioTrack audioTrack;
 
   @Override protected void onCreate(Bundle savedInstanceState) {
@@ -73,7 +75,7 @@ public class MainActivity extends Activity {
     layout.setPadding(18, 18, 18, 18);
 
     statusView = new TextView(this);
-    statusView.setText("BASE_URL: " + BASE_URL + "\nDedicated Jetson FDX endpoint. Health=/health, session API=/fdx/*.");
+    statusView.setText("BUILD: " + APP_BUILD_LABEL + "\nBASE_URL: " + BASE_URL + "\nDedicated Jetson FDX endpoint. Async upload + poll event visibility.");
     statusView.setTextSize(15);
     layout.addView(statusView, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
@@ -107,6 +109,7 @@ public class MainActivity extends Activity {
   private void healthCheck() {
     try {
       JSONObject json = httpGetJson(BASE_URL + "/health");
+      log("[APP BUILD] " + APP_BUILD_LABEL);
       log("[HEALTH] " + json.toString());
     } catch (Exception e) {
       log("[HEALTH ERROR] " + e);
@@ -123,6 +126,7 @@ public class MainActivity extends Activity {
     stopRequested = false;
     stopRequestedAtMs = 0L;
     seenChunks.clear();
+    seenEvents.clear();
     nextSeq = 0;
     runOnUiThread(() -> startButton.setText("Stop full-duplex session"));
     new Thread(() -> {
@@ -196,9 +200,12 @@ public class MainActivity extends Activity {
     byte[] wav = wavFromPcm16Mono16k(pcm, len);
     String url = BASE_URL + "/fdx/upload?sid=" + enc(sid) + "&seq=" + seq + "&final=" + (finalChunk ? "1" : "0");
     long startMs = System.currentTimeMillis();
+    log("[UPLOAD SEND] seq=" + seq + " final=" + finalChunk + " wav=" + wav.length);
     JSONObject res = httpPostBytesJson(url, wav, "audio/wav");
     long doneMs = System.currentTimeMillis();
-    log("[UPLOAD] seq=" + seq + " final=" + finalChunk + " wav=" + wav.length + " ms=" + (doneMs - startMs) + " text=" + res.optString("text", "") + " queued_audio=" + res.optInt("queued_audio", -1));
+    JSONObject proc = res.optJSONObject("processing");
+    String procStatus = proc == null ? "" : proc.optString("status", "");
+    log("[UPLOAD ACCEPTED] seq=" + seq + " final=" + finalChunk + " wav=" + wav.length + " http_ms=" + (doneMs - startMs) + " accepted=" + res.optBoolean("accepted", false) + " processing=" + procStatus + " queued_audio=" + res.optInt("queued_audio", -1));
   }
 
   private void downlinkLoop() {
@@ -215,6 +222,25 @@ public class MainActivity extends Activity {
       }
       try {
         JSONObject poll = httpGetJson(BASE_URL + "/fdx/poll?sid=" + enc(activeSid));
+        JSONArray events = poll.optJSONArray("events");
+        if (events != null) {
+          int start = Math.max(0, events.length() - 12);
+          for (int i = start; i < events.length(); i++) {
+            JSONObject ev = events.getJSONObject(i);
+            String kind = ev.optString("kind", "");
+            String key = kind + ":" + ev.optInt("seq", -1) + ":" + ev.optString("chunk_id", "") + ":" + ev.optLong("t", 0);
+            synchronized (seenEvents) {
+              if (seenEvents.contains(key)) continue;
+              seenEvents.add(key);
+            }
+            if ("upload_accepted".equals(kind)) log("[SERVER ACCEPTED] seq=" + ev.optInt("seq", -1) + " final=" + ev.optBoolean("final", false) + " bytes=" + ev.optInt("bytes", -1));
+            else if ("upload_processed".equals(kind)) log("[ASR DONE] seq=" + ev.optInt("seq", -1) + " ms=" + ev.optInt("processed_ms", -1) + " text=" + ev.optString("text", "") + " best=" + ev.optString("best_text", "") + " close=" + ev.optString("close_reason", ""));
+            else if ("audio_queued".equals(kind)) log("[SERVER AUDIO] " + ev.optString("chunk_id", "") + " engine=" + ev.optString("engine", "") + " text=" + ev.optString("text", ""));
+            else if (kind.contains("error")) log("[SERVER EVENT] " + ev.toString());
+          }
+        }
+        JSONObject processing = poll.optJSONObject("processing");
+        if (processing != null && processing.length() > 0 && System.currentTimeMillis() % 2500 < 180) log("[SERVER PROCESSING] " + processing.toString());
         JSONArray q = poll.optJSONArray("audio_queue");
         if (q != null) {
           for (int i = 0; i < q.length(); i++) {
