@@ -9,7 +9,6 @@ import android.media.AudioTrack;
 import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.media.MediaRecorder;
-import android.media.MediaPlayer;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.Button;
@@ -26,8 +25,6 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -37,7 +34,6 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.text.SimpleDateFormat;
 import java.util.Date;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
@@ -45,7 +41,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MainActivity extends Activity {
   private static final String BASE_URL = "https://jetson-fdx.jimmyandjonny.work";
-  private static final String APP_BUILD_LABEL = "android03 mediaplayer-wav-playback 2026-06-23 07:15";
+  private static final String APP_BUILD_LABEL = "android03 async-upload visibility 2026-06-22 20:31";
   private static final int SAMPLE_RATE = 16000;
   private static final int CHANNEL_CONFIG_IN = AudioFormat.CHANNEL_IN_MONO;
   private static final int CHANNEL_CONFIG_OUT = AudioFormat.CHANNEL_OUT_MONO;
@@ -67,7 +63,6 @@ public class MainActivity extends Activity {
   private final Set<String> seenChunks = new HashSet<>();
   private final Set<String> seenEvents = new HashSet<>();
   private AudioTrack audioTrack;
-  private final ArrayList<MediaPlayer> activePlayers = new ArrayList<>();
 
   @Override protected void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
@@ -274,48 +269,25 @@ public class MainActivity extends Activity {
   }
 
   private void initPlayback() {
-    try {
-      android.media.AudioManager am = (android.media.AudioManager)getSystemService(AUDIO_SERVICE);
-      if (am != null) {
-        am.setMode(android.media.AudioManager.MODE_NORMAL);
-        if (android.os.Build.VERSION.SDK_INT < 31) am.setSpeakerphoneOn(true);
-      }
-    } catch (Exception e) {
-      log("[PLAYBACK INIT WARNING] " + e);
+    int min = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG_OUT, AUDIO_FORMAT);
+    if (android.os.Build.VERSION.SDK_INT >= 23) {
+      audioTrack = new AudioTrack.Builder()
+        .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+        .setAudioFormat(new android.media.AudioFormat.Builder().setEncoding(AUDIO_FORMAT).setSampleRate(SAMPLE_RATE).setChannelMask(CHANNEL_CONFIG_OUT).build())
+        .setBufferSizeInBytes(Math.max(min, SAMPLE_RATE * 2))
+        .setTransferMode(AudioTrack.MODE_STREAM)
+        .build();
+    } else {
+      audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC, SAMPLE_RATE, CHANNEL_CONFIG_OUT, AUDIO_FORMAT, Math.max(min, SAMPLE_RATE * 2), AudioTrack.MODE_STREAM);
     }
+    audioTrack.play();
   }
 
   private void playWavImmediately(byte[] wav) throws Exception {
-    File f = File.createTempFile("fdx_reply_", ".wav", getCacheDir());
-    FileOutputStream out = new FileOutputStream(f);
-    out.write(wav);
-    out.close();
-    MediaPlayer mp = new MediaPlayer();
-    synchronized (activePlayers) { activePlayers.add(mp); }
-    mp.setAudioAttributes(new AudioAttributes.Builder()
-      .setUsage(AudioAttributes.USAGE_MEDIA)
-      .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-      .build());
-    mp.setDataSource(f.getAbsolutePath());
-    mp.setOnPreparedListener(player -> {
-      log("[PLAY START] file=" + f.getName() + " wav=" + wav.length + " duration_ms=" + player.getDuration());
-      player.start();
-    });
-    mp.setOnCompletionListener(player -> {
-      log("[PLAY DONE] file=" + f.getName());
-      try { player.release(); } catch (Exception ignored) {}
-      synchronized (activePlayers) { activePlayers.remove(player); }
-      try { f.delete(); } catch (Exception ignored) {}
-    });
-    mp.setOnErrorListener((player, what, extra) -> {
-      log("[PLAY ERROR] file=" + f.getName() + " what=" + what + " extra=" + extra);
-      try { player.release(); } catch (Exception ignored) {}
-      synchronized (activePlayers) { activePlayers.remove(player); }
-      try { f.delete(); } catch (Exception ignored) {}
-      return true;
-    });
-    mp.prepareAsync();
-    log("[PLAY PREPARE] MediaPlayer wav=" + wav.length + " file=" + f.getName());
+    byte[] pcm = pcmFromWav(wav);
+    if (audioTrack == null) initPlayback();
+    int written = audioTrack.write(pcm, 0, pcm.length);
+    log("[PLAY] intent sent pcm=" + pcm.length + " written=" + written);
   }
 
   private static byte[] wavFromPcm16Mono16k(byte[] pcm, int len) throws Exception {
