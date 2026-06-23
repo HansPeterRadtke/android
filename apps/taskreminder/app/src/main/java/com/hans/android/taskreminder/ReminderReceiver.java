@@ -37,6 +37,26 @@ public class ReminderReceiver extends BroadcastReceiver {
             if (!ReminderTask.REPEAT_ONCE.equals(task.repeatMode) && task.enabled) ReminderScheduler.scheduleTask(context, task, true);
             return;
         }
+        if (ReminderScheduler.ACTION_SKIP.equals(action)) {
+            NotificationManagerCompat.from(context).cancel((int)(id % 1000000000L));
+            ReminderScheduler.cancelTask(context, id);
+            task.dismissedCount += 1;
+            store.appendHistory(id, "skipped", "Skipped this occurrence due " + new Date(task.openOccurrenceDueAt) + " after " + task.openSnoozeCount + " snooze(s). This means intentionally not doing it this time.");
+            closeOccurrence(task);
+            store.upsert(task);
+            if (!ReminderTask.REPEAT_ONCE.equals(task.repeatMode) && task.enabled) ReminderScheduler.scheduleTask(context, task, true);
+            return;
+        }
+        if (ReminderScheduler.ACTION_NOT_DONE.equals(action)) {
+            NotificationManagerCompat.from(context).cancel((int)(id % 1000000000L));
+            ReminderScheduler.cancelTask(context, id);
+            task.missedCount += 1;
+            store.appendHistory(id, "not_done", "Marked not done manually for occurrence due " + new Date(task.openOccurrenceDueAt) + " after " + task.openSnoozeCount + " snooze(s)");
+            closeOccurrence(task);
+            store.upsert(task);
+            if (!ReminderTask.REPEAT_ONCE.equals(task.repeatMode) && task.enabled) ReminderScheduler.scheduleTask(context, task, true);
+            return;
+        }
         if (ReminderScheduler.ACTION_SNOOZE.equals(action)) {
             NotificationManagerCompat.from(context).cancel((int)(id % 1000000000L));
             int minutes = intent.getIntExtra(ReminderScheduler.EXTRA_SNOOZE_MINUTES, task.defaultSnoozeMinutes);
@@ -85,12 +105,18 @@ public class ReminderReceiver extends BroadcastReceiver {
         Intent dismiss = new Intent(context, ReminderReceiver.class).setAction(ReminderScheduler.ACTION_DISMISS);
         dismiss.putExtra(ReminderScheduler.EXTRA_TASK_ID, task.id);
         PendingIntent dismissPi = PendingIntent.getBroadcast(context, (int)(task.id % 1000000000L) + 30, dismiss, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        Intent skip = new Intent(context, ReminderReceiver.class).setAction(ReminderScheduler.ACTION_SKIP);
+        skip.putExtra(ReminderScheduler.EXTRA_TASK_ID, task.id);
+        PendingIntent skipPi = PendingIntent.getBroadcast(context, (int)(task.id % 1000000000L) + 40, skip, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        Intent notDone = new Intent(context, ReminderReceiver.class).setAction(ReminderScheduler.ACTION_NOT_DONE);
+        notDone.putExtra(ReminderScheduler.EXTRA_TASK_ID, task.id);
+        PendingIntent notDonePi = PendingIntent.getBroadcast(context, (int)(task.id % 1000000000L) + 50, notDone, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         String detail = task.notes == null || task.notes.isEmpty() ? task.repeatSummary() : task.notes;
         NotificationCompat.Builder b = new NotificationCompat.Builder(context, ReminderScheduler.CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_popup_reminder)
             .setContentTitle(task.title)
             .setContentText("Due now · " + task.repeatSummary() + " · snooze " + task.defaultSnoozeMinutes + " min")
-            .setStyle(new NotificationCompat.BigTextStyle().bigText(detail + "\nSnoozed this occurrence: " + task.openSnoozeCount + " time(s)."))
+            .setStyle(new NotificationCompat.BigTextStyle().bigText(detail + "\nSnoozed this occurrence: " + task.openSnoozeCount + " time(s).\nActions: complete, snooze, dismiss, skip this occurrence, or mark not done. Open the app if Android hides some buttons."))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
             .setAutoCancel(false)
@@ -98,7 +124,9 @@ public class ReminderReceiver extends BroadcastReceiver {
             .setContentIntent(openPi)
             .addAction(android.R.drawable.checkbox_on_background, "Complete", completePi)
             .addAction(android.R.drawable.ic_popup_reminder, "Snooze", snoozePi)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Dismiss", dismissPi);
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Dismiss", dismissPi)
+            .addAction(android.R.drawable.ic_menu_upload, "Skip", skipPi)
+            .addAction(android.R.drawable.ic_menu_delete, "Not done", notDonePi);
         if (Build.VERSION.SDK_INT < 33 || context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
             NotificationManagerCompat.from(context).notify((int)(task.id % 1000000000L), b.build());
         }

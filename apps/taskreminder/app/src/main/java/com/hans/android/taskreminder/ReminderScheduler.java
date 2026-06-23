@@ -11,6 +11,8 @@ public final class ReminderScheduler {
     public static final String ACTION_COMPLETE = "com.hans.android.taskreminder.COMPLETE";
     public static final String ACTION_SNOOZE = "com.hans.android.taskreminder.SNOOZE";
     public static final String ACTION_DISMISS = "com.hans.android.taskreminder.DISMISS";
+    public static final String ACTION_SKIP = "com.hans.android.taskreminder.SKIP";
+    public static final String ACTION_NOT_DONE = "com.hans.android.taskreminder.NOT_DONE";
     public static final String ACTION_MISSED = "com.hans.android.taskreminder.MISSED";
     public static final String EXTRA_TASK_ID = "task_id";
     public static final String EXTRA_SNOOZE_MINUTES = "snooze_minutes";
@@ -21,7 +23,7 @@ public final class ReminderScheduler {
     public static void ensureChannel(Context context) {
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Task reminders", NotificationManager.IMPORTANCE_HIGH);
-            ch.setDescription("Task reminder notifications with complete, snooze and dismiss actions");
+            ch.setDescription("Task reminder notifications with complete, snooze, dismiss, skip and not-done actions");
             NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
             nm.createNotificationChannel(ch);
         }
@@ -62,7 +64,7 @@ public final class ReminderScheduler {
 
     public static void cancelTask(Context context, long taskId) {
         AlarmManager am = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
-        for (int offset : new int[]{1000,2000,3000}) {
+        for (int offset : new int[]{1000,2000,3000,4000,5000}) {
             Intent intent = new Intent(context, ReminderReceiver.class);
             PendingIntent pi = PendingIntent.getBroadcast(context, (int)(taskId % 1000000000L) + offset, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             am.cancel(pi);

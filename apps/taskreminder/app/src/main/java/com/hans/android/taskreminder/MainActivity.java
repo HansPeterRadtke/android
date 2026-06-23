@@ -58,7 +58,7 @@ public class MainActivity extends Activity {
         root.addView(trustBanner());
         if (feedback != null && !feedback.isEmpty()) root.addView(feedbackBanner());
         if (mode != MODE_EDIT) root.addView(modeNav());
-        if (mode == MODE_TODAY) renderToday();
+        if (mode == MODE_TODAY) { renderActiveOccurrenceActions(); renderToday(); }
         if (mode == MODE_MANAGE) renderManage();
         if (mode == MODE_HISTORY) renderHistory(false);
         if (mode == MODE_EDIT) renderEdit();
@@ -106,6 +106,30 @@ public class MainActivity extends Activity {
         return b;
     }
 
+
+    private void renderActiveOccurrenceActions() {
+        ArrayList<ReminderTask> open = new ArrayList<>();
+        for (ReminderTask t : store.loadTasks()) if (t.enabled && t.openOccurrenceDueAt > 0) open.add(t);
+        if (open.isEmpty()) return;
+        root.addView(AndroidUi.section(this, "Active occurrence actions"));
+        for (ReminderTask t : open) {
+            LinearLayout box = AndroidUi.banner(this, AndroidUi.ORANGE);
+            box.addView(AndroidUi.text(this, t.title, 20, true, AndroidUi.INK));
+            box.addView(AndroidUi.body(this, "Open occurrence due " + new SimpleDateFormat("EEE HH:mm", Locale.US).format(new Date(t.openOccurrenceDueAt)) + " · snoozed " + t.openSnoozeCount + " time(s). These actions are always available here even if Android hides notification buttons."));
+            LinearLayout row1 = new LinearLayout(this); row1.setOrientation(LinearLayout.HORIZONTAL);
+            Button done = AndroidUi.button(this, "Complete"); done.setOnClickListener(v -> completeTask(t)); row1.addView(done);
+            Button snooze = AndroidUi.button(this, "Snooze " + t.defaultSnoozeMinutes + " min"); snooze.setOnClickListener(v -> snoozeTask(t)); row1.addView(snooze);
+            Button dismiss = AndroidUi.button(this, "Dismiss"); dismiss.setOnClickListener(v -> dismissTask(t)); row1.addView(dismiss);
+            box.addView(row1);
+            LinearLayout row2 = new LinearLayout(this); row2.setOrientation(LinearLayout.HORIZONTAL);
+            Button skip = AndroidUi.button(this, "Skip this occurrence"); skip.setOnClickListener(v -> skipTask(t)); row2.addView(skip);
+            Button notDone = AndroidUi.button(this, "Mark not done"); notDone.setOnClickListener(v -> notDoneTask(t)); row2.addView(notDone);
+            Button history = AndroidUi.button(this, "Open history"); history.setOnClickListener(v -> { mode = MODE_HISTORY; render(); }); row2.addView(history);
+            box.addView(row2);
+            root.addView(box);
+        }
+    }
+
     private void renderToday() {
         ArrayList<ReminderTask> tasks = sortedTasks(true);
         HistoryStats stats = historyStats();
@@ -138,7 +162,7 @@ public class MainActivity extends Activity {
         done.setOnClickListener(v -> completeTask(next));
         Button snooze = AndroidUi.button(this, "Snooze " + next.defaultSnoozeMinutes + " min");
         snooze.setOnClickListener(v -> snoozeTask(next));
-        row.addView(done); row.addView(snooze); Button dismiss = AndroidUi.button(this, "Dismiss"); dismiss.setOnClickListener(v -> dismissTask(next)); row.addView(dismiss);
+        row.addView(done); row.addView(snooze); Button dismiss = AndroidUi.button(this, "Dismiss"); dismiss.setOnClickListener(v -> dismissTask(next)); row.addView(dismiss); Button skip = AndroidUi.button(this, "Skip"); skip.setOnClickListener(v -> skipTask(next)); row.addView(skip); Button notDone = AndroidUi.button(this, "Not done"); notDone.setOnClickListener(v -> notDoneTask(next)); row.addView(notDone);
         hero.addView(row);
         root.addView(hero);
         root.addView(AndroidUi.section(this, "Upcoming"));
@@ -188,6 +212,14 @@ public class MainActivity extends Activity {
         dismiss.setEnabled(t.enabled);
         dismiss.setOnClickListener(v -> dismissTask(t));
         primary.addView(dismiss);
+        Button skip = AndroidUi.button(this, "Skip");
+        skip.setEnabled(t.enabled);
+        skip.setOnClickListener(v -> skipTask(t));
+        primary.addView(skip);
+        Button notDone = AndroidUi.button(this, "Not done");
+        notDone.setEnabled(t.enabled);
+        notDone.setOnClickListener(v -> notDoneTask(t));
+        primary.addView(notDone);
         box.addView(primary);
         if (management) {
             LinearLayout secondary = new LinearLayout(this);
@@ -475,6 +507,33 @@ public class MainActivity extends Activity {
         store.upsert(t);
         if (!ReminderTask.REPEAT_ONCE.equals(t.repeatMode) && t.enabled) ReminderScheduler.scheduleTask(this, t, true);
         feedback = "Dismissed without completion: " + t.title;
+        render();
+    }
+
+
+    private void skipTask(ReminderTask t) {
+        ReminderScheduler.cancelTask(this, t.id);
+        t.dismissedCount += 1;
+        store.appendHistory(t.id, "skipped_manual", "Skipped this occurrence from app · due " + new Date(t.openOccurrenceDueAt) + " · snoozes " + t.openSnoozeCount + ". This was intentional, not completed.");
+        t.openOccurrenceDueAt = 0;
+        t.openSnoozeCount = 0;
+        if (ReminderTask.REPEAT_ONCE.equals(t.repeatMode)) t.enabled = false;
+        store.upsert(t);
+        if (!ReminderTask.REPEAT_ONCE.equals(t.repeatMode) && t.enabled) ReminderScheduler.scheduleTask(this, t, true);
+        feedback = "Skipped this occurrence and logged it separately from dismiss: " + t.title;
+        render();
+    }
+
+    private void notDoneTask(ReminderTask t) {
+        ReminderScheduler.cancelTask(this, t.id);
+        t.missedCount += 1;
+        store.appendHistory(t.id, "not_done_manual", "Marked not done from app · due " + new Date(t.openOccurrenceDueAt) + " · snoozes " + t.openSnoozeCount);
+        t.openOccurrenceDueAt = 0;
+        t.openSnoozeCount = 0;
+        if (ReminderTask.REPEAT_ONCE.equals(t.repeatMode)) t.enabled = false;
+        store.upsert(t);
+        if (!ReminderTask.REPEAT_ONCE.equals(t.repeatMode) && t.enabled) ReminderScheduler.scheduleTask(this, t, true);
+        feedback = "Marked not done and logged as missed: " + t.title;
         render();
     }
 
