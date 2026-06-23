@@ -119,7 +119,8 @@ public class MainActivity extends Activity {
             LinearLayout row1 = new LinearLayout(this); row1.setOrientation(LinearLayout.HORIZONTAL);
             Button done = AndroidUi.button(this, "Complete"); done.setOnClickListener(v -> completeTask(t)); row1.addView(done);
             Button snooze = AndroidUi.button(this, "Snooze " + t.defaultSnoozeMinutes + " min"); snooze.setOnClickListener(v -> snoozeTask(t)); row1.addView(snooze);
-            Button dismiss = AndroidUi.button(this, "Dismiss"); dismiss.setOnClickListener(v -> dismissTask(t)); row1.addView(dismiss);
+            Button dismiss = AndroidUi.button(this, "Dismiss only"); dismiss.setOnClickListener(v -> dismissTask(t)); row1.addView(dismiss);
+            Button carry = AndroidUi.button(this, "Carry to next"); carry.setOnClickListener(v -> carryTask(t)); row1.addView(carry);
             box.addView(row1);
             LinearLayout row2 = new LinearLayout(this); row2.setOrientation(LinearLayout.HORIZONTAL);
             Button skip = AndroidUi.button(this, "Skip this occurrence"); skip.setOnClickListener(v -> skipTask(t)); row2.addView(skip);
@@ -162,7 +163,7 @@ public class MainActivity extends Activity {
         done.setOnClickListener(v -> completeTask(next));
         Button snooze = AndroidUi.button(this, "Snooze " + next.defaultSnoozeMinutes + " min");
         snooze.setOnClickListener(v -> snoozeTask(next));
-        row.addView(done); row.addView(snooze); Button dismiss = AndroidUi.button(this, "Dismiss"); dismiss.setOnClickListener(v -> dismissTask(next)); row.addView(dismiss); Button skip = AndroidUi.button(this, "Skip"); skip.setOnClickListener(v -> skipTask(next)); row.addView(skip); Button notDone = AndroidUi.button(this, "Not done"); notDone.setOnClickListener(v -> notDoneTask(next)); row.addView(notDone);
+        row.addView(done); row.addView(snooze); Button dismiss = AndroidUi.button(this, "Dismiss"); dismiss.setOnClickListener(v -> dismissTask(next)); row.addView(dismiss); Button carry = AndroidUi.button(this, "Carry to next"); carry.setOnClickListener(v -> carryTask(next)); row.addView(carry); Button skip = AndroidUi.button(this, "Skip"); skip.setOnClickListener(v -> skipTask(next)); row.addView(skip); Button notDone = AndroidUi.button(this, "Not done"); notDone.setOnClickListener(v -> notDoneTask(next)); row.addView(notDone);
         hero.addView(row);
         root.addView(hero);
         root.addView(AndroidUi.section(this, "Upcoming"));
@@ -196,7 +197,7 @@ public class MainActivity extends Activity {
         box.addView(AndroidUi.text(this, t.title, 19, true, t.enabled ? AndroidUi.INK : AndroidUi.MUTED));
         box.addView(AndroidUi.body(this, (t.enabled ? "Enabled" : "Disabled") + " · " + t.repeatSummary() + " · selected " + String.format(Locale.US, "%02d:%02d", t.hour, t.minute) + " · next " + new SimpleDateFormat("EEE HH:mm", Locale.US).format(next.getTime()) + " · snooze " + t.defaultSnoozeMinutes + " min"));
         if (!t.enabled) box.addView(AndroidUi.small(this, "Actions disabled: this task is not scheduled. Use Edit schedule to enable it."));
-        box.addView(AndroidUi.small(this, "History totals: completed " + t.completedCount + " · dismissed " + t.dismissedCount + " · not completed " + t.missedCount + " · current snoozes " + t.openSnoozeCount));
+        box.addView(AndroidUi.small(this, "History totals: completed " + t.completedCount + " · dismissed " + t.dismissedCount + " · not completed " + t.missedCount + " · current snoozes " + t.openSnoozeCount + " · stack pending " + t.pendingStackCount));
         if (t.notes != null && !t.notes.trim().isEmpty()) box.addView(AndroidUi.small(this, t.notes));
         LinearLayout primary = new LinearLayout(this);
         primary.setOrientation(LinearLayout.HORIZONTAL);
@@ -212,6 +213,10 @@ public class MainActivity extends Activity {
         dismiss.setEnabled(t.enabled);
         dismiss.setOnClickListener(v -> dismissTask(t));
         primary.addView(dismiss);
+        Button carry = AndroidUi.button(this, "Carry to next");
+        carry.setEnabled(t.enabled);
+        carry.setOnClickListener(v -> carryTask(t));
+        primary.addView(carry);
         Button skip = AndroidUi.button(this, "Skip");
         skip.setEnabled(t.enabled);
         skip.setOnClickListener(v -> skipTask(t));
@@ -250,6 +255,7 @@ public class MainActivity extends Activity {
         card.addView(summaryRow("Due time", String.format(Locale.US, "%02d:%02d", draft.hour, draft.minute), "Choose due time", v -> showTimePicker(title, notes)));
         card.addView(summaryRow("Repeat", draft.repeatSummary(), "Choose repeat mode", v -> showRepeatPicker(title, notes)));
         card.addView(summaryRow("Snooze", draft.defaultSnoozeMinutes + " minutes", "Choose snooze", v -> showSnoozePicker(title, notes)));
+        card.addView(summaryRow("Missed and dismissed stacking", draft.stackSummary(), "Choose stacking", v -> showStackPicker(title, notes)));
         CheckBox enabled = new CheckBox(this); enabled.setText("Enabled and scheduled"); enabled.setChecked(draft.enabled); card.addView(enabled);
         TextView validation = AndroidUi.small(this, "Save is enabled when the task has a name and a snooze duration of at least one minute.");
         card.addView(validation);
@@ -300,7 +306,7 @@ public class MainActivity extends Activity {
                 if (ReminderTask.REPEAT_MONTHLY.equals(draft.repeatMode) && draft.dayOfMonth < 1) draft.dayOfMonth = Calendar.getInstance().get(Calendar.DAY_OF_MONTH);
                 if (ReminderTask.REPEAT_EVERY_N_DAYS.equals(draft.repeatMode) && draft.intervalDays < 1) draft.intervalDays = 1;
                 if (ReminderTask.REPEAT_EVERY_N_HOURS.equals(draft.repeatMode) && draft.intervalHours < 1) draft.intervalHours = 1;
-                if (ReminderTask.REPEAT_CUSTOM_INTERVAL.equals(draft.repeatMode) && draft.intervalDays == 0 && draft.intervalHours == 0 && draft.intervalMinutes == 0) draft.intervalHours = 1;
+                if (ReminderTask.REPEAT_CUSTOM_INTERVAL.equals(draft.repeatMode)) { draft.intervalDays = 0; draft.intervalHours = 0; draft.intervalMinutes = 15; }
                 feedback = "Repeat pattern selected: " + draft.repeatSummary();
                 dialog.dismiss();
                 if (ReminderTask.REPEAT_WEEKLY.equals(draft.repeatMode)) showWeekdayPicker(title, notes);
@@ -380,6 +386,24 @@ public class MainActivity extends Activity {
                 } catch (Exception e) { feedback = "Cannot use interval: enter whole numbers only."; }
                 render();
             })
+            .show();
+    }
+
+
+    private void showStackPicker(EditText title, EditText notes) {
+        captureDraft(title, notes);
+        String[] choices = new String[]{"Do not carry missed/dismissed forward", "Carry missed/dismissed forward", "Show both dismiss buttons in notification", "Hide carry-forward notification button"};
+        boolean[] checked = new boolean[]{!draft.stackMissedOccurrences, draft.stackMissedOccurrences, draft.showCarryOverDismissAction, !draft.showCarryOverDismissAction};
+        new AlertDialog.Builder(this)
+            .setTitle("Missed and dismissed stacking")
+            .setMultiChoiceItems(choices, checked, (dialog, which, isChecked) -> {
+                if (which == 0 && isChecked) draft.stackMissedOccurrences = false;
+                if (which == 1 && isChecked) draft.stackMissedOccurrences = true;
+                if (which == 2 && isChecked) draft.showCarryOverDismissAction = true;
+                if (which == 3 && isChecked) draft.showCarryOverDismissAction = false;
+            })
+            .setPositiveButton("Use stacking settings", (dialog, which) -> { feedback = "Stacking selected: " + draft.stackSummary(); render(); })
+            .setNegativeButton("Cancel", null)
             .show();
     }
 
@@ -511,6 +535,20 @@ public class MainActivity extends Activity {
     }
 
 
+
+    private void carryTask(ReminderTask t) {
+        ReminderScheduler.cancelTask(this, t.id);
+        t.pendingStackCount += 1;
+        t.dismissedCount += 1;
+        store.appendHistory(t.id, "carried_forward_manual", "Carried this occurrence to the next event · due " + new Date(t.openOccurrenceDueAt) + " · pending stack " + t.pendingStackCount);
+        t.openOccurrenceDueAt = 0;
+        t.openSnoozeCount = 0;
+        store.upsert(t);
+        if (!ReminderTask.REPEAT_ONCE.equals(t.repeatMode) && t.enabled) ReminderScheduler.scheduleTask(this, t, true);
+        feedback = "Carried to next occurrence. Pending stack: " + t.pendingStackCount;
+        render();
+    }
+
     private void skipTask(ReminderTask t) {
         ReminderScheduler.cancelTask(this, t.id);
         t.dismissedCount += 1;
@@ -556,7 +594,7 @@ public class MainActivity extends Activity {
 
     private ReminderTask copyTask(ReminderTask t) {
         ReminderTask c = new ReminderTask();
-        c.id = t.id; c.title = t.title; c.notes = t.notes; c.hour = t.hour; c.minute = t.minute; c.daily = t.daily; c.enabled = t.enabled; c.defaultSnoozeMinutes = t.defaultSnoozeMinutes; c.createdAt = t.createdAt; c.lastScheduledAt = t.lastScheduledAt; c.repeatMode = t.repeatMode; c.weekdaysMask = t.weekdaysMask; c.dayOfMonth = t.dayOfMonth; c.intervalDays = t.intervalDays; c.intervalHours = t.intervalHours; c.intervalMinutes = t.intervalMinutes; c.lastDueAt = t.lastDueAt; c.openOccurrenceDueAt = t.openOccurrenceDueAt; c.openSnoozeCount = t.openSnoozeCount; c.completedCount = t.completedCount; c.dismissedCount = t.dismissedCount; c.missedCount = t.missedCount;
+        c.id = t.id; c.title = t.title; c.notes = t.notes; c.hour = t.hour; c.minute = t.minute; c.daily = t.daily; c.enabled = t.enabled; c.defaultSnoozeMinutes = t.defaultSnoozeMinutes; c.createdAt = t.createdAt; c.lastScheduledAt = t.lastScheduledAt; c.repeatMode = t.repeatMode; c.weekdaysMask = t.weekdaysMask; c.dayOfMonth = t.dayOfMonth; c.intervalDays = t.intervalDays; c.intervalHours = t.intervalHours; c.intervalMinutes = t.intervalMinutes; c.lastDueAt = t.lastDueAt; c.openOccurrenceDueAt = t.openOccurrenceDueAt; c.openSnoozeCount = t.openSnoozeCount; c.completedCount = t.completedCount; c.dismissedCount = t.dismissedCount; c.missedCount = t.missedCount; c.stackMissedOccurrences = t.stackMissedOccurrences; c.pendingStackCount = t.pendingStackCount; c.showCarryOverDismissAction = t.showCarryOverDismissAction;
         return c;
     }
 

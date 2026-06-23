@@ -36,6 +36,9 @@ public class ReminderTask {
     public long completedCount;
     public long dismissedCount;
     public long missedCount;
+    public boolean stackMissedOccurrences;
+    public int pendingStackCount;
+    public boolean showCarryOverDismissAction;
 
     public ReminderTask() {
         id = System.currentTimeMillis();
@@ -59,7 +62,13 @@ public class ReminderTask {
         openSnoozeCount = 0;
         completedCount = 0;
         dismissedCount = 0;
+        stackMissedOccurrences = false;
+        pendingStackCount = 0;
+        showCarryOverDismissAction = true;
         missedCount = 0;
+        stackMissedOccurrences = false;
+        pendingStackCount = 0;
+        showCarryOverDismissAction = true;
     }
 
     public JSONObject toJson() throws Exception {
@@ -86,6 +95,9 @@ public class ReminderTask {
         o.put("completedCount", completedCount);
         o.put("dismissedCount", dismissedCount);
         o.put("missedCount", missedCount);
+        o.put("stackMissedOccurrences", stackMissedOccurrences);
+        o.put("pendingStackCount", pendingStackCount);
+        o.put("showCarryOverDismissAction", showCarryOverDismissAction);
         return o;
     }
 
@@ -113,6 +125,9 @@ public class ReminderTask {
         t.completedCount = o.optLong("completedCount", 0);
         t.dismissedCount = o.optLong("dismissedCount", 0);
         t.missedCount = o.optLong("missedCount", 0);
+        t.stackMissedOccurrences = o.optBoolean("stackMissedOccurrences", false);
+        t.pendingStackCount = o.optInt("pendingStackCount", 0);
+        t.showCarryOverDismissAction = o.optBoolean("showCarryOverDismissAction", true);
         return t;
     }
 
@@ -125,6 +140,12 @@ public class ReminderTask {
         if (REPEAT_EVERY_N_HOURS.equals(repeatMode)) return "Every " + Math.max(1, intervalHours) + " hour(s)";
         if (REPEAT_CUSTOM_INTERVAL.equals(repeatMode)) return "Every " + intervalSummary();
         return "One-shot";
+    }
+
+    public String stackSummary() {
+        String base = stackMissedOccurrences ? "Carry missed/dismissed forward" : "Do not carry missed/dismissed forward";
+        if (pendingStackCount > 0) base += " · pending " + pendingStackCount;
+        return base;
     }
 
     private String intervalSummary() {
