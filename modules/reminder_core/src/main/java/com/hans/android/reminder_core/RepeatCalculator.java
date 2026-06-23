@@ -20,9 +20,22 @@ public final class RepeatCalculator {
 
     private static Calendar afterInterval(ReminderTask task, long nowMillis, int days, int hours, int minutes) {
         Calendar c = Calendar.getInstance();
-        long anchor = task.lastDueAt > 0 ? task.lastDueAt : task.createdAt;
-        if (anchor <= 0) anchor = nowMillis;
-        c.setTimeInMillis(anchor);
+        if (task.lastDueAt > 0) {
+            c.setTimeInMillis(task.lastDueAt);
+        } else {
+            c.setTimeInMillis(nowMillis);
+            c.set(Calendar.HOUR_OF_DAY, task.hour);
+            c.set(Calendar.MINUTE, task.minute);
+            c.set(Calendar.SECOND, 0);
+            c.set(Calendar.MILLISECOND, 0);
+            if (c.getTimeInMillis() <= nowMillis) {
+                if (days != 0) c.add(Calendar.DAY_OF_YEAR, Math.max(1, days));
+                else if (hours != 0) c.add(Calendar.HOUR_OF_DAY, Math.max(1, hours));
+                else if (minutes != 0) c.add(Calendar.MINUTE, Math.max(1, minutes));
+                else c.add(Calendar.HOUR_OF_DAY, 1);
+            }
+            return c;
+        }
         if (days == 0 && hours == 0 && minutes == 0) hours = 1;
         while (c.getTimeInMillis() <= nowMillis) {
             if (days != 0) c.add(Calendar.DAY_OF_YEAR, days);

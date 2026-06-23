@@ -155,7 +155,7 @@ public class MainActivity extends Activity {
         Calendar c = RepeatCalculator.nextDue(next, System.currentTimeMillis());
         hero.addView(AndroidUi.text(this, "Next reminder", 14, true, AndroidUi.BLUE));
         hero.addView(AndroidUi.text(this, next.title, 24, true, AndroidUi.INK));
-        hero.addView(AndroidUi.body(this, new SimpleDateFormat("EEEE HH:mm", Locale.US).format(c.getTime()) + " · snooze " + next.defaultSnoozeMinutes + " min"));
+        hero.addView(AndroidUi.body(this, "selected " + String.format(Locale.US, "%02d:%02d", next.hour, next.minute) + " · next " + new SimpleDateFormat("EEEE HH:mm", Locale.US).format(c.getTime()) + " · snooze " + next.defaultSnoozeMinutes + " min"));
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         Button done = AndroidUi.button(this, "Complete today");
@@ -194,7 +194,7 @@ public class MainActivity extends Activity {
         LinearLayout box = AndroidUi.card(this);
         Calendar next = RepeatCalculator.nextDue(t, System.currentTimeMillis());
         box.addView(AndroidUi.text(this, t.title, 19, true, t.enabled ? AndroidUi.INK : AndroidUi.MUTED));
-        box.addView(AndroidUi.body(this, (t.enabled ? "Enabled" : "Disabled") + " · " + t.repeatSummary() + " · " + new SimpleDateFormat("EEE HH:mm", Locale.US).format(next.getTime()) + " · snooze " + t.defaultSnoozeMinutes + " min"));
+        box.addView(AndroidUi.body(this, (t.enabled ? "Enabled" : "Disabled") + " · " + t.repeatSummary() + " · selected " + String.format(Locale.US, "%02d:%02d", t.hour, t.minute) + " · next " + new SimpleDateFormat("EEE HH:mm", Locale.US).format(next.getTime()) + " · snooze " + t.defaultSnoozeMinutes + " min"));
         if (!t.enabled) box.addView(AndroidUi.small(this, "Actions disabled: this task is not scheduled. Use Edit schedule to enable it."));
         box.addView(AndroidUi.small(this, "History totals: completed " + t.completedCount + " · dismissed " + t.dismissedCount + " · not completed " + t.missedCount + " · current snoozes " + t.openSnoozeCount));
         if (t.notes != null && !t.notes.trim().isEmpty()) box.addView(AndroidUi.small(this, t.notes));

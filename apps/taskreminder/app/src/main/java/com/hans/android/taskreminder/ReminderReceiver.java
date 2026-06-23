@@ -111,12 +111,12 @@ public class ReminderReceiver extends BroadcastReceiver {
         Intent notDone = new Intent(context, ReminderReceiver.class).setAction(ReminderScheduler.ACTION_NOT_DONE);
         notDone.putExtra(ReminderScheduler.EXTRA_TASK_ID, task.id);
         PendingIntent notDonePi = PendingIntent.getBroadcast(context, (int)(task.id % 1000000000L) + 50, notDone, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        String detail = task.notes == null || task.notes.isEmpty() ? task.repeatSummary() : task.notes;
+        String detail = task.notes == null ? "" : task.notes.trim();
+        String content = detail.isEmpty() ? "Due now" : detail;
         NotificationCompat.Builder b = new NotificationCompat.Builder(context, ReminderScheduler.CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_popup_reminder)
             .setContentTitle(task.title)
-            .setContentText("Due now · " + task.repeatSummary() + " · snooze " + task.defaultSnoozeMinutes + " min")
-            .setStyle(new NotificationCompat.BigTextStyle().bigText(detail + "\nSnoozed this occurrence: " + task.openSnoozeCount + " time(s).\nActions: complete, snooze, dismiss, skip this occurrence, or mark not done. Open the app if Android hides some buttons."))
+            .setContentText(content)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
             .setAutoCancel(false)
@@ -127,6 +127,7 @@ public class ReminderReceiver extends BroadcastReceiver {
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Dismiss", dismissPi)
             .addAction(android.R.drawable.ic_menu_upload, "Skip", skipPi)
             .addAction(android.R.drawable.ic_menu_delete, "Not done", notDonePi);
+        if (!detail.isEmpty()) b.setStyle(new NotificationCompat.BigTextStyle().bigText(detail));
         if (Build.VERSION.SDK_INT < 33 || context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
             NotificationManagerCompat.from(context).notify((int)(task.id % 1000000000L), b.build());
         }
