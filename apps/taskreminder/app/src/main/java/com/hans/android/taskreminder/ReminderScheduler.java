@@ -17,6 +17,7 @@ public final class ReminderScheduler {
     public static final String ACTION_MISSED = "com.hans.android.taskreminder.MISSED";
     public static final String EXTRA_TASK_ID = "task_id";
     public static final String EXTRA_SNOOZE_MINUTES = "snooze_minutes";
+    public static final String EXTRA_OPEN_SNOOZE_CHOICE = "open_snooze_choice";
     public static final String CHANNEL_ID = "task_reminders";
 
     private ReminderScheduler() {}

@@ -32,11 +32,28 @@ public class MainActivity extends Activity {
         ReminderScheduler.ensureChannel(this);
         requestPermissionsIfNeeded();
         render();
+        handleLaunchIntent(getIntent());
     }
 
     @Override protected void onResume() {
         super.onResume();
         if (root != null) render();
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (root != null) render();
+        handleLaunchIntent(intent);
+    }
+
+    private void handleLaunchIntent(Intent intent) {
+        if (intent == null || !intent.getBooleanExtra(ReminderScheduler.EXTRA_OPEN_SNOOZE_CHOICE, false)) return;
+        long id = intent.getLongExtra(ReminderScheduler.EXTRA_TASK_ID, -1);
+        ReminderTask task = store.findTask(id);
+        intent.removeExtra(ReminderScheduler.EXTRA_OPEN_SNOOZE_CHOICE);
+        intent.removeExtra(ReminderScheduler.EXTRA_TASK_ID);
+        if (task != null) showSnoozeNowDialog(task);
     }
 
     private void requestPermissionsIfNeeded() {
@@ -111,15 +128,14 @@ public class MainActivity extends Activity {
         ArrayList<ReminderTask> open = new ArrayList<>();
         for (ReminderTask t : store.loadTasks()) if (t.enabled && t.openOccurrenceDueAt > 0) open.add(t);
         if (open.isEmpty()) return;
-        root.addView(AndroidUi.section(this, "Active occurrence actions"));
+        root.addView(AndroidUi.section(this, "Active reminder"));
         for (ReminderTask t : open) {
             LinearLayout box = AndroidUi.banner(this, AndroidUi.ORANGE);
             box.addView(AndroidUi.text(this, t.title, 20, true, AndroidUi.INK));
-            box.addView(AndroidUi.body(this, "Open occurrence due " + new SimpleDateFormat("EEE HH:mm", Locale.US).format(new Date(t.openOccurrenceDueAt)) + " · snoozed " + t.openSnoozeCount + " time(s). These actions are always available here even if Android hides notification buttons."));
+            box.addView(AndroidUi.body(this, "Due " + new SimpleDateFormat("EEE HH:mm", Locale.US).format(new Date(t.openOccurrenceDueAt)) + " · snoozed " + t.openSnoozeCount + " · carried " + t.pendingStackCount));
             box.addView(actionButton("Complete now", "Log this occurrence as done and schedule the next one.", v -> completeTask(t)));
-            box.addView(actionButton("Snooze " + t.defaultSnoozeMinutes + " min", "Keep this occurrence open and remind again after the configured snooze.", v -> snoozeTask(t)));
+            box.addView(actionButton(snoozeActionTitle(t), t.chooseSnoozeEachTime() ? "Choose the snooze duration now." : "Keep this occurrence open and remind again after the configured snooze.", v -> handleSnooze(t)));
             box.addView(actionButton("Choose not-done outcome", "Dismiss, carry forward, skip, or mark not done with a clear consequence.", v -> showOccurrenceOutcomeDialog(t)));
-            box.addView(actionButton("Open history", "Show the audit trail for completed, snoozed, dismissed, carried, and missed events.", v -> { mode = MODE_HISTORY; render(); }));
             root.addView(box);
         }
     }
@@ -137,13 +153,13 @@ public class MainActivity extends Activity {
 
     private void showOccurrenceOutcomeDialog(ReminderTask t) {
         String[] choices = new String[]{
-            "Dismiss only",
-            "Carry to next occurrence",
-            "Skip this occurrence",
-            "Mark not done"
+            "Dismiss only — close this occurrence and do not carry it forward",
+            "Carry to next occurrence — stack one more pending occurrence",
+            "Skip this occurrence — intentionally skip it this time",
+            "Mark not done — count it as missed" + (t.stackMissedOccurrences ? " and carry it forward" : "")
         };
         new AlertDialog.Builder(this)
-            .setTitle("What should happen to this occurrence?")
+            .setTitle("Choose not-done outcome")
             .setItems(choices, (dialog, which) -> {
                 if (which == 0) dismissTask(t);
                 if (which == 1) carryTask(t);
@@ -181,7 +197,7 @@ public class MainActivity extends Activity {
         hero.addView(AndroidUi.text(this, next.title, 24, true, AndroidUi.INK));
         hero.addView(AndroidUi.body(this, "selected " + String.format(Locale.US, "%02d:%02d", next.hour, next.minute) + " · next " + new SimpleDateFormat("EEEE HH:mm", Locale.US).format(c.getTime()) + " · snooze " + next.defaultSnoozeMinutes + " min"));
         hero.addView(actionButton("Complete now", "Log this occurrence as done.", v -> completeTask(next)));
-        hero.addView(actionButton("Snooze " + next.defaultSnoozeMinutes + " min", "Remind again after the configured snooze.", v -> snoozeTask(next)));
+        hero.addView(actionButton(snoozeActionTitle(next), next.chooseSnoozeEachTime() ? "Choose the snooze duration when you press it." : "Remind again after the configured snooze.", v -> handleSnooze(next)));
         hero.addView(actionButton("Choose not-done outcome", "Dismiss, carry forward, skip, or mark not done.", v -> showOccurrenceOutcomeDialog(next)));
         root.addView(hero);
         root.addView(AndroidUi.section(this, "Upcoming"));
@@ -219,7 +235,7 @@ public class MainActivity extends Activity {
         if (t.notes != null && !t.notes.trim().isEmpty()) box.addView(AndroidUi.small(this, t.notes));
         if (t.enabled) {
             box.addView(actionButton("Complete now", "Log this occurrence as done.", v -> completeTask(t)));
-            box.addView(actionButton("Snooze", "Remind again after " + t.defaultSnoozeMinutes + " minutes.", v -> snoozeTask(t)));
+            box.addView(actionButton(snoozeActionTitle(t), t.chooseSnoozeEachTime() ? "Choose the snooze duration when you press it." : "Remind again after " + t.defaultSnoozeMinutes + " minutes.", v -> handleSnooze(t)));
             box.addView(actionButton("Choose not-done outcome", "Dismiss, carry forward, skip, or mark not done.", v -> showOccurrenceOutcomeDialog(t)));
         } else {
             box.addView(AndroidUi.small(this, "Actions disabled: enable and schedule this task first."));
@@ -245,8 +261,9 @@ public class MainActivity extends Activity {
         EditText notes = input(draft.notes); notes.setMinLines(3); card.addView(label("Notification notes")); card.addView(notes);
         card.addView(summaryRow("Due time", String.format(Locale.US, "%02d:%02d", draft.hour, draft.minute), "Choose due time", v -> showTimePicker(title, notes)));
         card.addView(summaryRow("Repeat", draft.repeatSummary(), "Choose repeat mode", v -> showRepeatPicker(title, notes)));
-        card.addView(summaryRow("Snooze", draft.defaultSnoozeMinutes + " minutes", "Choose snooze", v -> showSnoozePicker(title, notes)));
+        card.addView(summaryRow("Snooze behavior", draft.snoozeSummary(), "Choose snooze behavior", v -> showSnoozeBehaviorPicker(title, notes)));
         card.addView(summaryRow("Missed and dismissed stacking", draft.stackSummary(), "Choose stacking", v -> showStackPicker(title, notes)));
+        card.addView(summaryRow("Notification actions", draft.notificationActionSummary(), "Choose notification actions", v -> showNotificationActionPicker(title, notes)));
         CheckBox enabled = new CheckBox(this); enabled.setText("Enabled and scheduled"); enabled.setChecked(draft.enabled); card.addView(enabled);
         TextView validation = AndroidUi.small(this, "Save is enabled when the task has a name and a snooze duration of at least one minute.");
         card.addView(validation);
@@ -384,53 +401,93 @@ public class MainActivity extends Activity {
     private void showStackPicker(EditText title, EditText notes) {
         captureDraft(title, notes);
         String[] choices = new String[]{
-            "Do not carry missed or dismissed occurrences forward",
-            "Carry missed or dismissed occurrences forward",
-            "Show Carry to next as a notification action",
-            "Hide Carry to next from notification actions"
+            "Do not carry missed/not-done forward automatically",
+            "Carry missed/not-done forward automatically"
         };
+        int checked = draft.stackMissedOccurrences ? 1 : 0;
         new AlertDialog.Builder(this)
-            .setTitle("Missed and dismissed stacking")
-            .setItems(choices, (dialog, which) -> {
-                if (which == 0) draft.stackMissedOccurrences = false;
-                if (which == 1) draft.stackMissedOccurrences = true;
-                if (which == 2) draft.showCarryOverDismissAction = true;
-                if (which == 3) draft.showCarryOverDismissAction = false;
+            .setTitle("Choose stacking behavior")
+            .setSingleChoiceItems(choices, checked, (dialog, which) -> {
+                draft.stackMissedOccurrences = which == 1;
                 feedback = "Stacking selected: " + draft.stackSummary();
+                dialog.dismiss();
                 render();
             })
             .setNegativeButton("Cancel", null)
             .show();
     }
 
-    private void showSnoozePicker(EditText title, EditText notes) {
+
+
+    private void showNotificationActionPicker(EditText title, EditText notes) {
         captureDraft(title, notes);
-        String[] choices = new String[]{"5 minutes", "10 minutes", "15 minutes", "30 minutes", "60 minutes", "Custom"};
+        String[] choices = new String[]{
+            "Fast: Complete · Snooze · Dismiss",
+            "Dismiss choice: Complete · Dismiss · Carry to next",
+            "Snooze choice: Complete · Choose snooze · Dismiss"
+        };
+        int checked = 0;
+        if (ReminderTask.ACTION_PROFILE_DISMISS_CHOICE.equals(draft.notificationActionProfile)) checked = 1;
+        if (ReminderTask.ACTION_PROFILE_SNOOZE_CHOICE.equals(draft.notificationActionProfile)) checked = 2;
         new AlertDialog.Builder(this)
-            .setTitle("Choose default snooze")
-            .setItems(choices, (dialog, which) -> {
-                int[] vals = new int[]{5,10,15,30,60};
-                if (which < vals.length) { draft.defaultSnoozeMinutes = vals[which]; feedback = "Snooze selected: " + vals[which] + " minutes"; render(); }
-                else showCustomSnooze();
+            .setTitle("Choose notification actions")
+            .setSingleChoiceItems(choices, checked, (dialog, which) -> {
+                if (which == 0) draft.notificationActionProfile = ReminderTask.ACTION_PROFILE_FAST;
+                if (which == 1) draft.notificationActionProfile = ReminderTask.ACTION_PROFILE_DISMISS_CHOICE;
+                if (which == 2) draft.notificationActionProfile = ReminderTask.ACTION_PROFILE_SNOOZE_CHOICE;
+                feedback = "Notification actions selected: " + draft.notificationActionSummary();
+                dialog.dismiss();
+                render();
             })
             .setNegativeButton("Cancel", null)
             .show();
     }
 
-    private void showCustomSnooze() {
+    private void showSnoozeBehaviorPicker(EditText title, EditText notes) {
+        captureDraft(title, notes);
+        String[] choices = new String[]{"Fixed 5 minutes", "Fixed 10 minutes", "Fixed 15 minutes", "Fixed 30 minutes", "Fixed 60 minutes", "Fixed custom minutes", "Ask every time I snooze"};
+        int checked = draft.chooseSnoozeEachTime() ? 6 : -1;
+        int[] vals = new int[]{5,10,15,30,60};
+        for (int i = 0; i < vals.length; i++) if (!draft.chooseSnoozeEachTime() && draft.defaultSnoozeMinutes == vals[i]) checked = i;
+        if (checked < 0) checked = 5;
+        new AlertDialog.Builder(this)
+            .setTitle("Choose snooze behavior")
+            .setSingleChoiceItems(choices, checked, (dialog, which) -> {
+                if (which < vals.length) {
+                    draft.snoozeMode = ReminderTask.SNOOZE_FIXED;
+                    draft.defaultSnoozeMinutes = vals[which];
+                    feedback = "Snooze selected: fixed " + draft.defaultSnoozeMinutes + " minutes";
+                    dialog.dismiss();
+                    render();
+                } else if (which == 5) {
+                    dialog.dismiss();
+                    showCustomDefaultSnooze();
+                } else {
+                    draft.snoozeMode = ReminderTask.SNOOZE_CHOOSE_EACH_TIME;
+                    feedback = "Snooze selected: ask every time";
+                    dialog.dismiss();
+                    render();
+                }
+            })
+            .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    private void showCustomDefaultSnooze() {
         final EditText input = new EditText(this);
         input.setText(String.valueOf(draft.defaultSnoozeMinutes));
         input.setSingleLine(true);
         input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         new AlertDialog.Builder(this)
-            .setTitle("Custom snooze minutes")
-            .setMessage("Enter a whole number of minutes. This affects future Snooze actions for this task.")
+            .setTitle("Fixed snooze minutes")
+            .setMessage("Enter the fixed snooze duration for this task.")
             .setView(input)
             .setNegativeButton("Cancel", null)
-            .setPositiveButton("Use this snooze", (d, w) -> {
+            .setPositiveButton("Use fixed snooze", (d, w) -> {
                 try {
+                    draft.snoozeMode = ReminderTask.SNOOZE_FIXED;
                     draft.defaultSnoozeMinutes = Math.max(1, Integer.parseInt(input.getText().toString().trim()));
-                    feedback = "Custom snooze selected: " + draft.defaultSnoozeMinutes + " minutes";
+                    feedback = "Snooze selected: fixed " + draft.defaultSnoozeMinutes + " minutes";
                 } catch (Exception e) {
                     feedback = "Cannot use custom snooze: enter a whole number of minutes.";
                 }
@@ -511,10 +568,53 @@ public class MainActivity extends Activity {
         render();
     }
 
-    private void snoozeTask(ReminderTask t) {
-        ReminderScheduler.scheduleSnooze(this, t, t.defaultSnoozeMinutes);
-        feedback = "Snoozed " + t.title + " for " + t.defaultSnoozeMinutes + " minutes.";
+
+    private String snoozeActionTitle(ReminderTask t) {
+        return t.chooseSnoozeEachTime() ? "Choose snooze" : "Snooze " + t.defaultSnoozeMinutes + " min";
+    }
+
+    private void handleSnooze(ReminderTask t) {
+        if (t.chooseSnoozeEachTime()) showSnoozeNowDialog(t);
+        else snoozeTask(t, t.defaultSnoozeMinutes);
+    }
+
+    private void snoozeTask(ReminderTask t, int minutes) {
+        ReminderScheduler.scheduleSnooze(this, t, minutes);
+        feedback = "Snoozed " + t.title + " for " + Math.max(1, minutes) + " minutes.";
         render();
+    }
+
+    private void showSnoozeNowDialog(ReminderTask t) {
+        String[] choices = new String[]{"5 minutes", "10 minutes", "15 minutes", "30 minutes", "60 minutes", "Custom"};
+        int[] vals = new int[]{5,10,15,30,60};
+        new AlertDialog.Builder(this)
+            .setTitle("Snooze this occurrence")
+            .setItems(choices, (dialog, which) -> {
+                if (which < vals.length) snoozeTask(t, vals[which]);
+                else showCustomSnoozeNow(t);
+            })
+            .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    private void showCustomSnoozeNow(ReminderTask t) {
+        final EditText input = new EditText(this);
+        input.setText(String.valueOf(t.defaultSnoozeMinutes));
+        input.setSingleLine(true);
+        input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        new AlertDialog.Builder(this)
+            .setTitle("Snooze minutes")
+            .setView(input)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Snooze", (d, w) -> {
+                try { snoozeTask(t, Math.max(1, Integer.parseInt(input.getText().toString().trim()))); }
+                catch (Exception e) { feedback = "Cannot snooze: enter whole minutes."; render(); }
+            })
+            .show();
+    }
+
+    private void snoozeTask(ReminderTask t) {
+        snoozeTask(t, t.defaultSnoozeMinutes);
     }
 
     private void dismissTask(ReminderTask t) {
@@ -561,7 +661,8 @@ public class MainActivity extends Activity {
     private void notDoneTask(ReminderTask t) {
         ReminderScheduler.cancelTask(this, t.id);
         t.missedCount += 1;
-        store.appendHistory(t.id, "not_done_manual", "Marked not done from app · due " + new Date(t.openOccurrenceDueAt) + " · snoozes " + t.openSnoozeCount);
+        if (t.stackMissedOccurrences) t.pendingStackCount += 1;
+        store.appendHistory(t.id, "not_done_manual", "Marked not done from app · due " + new Date(t.openOccurrenceDueAt) + " · snoozes " + t.openSnoozeCount + (t.stackMissedOccurrences ? " · carried to stack " + t.pendingStackCount : ""));
         t.openOccurrenceDueAt = 0;
         t.openSnoozeCount = 0;
         if (ReminderTask.REPEAT_ONCE.equals(t.repeatMode)) t.enabled = false;
@@ -590,7 +691,7 @@ public class MainActivity extends Activity {
 
     private ReminderTask copyTask(ReminderTask t) {
         ReminderTask c = new ReminderTask();
-        c.id = t.id; c.title = t.title; c.notes = t.notes; c.hour = t.hour; c.minute = t.minute; c.daily = t.daily; c.enabled = t.enabled; c.defaultSnoozeMinutes = t.defaultSnoozeMinutes; c.createdAt = t.createdAt; c.lastScheduledAt = t.lastScheduledAt; c.repeatMode = t.repeatMode; c.weekdaysMask = t.weekdaysMask; c.dayOfMonth = t.dayOfMonth; c.intervalDays = t.intervalDays; c.intervalHours = t.intervalHours; c.intervalMinutes = t.intervalMinutes; c.lastDueAt = t.lastDueAt; c.openOccurrenceDueAt = t.openOccurrenceDueAt; c.openSnoozeCount = t.openSnoozeCount; c.completedCount = t.completedCount; c.dismissedCount = t.dismissedCount; c.missedCount = t.missedCount; c.stackMissedOccurrences = t.stackMissedOccurrences; c.pendingStackCount = t.pendingStackCount; c.showCarryOverDismissAction = t.showCarryOverDismissAction;
+        c.id = t.id; c.title = t.title; c.notes = t.notes; c.hour = t.hour; c.minute = t.minute; c.daily = t.daily; c.enabled = t.enabled; c.defaultSnoozeMinutes = t.defaultSnoozeMinutes; c.createdAt = t.createdAt; c.lastScheduledAt = t.lastScheduledAt; c.repeatMode = t.repeatMode; c.weekdaysMask = t.weekdaysMask; c.dayOfMonth = t.dayOfMonth; c.intervalDays = t.intervalDays; c.intervalHours = t.intervalHours; c.intervalMinutes = t.intervalMinutes; c.lastDueAt = t.lastDueAt; c.openOccurrenceDueAt = t.openOccurrenceDueAt; c.openSnoozeCount = t.openSnoozeCount; c.completedCount = t.completedCount; c.dismissedCount = t.dismissedCount; c.missedCount = t.missedCount; c.stackMissedOccurrences = t.stackMissedOccurrences; c.pendingStackCount = t.pendingStackCount; c.showCarryOverDismissAction = t.showCarryOverDismissAction; c.snoozeMode = t.snoozeMode; c.notificationActionProfile = t.notificationActionProfile;
         return c;
     }
 

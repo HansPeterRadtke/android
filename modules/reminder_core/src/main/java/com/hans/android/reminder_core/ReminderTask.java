@@ -13,6 +13,12 @@ public class ReminderTask {
     public static final String REPEAT_CUSTOM_INTERVAL = "custom_interval";
     public static final String REPEAT_ONCE = "once";
 
+    public static final String SNOOZE_FIXED = "fixed";
+    public static final String SNOOZE_CHOOSE_EACH_TIME = "choose_each_time";
+    public static final String ACTION_PROFILE_FAST = "fast";
+    public static final String ACTION_PROFILE_DISMISS_CHOICE = "dismiss_choice";
+    public static final String ACTION_PROFILE_SNOOZE_CHOICE = "snooze_choice";
+
     public long id;
     public String title;
     public String notes;
@@ -39,6 +45,8 @@ public class ReminderTask {
     public boolean stackMissedOccurrences;
     public int pendingStackCount;
     public boolean showCarryOverDismissAction;
+    public String snoozeMode;
+    public String notificationActionProfile;
 
     public ReminderTask() {
         id = System.currentTimeMillis();
@@ -66,6 +74,8 @@ public class ReminderTask {
         stackMissedOccurrences = false;
         pendingStackCount = 0;
         showCarryOverDismissAction = true;
+        snoozeMode = SNOOZE_FIXED;
+        notificationActionProfile = ACTION_PROFILE_FAST;
     }
 
     public JSONObject toJson() throws Exception {
@@ -95,6 +105,8 @@ public class ReminderTask {
         o.put("stackMissedOccurrences", stackMissedOccurrences);
         o.put("pendingStackCount", pendingStackCount);
         o.put("showCarryOverDismissAction", showCarryOverDismissAction);
+        o.put("snoozeMode", snoozeMode);
+        o.put("notificationActionProfile", notificationActionProfile);
         return o;
     }
 
@@ -125,6 +137,9 @@ public class ReminderTask {
         t.stackMissedOccurrences = o.optBoolean("stackMissedOccurrences", false);
         t.pendingStackCount = o.optInt("pendingStackCount", 0);
         t.showCarryOverDismissAction = o.optBoolean("showCarryOverDismissAction", true);
+        t.snoozeMode = o.optString("snoozeMode", SNOOZE_FIXED);
+        t.notificationActionProfile = o.optString("notificationActionProfile", ACTION_PROFILE_FAST);
+        if (t.notificationActionProfile == null || t.notificationActionProfile.trim().isEmpty()) t.notificationActionProfile = ACTION_PROFILE_FAST;
         return t;
     }
 
@@ -140,9 +155,23 @@ public class ReminderTask {
     }
 
     public String stackSummary() {
-        String base = stackMissedOccurrences ? "Carry missed and missed-like dismissals forward" : "Do not carry missed or dismissed occurrences forward";
+        String base = stackMissedOccurrences ? "Carry missed/not-done forward automatically" : "Dismiss/missed is gone unless Carry to next is chosen";
         if (pendingStackCount > 0) base += " · pending " + pendingStackCount;
         return base;
+    }
+
+    public boolean chooseSnoozeEachTime() {
+        return SNOOZE_CHOOSE_EACH_TIME.equals(snoozeMode);
+    }
+
+    public String snoozeSummary() {
+        return chooseSnoozeEachTime() ? "Ask every time" : "Fixed " + defaultSnoozeMinutes + " minutes";
+    }
+
+    public String notificationActionSummary() {
+        if (ACTION_PROFILE_DISMISS_CHOICE.equals(notificationActionProfile)) return "Complete · Dismiss · Carry to next";
+        if (ACTION_PROFILE_SNOOZE_CHOICE.equals(notificationActionProfile)) return "Complete · Choose snooze · Dismiss";
+        return chooseSnoozeEachTime() ? "Complete · Choose snooze · Dismiss" : "Complete · Snooze · Dismiss";
     }
 
     private String intervalSummary() {

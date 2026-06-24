@@ -57,7 +57,8 @@ public class ReminderReceiver extends BroadcastReceiver {
             NotificationManagerCompat.from(context).cancel((int)(id % 1000000000L));
             ReminderScheduler.cancelTask(context, id);
             task.missedCount += 1;
-            store.appendHistory(id, "not_done", "Marked not done manually for occurrence due " + new Date(task.openOccurrenceDueAt) + " after " + task.openSnoozeCount + " snooze(s)");
+            if (task.stackMissedOccurrences) task.pendingStackCount += 1;
+            store.appendHistory(id, "not_done", "Marked not done manually for occurrence due " + new Date(task.openOccurrenceDueAt) + " after " + task.openSnoozeCount + " snooze(s)" + (task.stackMissedOccurrences ? " · carried to stack " + task.pendingStackCount : ""));
             closeOccurrence(task);
             store.upsert(task);
             if (!ReminderTask.REPEAT_ONCE.equals(task.repeatMode) && task.enabled) ReminderScheduler.scheduleTask(context, task, true);
@@ -73,14 +74,16 @@ public class ReminderReceiver extends BroadcastReceiver {
             long now = System.currentTimeMillis();
             if (task.openOccurrenceDueAt > 0 && task.lastDueAt > task.openOccurrenceDueAt) {
                 task.missedCount += 1;
-                store.appendHistory(id, "auto_not_completed", "Previous occurrence due " + new Date(task.openOccurrenceDueAt) + " was still open when next reminder fired · snoozes " + task.openSnoozeCount);
+                if (task.stackMissedOccurrences) task.pendingStackCount += 1;
+                store.appendHistory(id, "auto_not_completed", "Previous occurrence due " + new Date(task.openOccurrenceDueAt) + " was still open when next reminder fired · snoozes " + task.openSnoozeCount + (task.stackMissedOccurrences ? " · carried to stack " + task.pendingStackCount : ""));
                 closeOccurrence(task);
             }
             if (intent.getIntExtra(ReminderScheduler.EXTRA_SNOOZE_MINUTES, 0) == 0) {
                 task.lastDueAt = now;
                 if (task.openOccurrenceDueAt > 0) {
                     task.missedCount += 1;
-                    store.appendHistory(id, "auto_not_completed", "Previous occurrence due " + new Date(task.openOccurrenceDueAt) + " was replaced by new occurrence · snoozes " + task.openSnoozeCount);
+                    if (task.stackMissedOccurrences) task.pendingStackCount += 1;
+                    store.appendHistory(id, "auto_not_completed", "Previous occurrence due " + new Date(task.openOccurrenceDueAt) + " was replaced by new occurrence · snoozes " + task.openSnoozeCount + (task.stackMissedOccurrences ? " · carried to stack " + task.pendingStackCount : ""));
                 }
                 task.openOccurrenceDueAt = now;
                 task.openSnoozeCount = 0;
@@ -120,15 +123,13 @@ public class ReminderReceiver extends BroadcastReceiver {
         snooze.putExtra(ReminderScheduler.EXTRA_TASK_ID, task.id);
         snooze.putExtra(ReminderScheduler.EXTRA_SNOOZE_MINUTES, task.defaultSnoozeMinutes);
         PendingIntent snoozePi = PendingIntent.getBroadcast(context, (int)(task.id % 1000000000L) + 20, snooze, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        Intent chooseSnooze = new Intent(context, MainActivity.class);
+        chooseSnooze.putExtra(ReminderScheduler.EXTRA_TASK_ID, task.id);
+        chooseSnooze.putExtra(ReminderScheduler.EXTRA_OPEN_SNOOZE_CHOICE, true);
+        PendingIntent chooseSnoozePi = PendingIntent.getActivity(context, (int)(task.id % 1000000000L) + 70, chooseSnooze, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Intent dismiss = new Intent(context, ReminderReceiver.class).setAction(ReminderScheduler.ACTION_DISMISS);
         dismiss.putExtra(ReminderScheduler.EXTRA_TASK_ID, task.id);
         PendingIntent dismissPi = PendingIntent.getBroadcast(context, (int)(task.id % 1000000000L) + 30, dismiss, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Intent skip = new Intent(context, ReminderReceiver.class).setAction(ReminderScheduler.ACTION_SKIP);
-        skip.putExtra(ReminderScheduler.EXTRA_TASK_ID, task.id);
-        PendingIntent skipPi = PendingIntent.getBroadcast(context, (int)(task.id % 1000000000L) + 40, skip, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Intent notDone = new Intent(context, ReminderReceiver.class).setAction(ReminderScheduler.ACTION_NOT_DONE);
-        notDone.putExtra(ReminderScheduler.EXTRA_TASK_ID, task.id);
-        PendingIntent notDonePi = PendingIntent.getBroadcast(context, (int)(task.id % 1000000000L) + 50, notDone, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Intent carry = new Intent(context, ReminderReceiver.class).setAction(ReminderScheduler.ACTION_CARRY_OVER);
         carry.putExtra(ReminderScheduler.EXTRA_TASK_ID, task.id);
         PendingIntent carryPi = PendingIntent.getBroadcast(context, (int)(task.id % 1000000000L) + 60, carry, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
@@ -143,12 +144,15 @@ public class ReminderReceiver extends BroadcastReceiver {
             .setAutoCancel(false)
             .setOngoing(false)
             .setContentIntent(openPi)
-            .addAction(android.R.drawable.checkbox_on_background, "Complete", completePi)
-            .addAction(android.R.drawable.ic_popup_reminder, "Snooze", snoozePi)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Dismiss", dismissPi)
-            .addAction(android.R.drawable.ic_menu_upload, "Skip", skipPi)
-            .addAction(android.R.drawable.ic_menu_delete, "Not done", notDonePi);
-        if (task.showCarryOverDismissAction) b.addAction(android.R.drawable.ic_menu_revert, "Carry to next", carryPi);
+            .addAction(android.R.drawable.checkbox_on_background, "Complete", completePi);
+        if (ReminderTask.ACTION_PROFILE_DISMISS_CHOICE.equals(task.notificationActionProfile)) {
+            b.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Dismiss", dismissPi);
+            b.addAction(android.R.drawable.ic_menu_revert, "Carry to next", carryPi);
+        } else {
+            boolean choose = task.chooseSnoozeEachTime() || ReminderTask.ACTION_PROFILE_SNOOZE_CHOICE.equals(task.notificationActionProfile);
+            b.addAction(android.R.drawable.ic_popup_reminder, choose ? "Choose snooze" : "Snooze", choose ? chooseSnoozePi : snoozePi);
+            b.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Dismiss", dismissPi);
+        }
         if (!detail.isEmpty()) b.setStyle(new NotificationCompat.BigTextStyle().bigText(detail));
         if (Build.VERSION.SDK_INT < 33 || context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
             NotificationManagerCompat.from(context).notify((int)(task.id % 1000000000L), b.build());
