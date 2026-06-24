@@ -62,9 +62,6 @@ public class ReminderTask {
         openSnoozeCount = 0;
         completedCount = 0;
         dismissedCount = 0;
-        stackMissedOccurrences = false;
-        pendingStackCount = 0;
-        showCarryOverDismissAction = true;
         missedCount = 0;
         stackMissedOccurrences = false;
         pendingStackCount = 0;
@@ -138,12 +135,12 @@ public class ReminderTask {
         if (REPEAT_MONTHLY.equals(repeatMode)) return "Monthly on day " + dayOfMonth;
         if (REPEAT_EVERY_N_DAYS.equals(repeatMode)) return "Every " + Math.max(1, intervalDays) + " day(s)";
         if (REPEAT_EVERY_N_HOURS.equals(repeatMode)) return "Every " + Math.max(1, intervalHours) + " hour(s)";
-        if (REPEAT_CUSTOM_INTERVAL.equals(repeatMode)) return "Every " + intervalSummary();
+        if (REPEAT_CUSTOM_INTERVAL.equals(repeatMode)) return "Custom interval: " + intervalSummary();
         return "One-shot";
     }
 
     public String stackSummary() {
-        String base = stackMissedOccurrences ? "Carry missed/dismissed forward" : "Do not carry missed/dismissed forward";
+        String base = stackMissedOccurrences ? "Carry missed and missed-like dismissals forward" : "Do not carry missed or dismissed occurrences forward";
         if (pendingStackCount > 0) base += " · pending " + pendingStackCount;
         return base;
     }
