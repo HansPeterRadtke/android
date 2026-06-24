@@ -116,19 +116,42 @@ public class MainActivity extends Activity {
             LinearLayout box = AndroidUi.banner(this, AndroidUi.ORANGE);
             box.addView(AndroidUi.text(this, t.title, 20, true, AndroidUi.INK));
             box.addView(AndroidUi.body(this, "Open occurrence due " + new SimpleDateFormat("EEE HH:mm", Locale.US).format(new Date(t.openOccurrenceDueAt)) + " · snoozed " + t.openSnoozeCount + " time(s). These actions are always available here even if Android hides notification buttons."));
-            LinearLayout row1 = new LinearLayout(this); row1.setOrientation(LinearLayout.HORIZONTAL);
-            Button done = AndroidUi.button(this, "Complete"); done.setOnClickListener(v -> completeTask(t)); row1.addView(done);
-            Button snooze = AndroidUi.button(this, "Snooze " + t.defaultSnoozeMinutes + " min"); snooze.setOnClickListener(v -> snoozeTask(t)); row1.addView(snooze);
-            Button dismiss = AndroidUi.button(this, "Dismiss only"); dismiss.setOnClickListener(v -> dismissTask(t)); row1.addView(dismiss);
-            Button carry = AndroidUi.button(this, "Carry to next"); carry.setOnClickListener(v -> carryTask(t)); row1.addView(carry);
-            box.addView(row1);
-            LinearLayout row2 = new LinearLayout(this); row2.setOrientation(LinearLayout.HORIZONTAL);
-            Button skip = AndroidUi.button(this, "Skip this occurrence"); skip.setOnClickListener(v -> skipTask(t)); row2.addView(skip);
-            Button notDone = AndroidUi.button(this, "Mark not done"); notDone.setOnClickListener(v -> notDoneTask(t)); row2.addView(notDone);
-            Button history = AndroidUi.button(this, "Open history"); history.setOnClickListener(v -> { mode = MODE_HISTORY; render(); }); row2.addView(history);
-            box.addView(row2);
+            box.addView(actionButton("Complete now", "Log this occurrence as done and schedule the next one.", v -> completeTask(t)));
+            box.addView(actionButton("Snooze " + t.defaultSnoozeMinutes + " min", "Keep this occurrence open and remind again after the configured snooze.", v -> snoozeTask(t)));
+            box.addView(actionButton("Choose not-done outcome", "Dismiss, carry forward, skip, or mark not done with a clear consequence.", v -> showOccurrenceOutcomeDialog(t)));
+            box.addView(actionButton("Open history", "Show the audit trail for completed, snoozed, dismissed, carried, and missed events.", v -> { mode = MODE_HISTORY; render(); }));
             root.addView(box);
         }
+    }
+
+
+    private View actionButton(String title, String reason, View.OnClickListener click) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        Button b = AndroidUi.button(this, title);
+        b.setOnClickListener(click);
+        box.addView(b);
+        if (reason != null && !reason.trim().isEmpty()) box.addView(AndroidUi.small(this, reason));
+        return box;
+    }
+
+    private void showOccurrenceOutcomeDialog(ReminderTask t) {
+        String[] choices = new String[]{
+            "Dismiss only",
+            "Carry to next occurrence",
+            "Skip this occurrence",
+            "Mark not done"
+        };
+        new AlertDialog.Builder(this)
+            .setTitle("What should happen to this occurrence?")
+            .setItems(choices, (dialog, which) -> {
+                if (which == 0) dismissTask(t);
+                if (which == 1) carryTask(t);
+                if (which == 2) skipTask(t);
+                if (which == 3) notDoneTask(t);
+            })
+            .setNegativeButton("Cancel", null)
+            .show();
     }
 
     private void renderToday() {
@@ -157,14 +180,9 @@ public class MainActivity extends Activity {
         hero.addView(AndroidUi.text(this, "Next reminder", 14, true, AndroidUi.BLUE));
         hero.addView(AndroidUi.text(this, next.title, 24, true, AndroidUi.INK));
         hero.addView(AndroidUi.body(this, "selected " + String.format(Locale.US, "%02d:%02d", next.hour, next.minute) + " · next " + new SimpleDateFormat("EEEE HH:mm", Locale.US).format(c.getTime()) + " · snooze " + next.defaultSnoozeMinutes + " min"));
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        Button done = AndroidUi.button(this, "Complete today");
-        done.setOnClickListener(v -> completeTask(next));
-        Button snooze = AndroidUi.button(this, "Snooze " + next.defaultSnoozeMinutes + " min");
-        snooze.setOnClickListener(v -> snoozeTask(next));
-        row.addView(done); row.addView(snooze); Button dismiss = AndroidUi.button(this, "Dismiss"); dismiss.setOnClickListener(v -> dismissTask(next)); row.addView(dismiss); Button carry = AndroidUi.button(this, "Carry to next"); carry.setOnClickListener(v -> carryTask(next)); row.addView(carry); Button skip = AndroidUi.button(this, "Skip"); skip.setOnClickListener(v -> skipTask(next)); row.addView(skip); Button notDone = AndroidUi.button(this, "Not done"); notDone.setOnClickListener(v -> notDoneTask(next)); row.addView(notDone);
-        hero.addView(row);
+        hero.addView(actionButton("Complete now", "Log this occurrence as done.", v -> completeTask(next)));
+        hero.addView(actionButton("Snooze " + next.defaultSnoozeMinutes + " min", "Remind again after the configured snooze.", v -> snoozeTask(next)));
+        hero.addView(actionButton("Choose not-done outcome", "Dismiss, carry forward, skip, or mark not done.", v -> showOccurrenceOutcomeDialog(next)));
         root.addView(hero);
         root.addView(AndroidUi.section(this, "Upcoming"));
         int shown = 0;
@@ -199,43 +217,16 @@ public class MainActivity extends Activity {
         if (!t.enabled) box.addView(AndroidUi.small(this, "Actions disabled: this task is not scheduled. Use Edit schedule to enable it."));
         box.addView(AndroidUi.small(this, "History totals: completed " + t.completedCount + " · dismissed " + t.dismissedCount + " · not completed " + t.missedCount + " · current snoozes " + t.openSnoozeCount + " · stack pending " + t.pendingStackCount));
         if (t.notes != null && !t.notes.trim().isEmpty()) box.addView(AndroidUi.small(this, t.notes));
-        LinearLayout primary = new LinearLayout(this);
-        primary.setOrientation(LinearLayout.HORIZONTAL);
-        Button done = AndroidUi.button(this, "Complete today");
-        done.setEnabled(t.enabled);
-        done.setOnClickListener(v -> completeTask(t));
-        primary.addView(done);
-        Button snooze = AndroidUi.button(this, "Snooze");
-        snooze.setEnabled(t.enabled);
-        snooze.setOnClickListener(v -> snoozeTask(t));
-        primary.addView(snooze);
-        Button dismiss = AndroidUi.button(this, "Dismiss");
-        dismiss.setEnabled(t.enabled);
-        dismiss.setOnClickListener(v -> dismissTask(t));
-        primary.addView(dismiss);
-        Button carry = AndroidUi.button(this, "Carry to next");
-        carry.setEnabled(t.enabled);
-        carry.setOnClickListener(v -> carryTask(t));
-        primary.addView(carry);
-        Button skip = AndroidUi.button(this, "Skip");
-        skip.setEnabled(t.enabled);
-        skip.setOnClickListener(v -> skipTask(t));
-        primary.addView(skip);
-        Button notDone = AndroidUi.button(this, "Not done");
-        notDone.setEnabled(t.enabled);
-        notDone.setOnClickListener(v -> notDoneTask(t));
-        primary.addView(notDone);
-        box.addView(primary);
+        if (t.enabled) {
+            box.addView(actionButton("Complete now", "Log this occurrence as done.", v -> completeTask(t)));
+            box.addView(actionButton("Snooze", "Remind again after " + t.defaultSnoozeMinutes + " minutes.", v -> snoozeTask(t)));
+            box.addView(actionButton("Choose not-done outcome", "Dismiss, carry forward, skip, or mark not done.", v -> showOccurrenceOutcomeDialog(t)));
+        } else {
+            box.addView(AndroidUi.small(this, "Actions disabled: enable and schedule this task first."));
+        }
         if (management) {
-            LinearLayout secondary = new LinearLayout(this);
-            secondary.setOrientation(LinearLayout.HORIZONTAL);
-            Button edit = AndroidUi.button(this, "Edit schedule");
-            edit.setOnClickListener(v -> openEdit(t));
-            secondary.addView(edit);
-            Button del = AndroidUi.button(this, "Delete task");
-            del.setOnClickListener(v -> confirmDelete(t));
-            secondary.addView(del);
-            box.addView(secondary);
+            box.addView(actionButton("Edit schedule", "Change repeat, time, snooze, stacking, or notification behavior.", v -> openEdit(t)));
+            box.addView(actionButton("Delete task", "Cancel future reminders. History stays in the log.", v -> confirmDelete(t)));
         }
         return box;
     }
@@ -392,17 +383,22 @@ public class MainActivity extends Activity {
 
     private void showStackPicker(EditText title, EditText notes) {
         captureDraft(title, notes);
-        String[] choices = new String[]{"Do not carry missed/dismissed forward", "Carry missed/dismissed forward", "Show both dismiss buttons in notification", "Hide carry-forward notification button"};
-        boolean[] checked = new boolean[]{!draft.stackMissedOccurrences, draft.stackMissedOccurrences, draft.showCarryOverDismissAction, !draft.showCarryOverDismissAction};
+        String[] choices = new String[]{
+            "Do not carry missed or dismissed occurrences forward",
+            "Carry missed or dismissed occurrences forward",
+            "Show Carry to next as a notification action",
+            "Hide Carry to next from notification actions"
+        };
         new AlertDialog.Builder(this)
             .setTitle("Missed and dismissed stacking")
-            .setMultiChoiceItems(choices, checked, (dialog, which, isChecked) -> {
-                if (which == 0 && isChecked) draft.stackMissedOccurrences = false;
-                if (which == 1 && isChecked) draft.stackMissedOccurrences = true;
-                if (which == 2 && isChecked) draft.showCarryOverDismissAction = true;
-                if (which == 3 && isChecked) draft.showCarryOverDismissAction = false;
+            .setItems(choices, (dialog, which) -> {
+                if (which == 0) draft.stackMissedOccurrences = false;
+                if (which == 1) draft.stackMissedOccurrences = true;
+                if (which == 2) draft.showCarryOverDismissAction = true;
+                if (which == 3) draft.showCarryOverDismissAction = false;
+                feedback = "Stacking selected: " + draft.stackSummary();
+                render();
             })
-            .setPositiveButton("Use stacking settings", (dialog, which) -> { feedback = "Stacking selected: " + draft.stackSummary(); render(); })
             .setNegativeButton("Cancel", null)
             .show();
     }
