@@ -14,7 +14,7 @@ public class JournaledMp3RecorderTest {
                 AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
                 "Bluetooth headset microphone — G06-BT",
                 AudioInputOption.Category.BLUETOOTH);
-        assertArrayEquals(new int[] {8000, 16000},
+        assertArrayEquals(new int[] {16000, 8000},
                 JournaledMp3Recorder.candidateInputSampleRates(bluetooth));
     }
 
@@ -23,7 +23,12 @@ public class JournaledMp3RecorderTest {
                 AudioDeviceInfo.TYPE_BUILTIN_MIC,
                 "Built-in microphone",
                 AudioInputOption.Category.BUILT_IN);
-        assertArrayEquals(new int[] {16000},
+        assertArrayEquals(new int[] {48000, 44100, 32000, 16000},
                 JournaledMp3Recorder.candidateInputSampleRates(builtIn));
     }
+    @Test public void highQualityProfileUsesFortyEightKilohertzAndHighBitrate() {
+        org.junit.Assert.assertEquals(48000, ReliableSessionManifest.OUTPUT_SAMPLE_RATE);
+        org.junit.Assert.assertEquals(192, Mp3Converter.BITRATE_KBPS);
+    }
+
 }

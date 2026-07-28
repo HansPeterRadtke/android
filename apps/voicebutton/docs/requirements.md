@@ -33,3 +33,10 @@ The main screen SHALL contain a folder dropdown with all local folders and exact
 ## Lifecycle
 
 Unexpected Android process restart while actively recording SHALL preserve an auto-resume intent, recover durable PCM, reacquire foreground capture and wake lock, and attempt the same microphone. Pause, Finish and explicit Close SHALL clear auto-resume. Explicit Close SHALL stop capture after draining already-captured blocks. Force-stop, reboot restrictions, unavailable microphones, and operating-system foreground-service restrictions remain platform boundaries and SHALL be surfaced rather than hidden.
+
+
+## Version 0.12 quality and visible feedback
+
+Built-in and high-bandwidth microphones SHALL try forty-eight, forty-four point one, thirty-two and sixteen kilohertz input rates in that order. MP3 output SHALL be mono forty-eight kilohertz at one hundred ninety-two kilobits per second with high-quality LAME settings. Classic Bluetooth call mode remains limited by the headset and Android HFP profile to sixteen or eight kilohertz input, but SHALL still be resampled into the same forty-eight-kilohertz container. Platform automatic gain control SHALL be enabled when available. The encoded stream SHALL apply conservative adaptive gain between zero and twelve decibels, reduce gain immediately before clipping, and leave the raw PCM recovery journal unchanged.
+
+The main screen SHALL display the exact application version and quality profile, a visually outlined recording-folder dropdown containing `<Create new>`, the selected folder name, current recording state, actual microphone route, live RMS and peak dBFS, a microphone-level meter, whether a signal is currently detected, and one determinate server-transfer progress bar. Transfer feedback SHALL state durable bytes, total bytes, durable chunks, total chunks and pending bytes. Quiet audio SHALL remain recording and SHALL be described as quiet rather than treated as failure.

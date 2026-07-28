@@ -5,6 +5,7 @@ import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
+import android.media.audiofx.AutomaticGainControl;
 import android.os.Process;
 import android.os.SystemClock;
 
@@ -28,13 +29,17 @@ public final class JournaledMp3Recorder {
     public interface Listener {
         void onStarted(String routedDevice);
         void onRecorderEvent(String event, int seq, long bytes, long durationMs, String detail);
+        void onAudioLevel(float rmsDbfs, float peakDbfs, long capturedSamples);
         void onSegmentCommitted(int seq, File mp3, long durationMs);
         void onStopped(String sessionId);
         void onFailure(String stage, String exceptionClass, String message);
     }
 
-    private static final int OUTPUT_SAMPLE_RATE = 16000;
-    private static final int PREFERRED_INPUT_SAMPLE_RATE = 16000;
+    private static final int OUTPUT_SAMPLE_RATE = ReliableSessionManifest.OUTPUT_SAMPLE_RATE;
+    private static final int PREFERRED_INPUT_SAMPLE_RATE = 48000;
+    private static final int SECONDARY_INPUT_SAMPLE_RATE = 44100;
+    private static final int SPEECH_INPUT_SAMPLE_RATE = 32000;
+    private static final int NARROW_INPUT_SAMPLE_RATE = 16000;
     private static final int BLUETOOTH_FALLBACK_INPUT_SAMPLE_RATE = 8000;
     private static final int BLOCK_MS = 50;
     private static final int CHUNK_MS = 2000;
@@ -95,13 +100,15 @@ public final class JournaledMp3Recorder {
     static int[] candidateInputSampleRates(AudioInputOption input) {
         if (input != null && input.isBluetooth()) {
             if (input.getDeviceType() == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) {
-                return new int[] {BLUETOOTH_FALLBACK_INPUT_SAMPLE_RATE,
-                        PREFERRED_INPUT_SAMPLE_RATE};
+                return new int[] {NARROW_INPUT_SAMPLE_RATE,
+                        BLUETOOTH_FALLBACK_INPUT_SAMPLE_RATE};
             }
             return new int[] {PREFERRED_INPUT_SAMPLE_RATE,
-                    BLUETOOTH_FALLBACK_INPUT_SAMPLE_RATE};
+                    SPEECH_INPUT_SAMPLE_RATE, NARROW_INPUT_SAMPLE_RATE};
         }
-        return new int[] {PREFERRED_INPUT_SAMPLE_RATE};
+        return new int[] {PREFERRED_INPUT_SAMPLE_RATE,
+                SECONDARY_INPUT_SAMPLE_RATE, SPEECH_INPUT_SAMPLE_RATE,
+                NARROW_INPUT_SAMPLE_RATE};
     }
 
     private void capture(Context context, AudioInputOption input,
@@ -110,6 +117,7 @@ public final class JournaledMp3Recorder {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
         AudioRouteController route = new AudioRouteController(context);
         AudioRecord recorder = null;
+        AutomaticGainControl automaticGainControl = null;
         String stage = "capture_start";
         long blockIndex = 0L;
         try {
@@ -125,6 +133,24 @@ public final class JournaledMp3Recorder {
             RecordSetup setup = createAudioRecord(input, listener);
             recorder = setup.recorder;
             activeRecord = recorder;
+            stage = "enable_automatic_gain_control";
+            if (AutomaticGainControl.isAvailable()) {
+                try {
+                    automaticGainControl = AutomaticGainControl.create(recorder.getAudioSessionId());
+                    if (automaticGainControl != null) {
+                        automaticGainControl.setEnabled(true);
+                        listener.onRecorderEvent("capture.automatic_gain_control", -1, 0L, 0L,
+                                "available=true, enabled=" + automaticGainControl.getEnabled());
+                    }
+                } catch (RuntimeException gainFailure) {
+                    listener.onRecorderEvent("capture.automatic_gain_control", -1, 0L, 0L,
+                            "available=true, enabled=false, error=" + gainFailure.getClass().getSimpleName()
+                                    + ": " + gainFailure.getMessage());
+                }
+            } else {
+                listener.onRecorderEvent("capture.automatic_gain_control", -1, 0L, 0L,
+                        "available=false");
+            }
             stage = "apply_preferred_microphone";
             boolean builtIn = input != null
                     && input.getCategory() == AudioInputOption.Category.BUILT_IN;
@@ -190,6 +216,9 @@ public final class JournaledMp3Recorder {
             }
         } finally {
             activeRecord = null;
+            if (automaticGainControl != null) {
+                try { automaticGainControl.release(); } catch (RuntimeException ignored) {}
+            }
             if (recorder != null) {
                 try {
                     if (recorder.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) recorder.stop();
@@ -398,6 +427,10 @@ public final class JournaledMp3Recorder {
         private final byte[] mp3Buffer = new byte[16384];
         private long inputSamples;
         private long samplesSinceSync;
+        private double levelSquareSum;
+        private int levelPeak;
+        private long levelSampleCount;
+        private float encodingGain = 1.0f;
         private boolean closed;
 
         ChunkWriter(ReliableSessionStore store, String sessionId, int seq,
@@ -418,20 +451,40 @@ public final class JournaledMp3Recorder {
             mp3Out = new FileOutputStream(mp3Open, false);
             lame = new LameBuilder().setInSampleRate(inputSampleRate)
                     .setOutSampleRate(OUTPUT_SAMPLE_RATE).setOutChannels(1)
-                    .setOutBitrate(Mp3Converter.BITRATE_KBPS).setQuality(5).build();
+                    .setOutBitrate(Mp3Converter.BITRATE_KBPS).setQuality(2).build();
             listener.onRecorderEvent("writer.chunk_open", seq, 0L, 0L,
                     "input_sample_rate=" + inputSampleRate
+                            + ", output_sample_rate=" + OUTPUT_SAMPLE_RATE
+                            + ", bitrate_kbps=" + Mp3Converter.BITRATE_KBPS
+                            + ", adaptive_gain_max_db=12"
                             + ", start_sample=" + startOutputSample);
         }
 
         void write(short[] samples, int offset, int count) throws Exception {
             byte[] pcmBytes = new byte[count * 2];
             short[] encode = new short[count];
+            int blockPeak = 0;
             for (int i = 0; i < count; i++) {
                 short value = samples[offset + i];
-                encode[i] = value;
+                int absolute = value == Short.MIN_VALUE ? 32768 : Math.abs((int)value);
+                if (absolute > blockPeak) blockPeak = absolute;
+                if (absolute > levelPeak) levelPeak = absolute;
+                levelSquareSum += (double)value * (double)value;
+                levelSampleCount++;
+            }
+            float blockPeakRatio = blockPeak / 32768.0f;
+            float targetGain = blockPeakRatio <= 0.0001f
+                    ? 4.0f : Math.max(1.0f, Math.min(4.0f, 0.80f / blockPeakRatio));
+            if (targetGain < encodingGain) encodingGain = targetGain;
+            else encodingGain += (targetGain - encodingGain) * 0.10f;
+            for (int i = 0; i < count; i++) {
+                short value = samples[offset + i];
                 pcmBytes[i * 2] = (byte)(value & 0xff);
                 pcmBytes[i * 2 + 1] = (byte)((value >>> 8) & 0xff);
+                int amplified = Math.round(value * encodingGain);
+                if (amplified > Short.MAX_VALUE) amplified = Short.MAX_VALUE;
+                else if (amplified < Short.MIN_VALUE) amplified = Short.MIN_VALUE;
+                encode[i] = (short)amplified;
             }
             pcmOut.write(pcmBytes);
             int encoded = lame.encode(encode, encode, count, mp3Buffer);
@@ -439,6 +492,17 @@ public final class JournaledMp3Recorder {
             if (encoded > 0) mp3Out.write(mp3Buffer, 0, encoded);
             inputSamples += count;
             samplesSinceSync += count;
+            long levelTarget = Math.max(1L, inputSampleRate / 10L);
+            if (levelSampleCount >= levelTarget) {
+                double rms = Math.sqrt(levelSquareSum / Math.max(1L, levelSampleCount)) / 32768.0;
+                double peak = levelPeak / 32768.0;
+                float rmsDbfs = (float)(20.0 * Math.log10(Math.max(1.0e-7, rms)));
+                float peakDbfs = (float)(20.0 * Math.log10(Math.max(1.0e-7, peak)));
+                listener.onAudioLevel(rmsDbfs, peakDbfs, inputSamples);
+                levelSquareSum = 0.0;
+                levelPeak = 0;
+                levelSampleCount = 0L;
+            }
             long syncTarget = Math.max(1L, inputSampleRate * PCM_SYNC_MS / 1000L);
             if (samplesSinceSync >= syncTarget) sync();
         }
@@ -484,6 +548,7 @@ public final class JournaledMp3Recorder {
                     mp3.length(), durationMs,
                     "start_sample=" + startOutputSample + ", end_sample=" + endOutputSample
                             + ", frames=" + stats.frames
+                            + ", final_encoding_gain=" + encodingGain
                             + ", sha256=" + ReliableSessionStore.sha256File(mp3));
             return new ChunkResult(mp3, durationMs, endOutputSample);
         }

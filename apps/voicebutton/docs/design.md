@@ -9,3 +9,8 @@ Phone paths are folder based: `folders/<folder>/sessions/<recording>`. Each sess
 The `/audio/v2` Jetson receiver streams request bodies directly to temporary files while hashing, fsyncs them, atomically publishes, fsyncs the directory and manifest, and only then acknowledges. Its manifest revision and stable server identity let Android distinguish confirmed server state from a lost response. A restart-safe STT scanner queues every missing or due-retry transcript independently of reception.
 
 Classic Bluetooth HFP uses the communication sink from Android's available communication devices, then verifies the automatically paired source. Classic SCO tries eight-kilohertz input first and resamples to the standard sixteen-kilohertz MP3 output. Built-in and other inputs normally use sixteen kilohertz.
+
+
+Version 0.12 raises the normal quality target from speech-only sixteen-kilohertz, thirty-two-kilobit MP3 to forty-eight-kilohertz, one-hundred-ninety-two-kilobit MP3. The raw PCM journal preserves the unamplified microphone samples. Only the encoded playback and transfer stream receives adaptive gain, capped at plus twelve decibels with immediate downward adjustment when a block approaches clipping. The live meter reports the unmodified microphone signal in dBFS, so it remains a truthful input diagnostic.
+
+The main screen uses one transmission progress bar and one narrow microphone meter. The folder menu has a blue outline, a visible dropdown label and a version badge so an old installation is immediately obvious.

@@ -48,12 +48,16 @@ public final class MainActivity extends Activity {
     private TextView statusTitle;
     private TextView statusDetail;
     private ProgressBar progressBar;
+    private TextView transferText;
     private Spinner folderSpinner;
+    private TextView folderSummaryText;
     private Spinner inputSpinner;
     private TextView routedText;
     private TextView durationText;
     private TextView storageText;
     private TextView currentText;
+    private TextView micLevelText;
+    private ProgressBar micLevelBar;
     private Button primaryButton;
     private Button finishButton;
     private TextView finishReason;
@@ -139,27 +143,45 @@ public final class MainActivity extends Activity {
 
         content.addView(AndroidUi.title(this, "Reliable Voice Recorder"));
         content.addView(AndroidUi.subtitle(this,
-                "Record, pause, resume, and synchronize compressed audio in the background."));
+                "Record, pause, resume, and synchronize high-quality audio in durable chunks."));
+        TextView versionBadge = AndroidUi.text(this,
+                "VERSION " + BuildConfig.VERSION_NAME + " · HIGH QUALITY 48 kHz / 192 kbps",
+                12, true, AndroidUi.BLUE);
+        versionBadge.setContentDescription("Voice Button version " + BuildConfig.VERSION_NAME
+                + ", high quality forty-eight kilohertz, one hundred ninety-two kilobits per second");
+        content.addView(versionBadge);
 
         statusCard = AndroidUi.card(this);
         statusTitle = AndroidUi.text(this, "READY", 18, true, AndroidUi.GREEN);
         statusDetail = AndroidUi.body(this, "Choose an input and start recording");
         statusCard.addView(statusTitle);
         statusCard.addView(statusDetail);
+        transferText = AndroidUi.body(this, "Server transfer: waiting for the first completed two-second chunk.");
+        statusCard.addView(transferText);
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        progressBar.setIndeterminate(true);
-        progressBar.setVisibility(View.GONE);
-        progressBar.setContentDescription("Operation in progress");
+        progressBar.setIndeterminate(false);
+        progressBar.setMax(1000);
+        progressBar.setProgress(0);
+        progressBar.setVisibility(View.VISIBLE);
+        progressBar.setContentDescription("Server transmission progress");
         statusCard.addView(progressBar, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8)));
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 14)));
         content.addView(statusCard);
 
         LinearLayout folderCard = AndroidUi.card(this);
-        folderCard.addView(AndroidUi.section(this, "Folder"));
+        folderCard.addView(AndroidUi.section(this, "Recording folder menu ▼"));
+        folderSummaryText = AndroidUi.body(this, "Selected: Default");
+        folderCard.addView(folderSummaryText);
         folderSpinner = new Spinner(this);
-        folderSpinner.setMinimumHeight(AndroidUi.dp(this, 52));
-        folderSpinner.setContentDescription("Choose recording folder or create a new folder");
-        folderCard.addView(folderSpinner);
+        folderSpinner.setMinimumHeight(AndroidUi.dp(this, 58));
+        folderSpinner.setPadding(AndroidUi.dp(this, 14), 0,
+                AndroidUi.dp(this, 14), 0);
+        folderSpinner.setBackground(AndroidUi.round(Color.WHITE, AndroidUi.BLUE,
+                AndroidUi.dp(this, 12)));
+        folderSpinner.setPrompt("Recording folder");
+        folderSpinner.setContentDescription("Recording folder dropdown menu. Includes create new.");
+        folderCard.addView(folderSpinner, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 58)));
         folderCard.addView(AndroidUi.small(this,
                 "Audio chunks and transcript chunks are stored in the selected folder on this phone and on Jetson."));
         content.addView(folderCard);
@@ -190,6 +212,15 @@ public final class MainActivity extends Activity {
         protection.addView(durationText);
         protection.addView(storageText);
         protection.addView(currentText);
+        micLevelText = AndroidUi.body(this, "Microphone level: not recording");
+        protection.addView(micLevelText);
+        micLevelBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        micLevelBar.setIndeterminate(false);
+        micLevelBar.setMax(1000);
+        micLevelBar.setProgress(0);
+        micLevelBar.setContentDescription("Live microphone input level");
+        protection.addView(micLevelBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 12)));
         content.addView(protection);
 
         primaryButton = AndroidUi.button(this, "Start recording");
@@ -237,7 +268,7 @@ public final class MainActivity extends Activity {
         }
         labels.add("<Create new>");
         ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, labels);
+                android.R.layout.simple_spinner_dropdown_item, labels);
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         folderSpinner.setAdapter(adapter);
         folderSpinner.setSelection(selectedPosition);
@@ -506,11 +537,33 @@ public final class MainActivity extends Activity {
         statusDetail.setText(snapshot.explanation);
         statusCard.setBackground(round(tint(color), color, AndroidUi.dp(this, 16)));
         boolean busy = isBusyState(snapshot.state);
-        progressBar.setVisibility(busy ? View.VISIBLE : View.GONE);
+        progressBar.setVisibility(View.VISIBLE);
+        progressBar.setProgress(snapshot.uploadProgressPermille);
+        if (snapshot.uploadTotalChunks <= 0) {
+            transferText.setText(snapshot.recording
+                    ? "Server transfer: recording locally; waiting for the first completed two-second chunk."
+                    : "Server transfer: no local chunks are waiting.");
+        } else {
+            float percent = snapshot.uploadProgressPermille / 10.0f;
+            String prefix = snapshot.uploadPendingBytes <= 0L
+                    ? "Server transfer complete" : "Server transfer";
+            transferText.setText(String.format(java.util.Locale.US,
+                    "%s: %.1f%% · %s of %s durable · %d of %d chunks · %s pending",
+                    prefix, percent,
+                    RecordingUi.formatBytes(snapshot.uploadDurableBytes),
+                    RecordingUi.formatBytes(snapshot.uploadTotalBytes),
+                    snapshot.uploadDurableChunks, snapshot.uploadTotalChunks,
+                    RecordingUi.formatBytes(snapshot.uploadPendingBytes)));
+        }
+        progressBar.setContentDescription(transferText.getText());
         inputSpinner.setEnabled(!snapshot.recording && !inputs.isEmpty());
         if (snapshot.openSession != null) {
             selectedFolderId = snapshot.openSession.folderId;
             selectedFolderName = snapshot.openSession.folderName;
+        }
+        if (folderSummaryText != null) {
+            folderSummaryText.setText("Selected: " + selectedFolderName
+                    + " · tap the blue menu below to switch or create a folder");
         }
         if (folderSpinner != null) {
             folderSpinner.setEnabled(!snapshot.recording && snapshot.openSession == null);
@@ -540,6 +593,19 @@ public final class MainActivity extends Activity {
                 + " · server durable " + open.durableRemoteChunkCount()
                 + " · pending " + RecordingUi.formatBytes(open.pendingRemoteBytes())
                 + " · text chunks " + open.transcriptChunkCount());
+
+        if (snapshot.recording) {
+            micLevelBar.setProgress(snapshot.inputLevelPermille);
+            String signal = snapshot.inputSignalDetected
+                    ? "signal detected" : "very quiet; still recording";
+            micLevelText.setText(String.format(java.util.Locale.US,
+                    "Microphone: %s · RMS %.1f dBFS · peak %.1f dBFS",
+                    signal, snapshot.inputRmsDbfs, snapshot.inputPeakDbfs));
+        } else {
+            micLevelBar.setProgress(0);
+            micLevelText.setText("Microphone level: not recording");
+        }
+        micLevelBar.setContentDescription(micLevelText.getText());
 
         if (snapshot.openSession != null && snapshot.openSession.paused) {
             primaryButton.setText("Resume recording");

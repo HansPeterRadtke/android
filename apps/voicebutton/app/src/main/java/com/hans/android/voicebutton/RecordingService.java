@@ -71,6 +71,16 @@ public final class RecordingService extends Service {
         public final boolean paused;
         public final long durationMs;
         public final long localBytes;
+        public final float inputRmsDbfs;
+        public final float inputPeakDbfs;
+        public final int inputLevelPermille;
+        public final boolean inputSignalDetected;
+        public final long uploadTotalBytes;
+        public final long uploadDurableBytes;
+        public final long uploadPendingBytes;
+        public final int uploadTotalChunks;
+        public final int uploadDurableChunks;
+        public final int uploadProgressPermille;
         public final String selectedInput;
         public final String routedInput;
         public final List<ReliableSessionManifest> sessions;
@@ -79,7 +89,11 @@ public final class RecordingService extends Service {
         public final String currentSessionId;
 
         Snapshot(String state, String explanation, boolean recording, boolean paused, long durationMs,
-                 long localBytes, String selectedInput, String routedInput,
+                 long localBytes, float inputRmsDbfs, float inputPeakDbfs,
+                 int inputLevelPermille, boolean inputSignalDetected,
+                 long uploadTotalBytes, long uploadDurableBytes, long uploadPendingBytes,
+                 int uploadTotalChunks, int uploadDurableChunks, int uploadProgressPermille,
+                 String selectedInput, String routedInput,
                  List<ReliableSessionManifest> sessions, ReliableSessionManifest interrupted,
                  ReliableSessionManifest openSession, String currentSessionId) {
             this.state = state;
@@ -88,6 +102,16 @@ public final class RecordingService extends Service {
             this.paused = paused;
             this.durationMs = durationMs;
             this.localBytes = localBytes;
+            this.inputRmsDbfs = inputRmsDbfs;
+            this.inputPeakDbfs = inputPeakDbfs;
+            this.inputLevelPermille = inputLevelPermille;
+            this.inputSignalDetected = inputSignalDetected;
+            this.uploadTotalBytes = uploadTotalBytes;
+            this.uploadDurableBytes = uploadDurableBytes;
+            this.uploadPendingBytes = uploadPendingBytes;
+            this.uploadTotalChunks = uploadTotalChunks;
+            this.uploadDurableChunks = uploadDurableChunks;
+            this.uploadProgressPermille = uploadProgressPermille;
             this.selectedInput = selectedInput;
             this.routedInput = routedInput;
             this.sessions = sessions;
@@ -98,7 +122,9 @@ public final class RecordingService extends Service {
 
         static Snapshot initial() {
             return new Snapshot("READY", "Choose an input and start recording", false, false, 0L, 0L,
-                    "System default microphone", "Not recording", Collections.emptyList(), null, null, null);
+                    -120f, -120f, 0, false,
+                    0L, 0L, 0L, 0, 0, 0,
+                    "No microphone selected", "Not recording", Collections.emptyList(), null, null, null);
         }
     }
 
@@ -129,6 +155,9 @@ public final class RecordingService extends Service {
     private volatile Thread maintenanceThread;
     private PowerManager.WakeLock captureWakeLock;
     private volatile long wakeLockAcquiredElapsedMs;
+    private volatile float liveInputRmsDbfs = -120f;
+    private volatile float liveInputPeakDbfs = -120f;
+    private volatile long liveInputLevelAtElapsedMs;
 
     private final Runnable ticker = new Runnable() {
         @Override public void run() {
@@ -148,7 +177,7 @@ public final class RecordingService extends Service {
                                     "segment_count", open == null ? 0 : open.segments.size(),
                                     "routed_input", snapshot.routedInput));
                 }
-                main.postDelayed(this, 500L);
+                main.postDelayed(this, 200L);
             }
         }
     };
@@ -217,7 +246,9 @@ public final class RecordingService extends Service {
             diagError("service.create_failed", null, "Opening private recording storage", failure,
                     PhoneDiagnostics.fields());
             snapshot = new Snapshot("FAILED", exact, false, false,
-                    0L, 0L, "No microphone selected", "Not recording", Collections.emptyList(), null, null, null);
+                    0L, 0L, -120f, -120f, 0, false,
+                    0L, 0L, 0L, 0, 0, 0,
+                    "No microphone selected", "Not recording", Collections.emptyList(), null, null, null);
         }
         publish();
     }
@@ -382,6 +413,9 @@ public final class RecordingService extends Service {
         acquireCaptureWakeLock();
         currentSessionId = sessionId;
         captureFailed = false;
+        liveInputRmsDbfs = -120f;
+        liveInputPeakDbfs = -120f;
+        liveInputLevelAtElapsedMs = 0L;
         stopDisposition = STOP_NONE;
         try { recordingBaseDurationMs = store.load(sessionId).totalDurationMs; }
         catch (Exception ignored) { recordingBaseDurationMs = 0L; }
@@ -519,6 +553,12 @@ public final class RecordingService extends Service {
                             "duration_ms", durationMs, "detail", detail));
         }
 
+        @Override public void onAudioLevel(float rmsDbfs, float peakDbfs, long capturedSamples) {
+            liveInputRmsDbfs = rmsDbfs;
+            liveInputPeakDbfs = peakDbfs;
+            liveInputLevelAtElapsedMs = SystemClock.elapsedRealtime();
+        }
+
         @Override public void onSegmentCommitted(int seq, File mp3File, long durationMs) {
             diag(PhoneDiagnostics.INFO, "recording.segment_committed", currentSessionId,
                     "Immutable MP3 segment metadata was committed locally",
@@ -537,6 +577,9 @@ public final class RecordingService extends Service {
         @Override public void onStopped(String sessionId) {
             main.removeCallbacks(ticker);
             releaseCaptureWakeLock();
+            liveInputRmsDbfs = -120f;
+            liveInputPeakDbfs = -120f;
+            liveInputLevelAtElapsedMs = 0L;
             int disposition = stopDisposition;
             diag(PhoneDiagnostics.INFO, "recording.thread_stopped", sessionId,
                     "Recorder thread reported stopped",
@@ -1003,9 +1046,36 @@ public final class RecordingService extends Service {
                 ? (routedInputHint == null || "Not recording".equals(routedInputHint)
                         ? snapshot.routedInput : routedInputHint)
                 : "Not recording";
+        long uploadTotalBytes = 0L;
+        long uploadDurableBytes = 0L;
+        int uploadTotalChunks = 0;
+        int uploadDurableChunks = 0;
+        for (ReliableSessionManifest manifest : sessions) {
+            for (ReliableSessionManifest.Segment segment : manifest.orderedSegments()) {
+                if (segment.mp3Bytes <= 0L) continue;
+                uploadTotalBytes += segment.mp3Bytes;
+                uploadTotalChunks++;
+                if (segment.remoteAccepted) {
+                    uploadDurableBytes += segment.mp3Bytes;
+                    uploadDurableChunks++;
+                }
+            }
+        }
+        long uploadPendingBytes = Math.max(0L, uploadTotalBytes - uploadDurableBytes);
+        int uploadProgressPermille = RecordingFeedback.uploadPermille(
+                uploadDurableBytes, uploadTotalBytes);
+        long levelAgeMs = liveInputLevelAtElapsedMs <= 0L ? Long.MAX_VALUE
+                : Math.max(0L, SystemClock.elapsedRealtime() - liveInputLevelAtElapsedMs);
+        float rmsDbfs = actualRecording && levelAgeMs < 1500L ? liveInputRmsDbfs : -120f;
+        float peakDbfs = actualRecording && levelAgeMs < 1500L ? liveInputPeakDbfs : -120f;
+        int inputLevelPermille = RecordingFeedback.levelPermille(peakDbfs);
+        boolean inputSignalDetected = actualRecording && levelAgeMs < 1500L && peakDbfs > -50f;
         snapshot = new Snapshot(state, explanation, actualRecording, actualPaused,
-                duration, store == null ? 0L : store.localBytes(), selected, routedInput,
-                sessions, interrupted, open, currentSessionId);
+                duration, store == null ? 0L : store.localBytes(),
+                rmsDbfs, peakDbfs, inputLevelPermille, inputSignalDetected,
+                uploadTotalBytes, uploadDurableBytes, uploadPendingBytes,
+                uploadTotalChunks, uploadDurableChunks, uploadProgressPermille,
+                selected, routedInput, sessions, interrupted, open, currentSessionId);
         if (!state.equals(lastLoggedState) || !explanation.equals(lastLoggedExplanation)) {
             lastLoggedState = state;
             lastLoggedExplanation = explanation;

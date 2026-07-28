@@ -12,7 +12,7 @@ import java.util.Locale;
 
 public final class ReliableSessionManifest {
     public static final int SCHEMA_VERSION = 2;
-    public static final int OUTPUT_SAMPLE_RATE = 16000;
+    public static final int OUTPUT_SAMPLE_RATE = 48000;
 
     public static final class Segment {
         public int seq;

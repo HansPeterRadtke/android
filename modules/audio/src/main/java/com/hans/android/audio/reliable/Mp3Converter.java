@@ -14,7 +14,7 @@ import java.util.List;
 import java.util.UUID;
 
 public final class Mp3Converter {
-    public static final int BITRATE_KBPS = 32;
+    public static final int BITRATE_KBPS = 192;
     private static final int SAMPLES = 8192;
 
     public File encodeSegment(File wav, File target) throws IOException {
@@ -26,10 +26,10 @@ public final class Mp3Converter {
         File temp = new File(target.getAbsolutePath() + ".tmp-" + UUID.randomUUID());
         AndroidLame lame = new LameBuilder()
                 .setInSampleRate(16000)
-                .setOutSampleRate(16000)
+                .setOutSampleRate(ReliableSessionManifest.OUTPUT_SAMPLE_RATE)
                 .setOutChannels(1)
                 .setOutBitrate(BITRATE_KBPS)
-                .setQuality(5)
+                .setQuality(2)
                 .build();
         short[] pcm = new short[SAMPLES];
         byte[] bytes = new byte[SAMPLES * 2];
@@ -76,11 +76,12 @@ public final class Mp3Converter {
         }
         int rate = inputSampleRate <= 0 ? 16000 : inputSampleRate;
         File temp = new File(target.getAbsolutePath() + ".tmp-" + UUID.randomUUID());
-        AndroidLame lame = new LameBuilder().setInSampleRate(rate).setOutSampleRate(16000)
-                .setOutChannels(1).setOutBitrate(BITRATE_KBPS).setQuality(5).build();
+        AndroidLame lame = new LameBuilder().setInSampleRate(rate).setOutSampleRate(ReliableSessionManifest.OUTPUT_SAMPLE_RATE)
+                .setOutChannels(1).setOutBitrate(BITRATE_KBPS).setQuality(2).build();
         short[] samples = new short[SAMPLES];
         byte[] bytes = new byte[SAMPLES * 2];
         byte[] encoded = new byte[7200 + SAMPLES * 3];
+        float encodingGain = 1.0f;
         try (BufferedInputStream in = new BufferedInputStream(new FileInputStream(pcmFile));
              FileOutputStream fileOut = new FileOutputStream(temp);
              BufferedOutputStream out = new BufferedOutputStream(fileOut)) {
@@ -89,10 +90,25 @@ public final class Mp3Converter {
                 int count = readSome(in, bytes);
                 if (count <= 0) break;
                 int sampleCount = count / 2;
+                int blockPeak = 0;
                 for (int i = 0; i < sampleCount; i++) {
                     int lo = bytes[i * 2] & 0xff;
                     int hi = bytes[i * 2 + 1];
-                    samples[i] = (short)((hi << 8) | lo);
+                    short value = (short)((hi << 8) | lo);
+                    samples[i] = value;
+                    int absolute = value == Short.MIN_VALUE ? 32768 : Math.abs((int)value);
+                    if (absolute > blockPeak) blockPeak = absolute;
+                }
+                float blockPeakRatio = blockPeak / 32768.0f;
+                float targetGain = blockPeakRatio <= 0.0001f
+                        ? 4.0f : Math.max(1.0f, Math.min(4.0f, 0.80f / blockPeakRatio));
+                if (targetGain < encodingGain) encodingGain = targetGain;
+                else encodingGain += (targetGain - encodingGain) * 0.10f;
+                for (int i = 0; i < sampleCount; i++) {
+                    int amplified = Math.round(samples[i] * encodingGain);
+                    if (amplified > Short.MAX_VALUE) amplified = Short.MAX_VALUE;
+                    else if (amplified < Short.MIN_VALUE) amplified = Short.MIN_VALUE;
+                    samples[i] = (short)amplified;
                 }
                 int size = lame.encode(samples, samples, sampleCount, encoded);
                 if (size < 0) throw new IOException("LAME PCM recovery failed: " + size);
