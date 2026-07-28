@@ -1,0 +1,41 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.hans.android.voicebutton'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.hans.android.voicebutton'
+        minSdk 24
+        targetSdk 34
+        versionCode 11
+        versionName '0.11'
+        buildConfigField 'String', 'VOICE_BASE_URL', '"https://jetson-fdx.jimmyandjonny.work"'
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+}
+
+dependencies {
+    implementation files('../../../modules/audio/libs/tandroidlame-1.1.aar')
+    implementation project(':modules:audio')
+    implementation project(':modules:network')
+    implementation project(':modules:common_ui')
+    implementation 'androidx.core:core:1.12.0'
+    testImplementation 'junit:junit:4.13.2'
+}

@@ -1,0 +1,5 @@
+TAndroidLame 1.1, copyright Naman Dwivedi, wraps the LAME MP3 encoder.
+Upstream: https://github.com/naman14/TAndroidLame
+The upstream project declares GNU GPL version 3 or later in its README.
+Vendored AAR SHA-256: 61e37161b669a8e75ec1509e1fe81275394fa51b745008bdabc60bd08c9a4e25
+The included native library contains LAME-derived encoder code. Keep this notice and provide corresponding source when distributing the application.

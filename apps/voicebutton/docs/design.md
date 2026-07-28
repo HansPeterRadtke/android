@@ -1,0 +1,11 @@
+# Voice Button chunk architecture
+
+The microphone thread reads fifty-millisecond signed sixteen-bit mono PCM blocks and places them into a bounded queue. It never touches disk or network. A dedicated writer simultaneously journals raw PCM and encodes MP3. Every one hundred milliseconds it fsyncs both files. Every two seconds it closes an independent MP3 chunk, verifies complete frames, publishes rich metadata, and wakes the uploader.
+
+The bounded queue protects capture from temporary flash or encoder stalls without unbounded RAM growth. Its two-minute maximum is only a few mebibytes at speech rates. Exhaustion is a visible hard failure because silently discarding a block is forbidden.
+
+Phone paths are folder based: `folders/<folder>/sessions/<recording>`. Each session contains immutable MP3 chunks, temporary PCM recovery journals only while required, manifest metadata, transcript chunk files, an assembled transcript, and the optional assembled playback MP3. Legacy sessions move into Default.
+
+The `/audio/v2` Jetson receiver streams request bodies directly to temporary files while hashing, fsyncs them, atomically publishes, fsyncs the directory and manifest, and only then acknowledges. Its manifest revision and stable server identity let Android distinguish confirmed server state from a lost response. A restart-safe STT scanner queues every missing or due-retry transcript independently of reception.
+
+Classic Bluetooth HFP uses the communication sink from Android's available communication devices, then verifies the automatically paired source. Classic SCO tries eight-kilohertz input first and resamples to the standard sixteen-kilohertz MP3 output. Built-in and other inputs normally use sixteen kilohertz.

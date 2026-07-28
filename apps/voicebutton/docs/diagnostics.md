@@ -1,0 +1,3 @@
+# Phone diagnostics
+
+Diagnostics remain independent of audio capture. Events are fsynced locally, transmitted by a separate worker, and removed only after a durable Jetson acknowledgement. Version 0.11 records the capture and durable-writer thread lifecycles, queue capacity, PCM block count, one-hundred-millisecond sync duration, chunk sample ranges, local durability time, upload attempt and acknowledgement timing, server identity and revision, folder operations, STT state, transcript return, wake-lock and automatic-resume events, routing, playback, cleanup and full exceptions. Diagnostic failure never blocks audio.

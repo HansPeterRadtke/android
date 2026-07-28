@@ -31,3 +31,5 @@ include ':modules:common_ui'
 include ':apps:taskreminder'
 project(':apps:taskreminder').projectDir = file('apps/taskreminder/app')
 include ':modules:reminder_core'
+include ':apps:voicebutton'
+project(':apps:voicebutton').projectDir = file('apps/voicebutton/app')

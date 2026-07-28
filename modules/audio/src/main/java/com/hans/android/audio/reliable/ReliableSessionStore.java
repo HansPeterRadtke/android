@@ -1,0 +1,933 @@
+package com.hans.android.audio.reliable;
+
+import android.content.Context;
+import android.os.StatFs;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public final class ReliableSessionStore {
+    public static final class Folder {
+        public final String id;
+        public final String name;
+        public final long createdAtMs;
+
+        public Folder(String id, String name, long createdAtMs) {
+            this.id = id;
+            this.name = name;
+            this.createdAtMs = createdAtMs;
+        }
+
+        @Override public String toString() { return name; }
+    }
+
+    private static final Pattern SAFE_ID = Pattern.compile("^[A-Za-z0-9_-]{1,128}$");
+    private static final Pattern WAV_PATTERN = Pattern.compile("^segment_(\\d{6})(?:\\.open)?\\.wav$");
+    private static final Pattern MP3_PATTERN = Pattern.compile("^segment_(\\d{6})\\.mp3$");
+    private static final Pattern OPEN_MP3_PATTERN = Pattern.compile("^segment_(\\d{6})\\.open\\.mp3$");
+    private static final Pattern OPEN_PCM_PATTERN = Pattern.compile("^segment_(\\d{6})_(\\d{5})\\.open\\.pcm$");
+    private static final long MIN_FREE_BYTES = 256L * 1024L * 1024L;
+
+    private final File root;
+    private final File foldersRoot;
+    private final File folderIndex;
+    private final String conversationId;
+
+    public ReliableSessionStore(Context context) throws IOException {
+        root = new File(context.getNoBackupFilesDir(), "reliable_audio_sessions");
+        foldersRoot = new File(root, "folders");
+        folderIndex = new File(root, "folders.json");
+        ensureDirectory(root);
+        ensureDirectory(foldersRoot);
+        ensureDefaultFolder();
+        migrateLegacySessions();
+        conversationId = loadOrCreateConversationId();
+        recoverAll();
+    }
+
+    public File getRoot() { return root; }
+    public String getConversationId() { return conversationId; }
+
+    public synchronized List<Folder> listFolders() {
+        List<Folder> result = new ArrayList<>();
+        try {
+            JSONObject index = readFolderIndex();
+            JSONArray array = index.optJSONArray("folders");
+            if (array != null) for (int i = 0; i < array.length(); i++) {
+                JSONObject item = array.optJSONObject(i);
+                if (item != null) result.add(new Folder(item.optString("folder_id", "default"),
+                        item.optString("name", "Default"), item.optLong("created_at_ms", 0L)));
+            }
+        } catch (Exception ignored) {}
+        if (result.isEmpty()) result.add(new Folder("default", "Default", 0L));
+        result.sort(Comparator.comparing(folder -> folder.name.toLowerCase(Locale.US)));
+        return result;
+    }
+
+    public synchronized Folder createFolder(String requestedName) throws IOException {
+        String name = requestedName == null ? "" : requestedName.trim().replaceAll("\s+", " ");
+        if (name.isEmpty() || name.length() > 96) throw new IOException("Folder name must contain one to ninety-six characters");
+        String base = name.toLowerCase(Locale.US).replaceAll("[^a-z0-9]+", "-").replaceAll("^-|-$", "");
+        if (base.isEmpty()) base = "folder";
+        String id = (base.length() > 48 ? base.substring(0, 48) : base) + "-" + UUID.randomUUID().toString().substring(0, 8);
+        JSONObject index = readFolderIndex();
+        JSONArray array = index.optJSONArray("folders");
+        long now = System.currentTimeMillis();
+        JSONObject value = new JSONObject();
+        try {
+            if (array == null) { array = new JSONArray(); index.put("folders", array); }
+            value.put("folder_id", id); value.put("name", name);
+            value.put("created_at_ms", now); value.put("updated_at_ms", now);
+            array.put(value); index.put("revision", index.optLong("revision", 0L) + 1L);
+        } catch (Exception failure) { throw new IOException("Could not serialize folder metadata", failure); }
+        durableJson(folderIndex, index);
+        ensureDirectory(new File(new File(foldersRoot, id), "sessions"));
+        fsyncDirectory(foldersRoot);
+        return new Folder(id, name, now);
+    }
+
+    public synchronized Folder getFolder(String folderId) throws IOException {
+        String id = folderId == null || folderId.isEmpty() ? "default" : folderId;
+        validateId(id);
+        for (Folder folder : listFolders()) if (folder.id.equals(id)) return folder;
+        throw new IOException("Unknown recording folder");
+    }
+
+    public synchronized ReliableSessionManifest createSession(String selectedInput, int selectedDeviceId) throws IOException {
+        return createSession(selectedInput, selectedDeviceId, "default", "Default");
+    }
+
+    public synchronized ReliableSessionManifest createSession(String selectedInput, int selectedDeviceId,
+                                                               String folderId, String folderName) throws IOException {
+        Folder folder = getFolder(folderId);
+        ReliableSessionManifest manifest = new ReliableSessionManifest();
+        manifest.sessionId = UUID.randomUUID().toString();
+        manifest.conversationId = conversationId;
+        manifest.createdAt = System.currentTimeMillis();
+        manifest.updatedAt = manifest.createdAt;
+        manifest.folderId = folder.id;
+        manifest.folderName = folderName == null || folderName.isEmpty() ? folder.name : folderName;
+        manifest.selectedInput = selectedInput;
+        manifest.selectedDeviceId = selectedDeviceId;
+        manifest.state = "RECORDING";
+        manifest.paused = false;
+        manifest.autoResumeRequested = true;
+        ensureDirectory(sessionDir(manifest.folderId, manifest.sessionId));
+        save(manifest);
+        return manifest.copy();
+    }
+
+    public synchronized ReliableSessionManifest load(String sessionId) throws IOException {
+        validateId(sessionId);
+        File file = manifestFile(sessionId);
+        if (!file.isFile()) throw new IOException("Missing session metadata");
+        try {
+            return ReliableSessionManifest.fromJson(new JSONObject(readText(file)));
+        } catch (Exception failure) {
+            throw new IOException("Could not parse session metadata", failure);
+        }
+    }
+
+    public synchronized List<ReliableSessionManifest> list() {
+        List<ReliableSessionManifest> result = new ArrayList<>();
+        File[] folders = foldersRoot.listFiles(File::isDirectory);
+        if (folders == null) return result;
+        for (File folder : folders) {
+            File sessions = new File(folder, "sessions");
+            File[] dirs = sessions.listFiles(File::isDirectory);
+            if (dirs == null) continue;
+            for (File dir : dirs) {
+                File metadata = new File(dir, "manifest.json");
+                if (!metadata.isFile()) continue;
+                try { result.add(ReliableSessionManifest.fromJson(new JSONObject(readText(metadata)))); }
+                catch (Exception ignored) {}
+            }
+        }
+        result.sort(Comparator.comparingLong((ReliableSessionManifest value) -> value.createdAt));
+        return result;
+    }
+
+    public synchronized ReliableSessionManifest latestInterrupted() {
+        ReliableSessionManifest latest = null;
+        for (ReliableSessionManifest manifest : list()) {
+            if (manifest.isInterrupted() && (latest == null || manifest.createdAt > latest.createdAt)) latest = manifest;
+        }
+        return latest == null ? null : latest.copy();
+    }
+
+    public synchronized ReliableSessionManifest latestUnfinished() {
+        ReliableSessionManifest latest = null;
+        for (ReliableSessionManifest manifest : list()) {
+            if (!manifest.recordingFinished && (latest == null || manifest.createdAt > latest.createdAt)) latest = manifest;
+        }
+        return latest == null ? null : latest.copy();
+    }
+
+    public synchronized boolean discardIfEmpty(String sessionId) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        if (!manifest.isDiscardableEmptySession()) return false;
+        File directory = sessionDir(sessionId);
+        File[] audio = directory.listFiles(file -> {
+            String name = file.getName();
+            return name.endsWith(".mp3") || name.endsWith(".wav");
+        });
+        if (audio != null) {
+            for (File file : audio) if (file.length() > 0L) return false;
+        }
+        deleteRecursively(directory);
+        return true;
+    }
+
+    public synchronized void fsyncSessionDirectory(String sessionId) throws IOException {
+        fsyncDirectory(sessionDir(sessionId));
+    }
+
+    public synchronized File sessionDirectory(String sessionId) throws IOException { return sessionDir(sessionId); }
+
+    public synchronized void commitWavSegment(String sessionId, int seq, File wavFile, long pcmBytes) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+        if (segment == null) {
+            segment = new ReliableSessionManifest.Segment();
+            segment.seq = seq;
+            manifest.segments.add(segment);
+        }
+        segment.wavName = wavFile.getName();
+        segment.pcmBytes = Math.max(0L, pcmBytes);
+        segment.durationMs = pcmBytes * 1000L / (16000L * 2L);
+        manifest.nextSeq = Math.max(manifest.nextSeq, seq + 1);
+        recalculate(manifest);
+        manifest.state = manifest.recordingFinished ? "FINALIZING" : "RECORDING";
+        manifest.error = "";
+        save(manifest);
+    }
+
+    public synchronized void commitMp3Segment(String sessionId, int seq, File mp3File,
+                                              long durationMs) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        long start = manifest.totalOutputSamples;
+        long end = start + Math.max(0L, durationMs) * ReliableSessionManifest.OUTPUT_SAMPLE_RATE / 1000L;
+        commitMp3Segment(sessionId, seq, mp3File, durationMs, start, end,
+                ReliableSessionManifest.OUTPUT_SAMPLE_RATE, System.currentTimeMillis(),
+                System.currentTimeMillis(), System.currentTimeMillis());
+    }
+
+    public synchronized void commitMp3Segment(String sessionId, int seq, File mp3File,
+                                              long durationMs, long startSample, long endSample,
+                                              int sampleRate, long createdAtMs, long closedAtMs,
+                                              long durableAtMs) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+        if (segment == null) {
+            segment = new ReliableSessionManifest.Segment();
+            segment.seq = seq;
+            manifest.segments.add(segment);
+        }
+        segment.mp3Name = mp3File.getName();
+        segment.mp3Bytes = mp3File.length();
+        segment.sha256 = sha256File(mp3File);
+        segment.durationMs = Math.max(0L, durationMs);
+        segment.startSample = Math.max(0L, startSample);
+        segment.endSample = Math.max(segment.startSample, endSample);
+        segment.sampleRate = sampleRate <= 0 ? ReliableSessionManifest.OUTPUT_SAMPLE_RATE : sampleRate;
+        segment.createdAtMs = createdAtMs;
+        segment.closedAtMs = closedAtMs;
+        segment.localDurableAtMs = durableAtMs;
+        segment.transcriptState = "PENDING";
+        segment.wavName = "";
+        segment.pcmBytes = 0L;
+        manifest.nextSeq = Math.max(manifest.nextSeq, seq + 1);
+        recalculate(manifest);
+        manifest.error = "";
+        manifest.state = manifest.recordingFinished ? "FINALIZING" : "RECORDING";
+        save(manifest);
+    }
+
+    public synchronized File pcmJournalFile(String sessionId, ReliableSessionManifest.Segment segment) throws IOException {
+        return new File(sessionDir(sessionId), segment.pcmJournalName);
+    }
+
+    public synchronized void markPcmJournalEncoded(String sessionId, int seq, File mp3File,
+                                                   long durationMs, long startSample,
+                                                   long endSample) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        ReliableSessionManifest.Segment before = manifest.findSegment(seq);
+        if (before == null || before.pcmJournalName.isEmpty()) {
+            throw new IOException("Missing PCM journal metadata");
+        }
+        String journalName = before.pcmJournalName;
+        int inputRate = before.pcmInputSampleRate;
+        long createdAt = before.createdAtMs > 0L ? before.createdAtMs : manifest.createdAt;
+        commitMp3Segment(sessionId, seq, mp3File, durationMs, startSample, endSample,
+                ReliableSessionManifest.OUTPUT_SAMPLE_RATE, createdAt,
+                System.currentTimeMillis(), System.currentTimeMillis());
+        manifest = load(sessionId);
+        ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+        if (segment != null) {
+            segment.pcmJournalName = "";
+            segment.pcmInputSampleRate = inputRate;
+            segment.pcmBytes = 0L;
+            save(manifest);
+        }
+        File journal = new File(sessionDir(sessionId), journalName);
+        if (journal.exists() && !journal.delete()) {
+            throw new IOException("Recovered PCM journal was encoded but could not be deleted");
+        }
+        fsyncDirectory(journal.getParentFile());
+    }
+
+    public synchronized boolean clearVerifiedPcmJournal(String sessionId, int seq) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+        if (segment == null || segment.pcmJournalName.isEmpty()
+                || segment.mp3Name.isEmpty() || segment.sha256.isEmpty()) return false;
+        File mp3 = mp3File(sessionId, segment);
+        if (!mp3.isFile() || mp3.length() != segment.mp3Bytes
+                || !segment.sha256.equals(sha256File(mp3))) return false;
+        String journalName = segment.pcmJournalName;
+        segment.pcmJournalName = "";
+        segment.pcmBytes = 0L;
+        save(manifest);
+        File journal = new File(sessionDir(sessionId), journalName);
+        if (journal.exists() && !journal.delete()) {
+            throw new IOException("Verified PCM journal could not be deleted");
+        }
+        fsyncDirectory(journal.getParentFile());
+        return true;
+    }
+
+    public synchronized void markSegmentEncoded(String sessionId, int seq, File mp3File) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+        if (segment == null) throw new IOException("Missing WAV segment metadata");
+        segment.mp3Name = mp3File.getName();
+        segment.mp3Bytes = mp3File.length();
+        segment.sha256 = sha256File(mp3File);
+        manifest.error = "";
+        save(manifest);
+        if (!segment.wavName.isEmpty()) {
+            File wav = new File(sessionDir(sessionId), segment.wavName);
+            if (wav.exists()) wav.delete();
+            manifest = load(sessionId);
+            segment = manifest.findSegment(seq);
+            if (segment != null) segment.wavName = "";
+            save(manifest);
+        }
+    }
+
+    public synchronized void markPaused(String sessionId) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        if (manifest.recordingFinished) throw new IOException("Recording is already finished");
+        manifest.paused = true;
+        manifest.autoResumeRequested = false;
+        manifest.state = "PAUSED";
+        manifest.error = "";
+        save(manifest);
+    }
+
+    public synchronized void markPreviewReady(String sessionId, File previewMp3) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        manifest.finalMp3Name = previewMp3.getName();
+        manifest.finalMp3Bytes = previewMp3.length();
+        manifest.finalMp3Sha256 = sha256File(previewMp3);
+        if (manifest.paused) manifest.state = "PAUSED";
+        manifest.error = "";
+        save(manifest);
+    }
+
+    public synchronized void markInterrupted(String sessionId, String error) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        if (manifest.recordingFinished) return;
+        manifest.paused = false;
+        manifest.state = "INTERRUPTED";
+        manifest.error = error == null ? "" : error;
+        save(manifest);
+    }
+
+    public synchronized void markResumed(String sessionId, String selectedInput, int selectedDeviceId) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        manifest.selectedInput = selectedInput;
+        manifest.selectedDeviceId = selectedDeviceId;
+        manifest.paused = false;
+        manifest.autoResumeRequested = true;
+        manifest.state = "RECORDING";
+        manifest.error = "";
+        save(manifest);
+    }
+
+    public synchronized void markAutoResumeRequested(String sessionId, boolean requested) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        if (manifest.recordingFinished || manifest.paused) requested = false;
+        if (manifest.autoResumeRequested == requested) return;
+        manifest.autoResumeRequested = requested;
+        save(manifest);
+    }
+
+    public synchronized void markRecordingFinished(String sessionId, String reason) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        manifest.recordingFinished = true;
+        manifest.paused = false;
+        manifest.autoResumeRequested = false;
+        manifest.finishReason = reason == null ? "normal" : reason;
+        manifest.state = "FINALIZING";
+        save(manifest);
+    }
+
+    public synchronized void markConversionFinished(String sessionId, File finalMp3) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        manifest.conversionFinished = true;
+        manifest.finalMp3Name = finalMp3.getName();
+        manifest.finalMp3Bytes = finalMp3.length();
+        manifest.finalMp3Sha256 = sha256File(finalMp3);
+        manifest.state = manifest.remoteCommitted ? "COMPLETE" : "READY";
+        manifest.error = "";
+        save(manifest);
+        deleteWavSources(sessionId);
+    }
+
+    public synchronized void markSendAttempt(String sessionId, int seq, long atMs, String error) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+        if (segment != null) {
+            segment.sendAttempts++;
+            if (segment.firstSendAtMs <= 0L) segment.firstSendAtMs = atMs;
+            segment.lastSendAtMs = atMs;
+            segment.lastSendError = error == null ? "" : error;
+        }
+        save(manifest);
+    }
+
+    public synchronized void markSendError(String sessionId, int seq, long atMs,
+                                               String error) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+        if (segment == null) return;
+        segment.lastSendAtMs = atMs;
+        segment.lastSendError = error == null ? "" : error;
+        save(manifest);
+    }
+
+    public synchronized void markRemoteAccepted(String sessionId, int seq) throws IOException {
+        markRemoteAccepted(sessionId, seq, "", 0L, 0L, 0L);
+    }
+
+    public synchronized void markRemoteAccepted(String sessionId, int seq, String serverId,
+                                                long revision, long receivedAtMs,
+                                                long durableAtMs) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+        if (segment == null) return;
+        String normalizedServer = serverId == null ? "" : serverId;
+        boolean changed = !segment.remoteAccepted
+                || !segment.remoteServerId.equals(normalizedServer)
+                || segment.remoteManifestRevision != revision
+                || segment.remoteReceivedAtMs != receivedAtMs
+                || segment.remoteDurableAtMs != durableAtMs
+                || !segment.lastSendError.isEmpty();
+        if (!changed) return;
+        segment.remoteAccepted = true;
+        segment.remoteServerId = normalizedServer;
+        segment.remoteManifestRevision = revision;
+        segment.remoteReceivedAtMs = receivedAtMs;
+        segment.remoteDurableAtMs = durableAtMs;
+        segment.lastSendError = "";
+        manifest.remoteServerId = normalizedServer.isEmpty()
+                ? manifest.remoteServerId : normalizedServer;
+        manifest.remoteManifestRevision = Math.max(manifest.remoteManifestRevision, revision);
+        save(manifest);
+    }
+
+    public synchronized void markTranscript(String sessionId, int seq, String state,
+                                            String text, String engine, long createdAtMs,
+                                            String error) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+        if (segment == null) return;
+        String newState = state == null ? "PENDING" : state;
+        String newText = text == null ? "" : text;
+        String newEngine = engine == null ? "" : engine;
+        String newError = error == null ? "" : error;
+        if (segment.transcriptState.equals(newState)
+                && segment.transcriptText.equals(newText)
+                && segment.transcriptEngine.equals(newEngine)
+                && segment.transcriptCreatedAtMs == createdAtMs
+                && segment.transcriptError.equals(newError)) return;
+        segment.transcriptState = newState;
+        segment.transcriptText = newText;
+        segment.transcriptEngine = newEngine;
+        segment.transcriptCreatedAtMs = createdAtMs;
+        segment.transcriptError = newError;
+        File textDir = new File(sessionDir(sessionId), "text");
+        ensureDirectory(textDir);
+        File textFile = new File(textDir, String.format(Locale.US, "chunk_%09d.txt", seq));
+        File temp = new File(textFile.getAbsolutePath() + ".tmp");
+        try (FileOutputStream out = new FileOutputStream(temp)) {
+            out.write((segment.transcriptText + "\n").getBytes(StandardCharsets.UTF_8));
+            out.flush(); out.getFD().sync();
+        }
+        if (textFile.exists() && !textFile.delete()) throw new IOException("Could not replace transcript chunk");
+        if (!temp.renameTo(textFile)) throw new IOException("Could not publish transcript chunk");
+        fsyncDirectory(textDir);
+        save(manifest);
+        rebuildTranscript(sessionId);
+    }
+
+    public synchronized String readTranscript(String sessionId) throws IOException {
+        File file = new File(sessionDir(sessionId), "transcript.txt");
+        return file.isFile() ? readText(file) : "";
+    }
+
+    public synchronized void markRemoteCommitted(String sessionId) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        manifest.remoteCommitted = true;
+        manifest.state = manifest.conversionFinished ? "COMPLETE" : manifest.state;
+        manifest.error = "";
+        save(manifest);
+    }
+
+    public synchronized void markError(String sessionId, String error) {
+        try {
+            ReliableSessionManifest manifest = load(sessionId);
+            if (error != null && error.equals(manifest.error)) return;
+            manifest.error = error == null ? "" : error;
+            manifest.state = "ERROR";
+            save(manifest);
+        } catch (Exception ignored) {}
+    }
+
+    public synchronized File wavFile(String sessionId, ReliableSessionManifest.Segment segment) throws IOException {
+        return new File(sessionDir(sessionId), segment.wavName);
+    }
+
+    public synchronized File mp3File(String sessionId, ReliableSessionManifest.Segment segment) throws IOException {
+        return new File(sessionDir(sessionId), segment.mp3Name);
+    }
+
+    public synchronized File finalMp3File(String sessionId) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        return new File(sessionDir(sessionId), manifest.finalMp3Name.isEmpty() ? "recording.mp3" : manifest.finalMp3Name);
+    }
+
+    public synchronized void ensureWritable(long additionalBytes) throws IOException {
+        StatFs stat = new StatFs(root.getAbsolutePath());
+        if (stat.getAvailableBytes() - additionalBytes < MIN_FREE_BYTES) {
+            throw new IOException("Phone storage is too full to protect more audio");
+        }
+    }
+
+    public synchronized long localBytes() { return directoryBytes(root); }
+
+    public synchronized void deleteAll() throws IOException {
+        File[] children = root.listFiles();
+        if (children != null) for (File child : children) {
+            if ("conversation.id".equals(child.getName())) continue;
+            deleteRecursively(child);
+        }
+    }
+
+    public synchronized void recoverAll() throws IOException {
+        File[] folders = foldersRoot.listFiles(File::isDirectory);
+        if (folders == null) return;
+        for (File folder : folders) {
+            File sessions = new File(folder, "sessions");
+            File[] dirs = sessions.listFiles(File::isDirectory);
+            if (dirs == null) continue;
+            for (File dir : dirs) recoverDirectory(dir);
+        }
+    }
+
+    private void recoverDirectory(File dir) throws IOException {
+        String sessionId = dir.getName();
+        if (!SAFE_ID.matcher(sessionId).matches()) return;
+        ReliableSessionManifest manifest;
+        File metadata = new File(dir, "manifest.json");
+        if (metadata.isFile()) {
+            try { manifest = ReliableSessionManifest.fromJson(new JSONObject(readText(metadata))); }
+            catch (Exception failure) { manifest = recoveredManifest(sessionId); }
+        } else manifest = recoveredManifest(sessionId);
+        String folderId = dir.getParentFile().getParentFile().getName();
+        try {
+            Folder folder = getFolder(folderId);
+            manifest.folderId = folder.id;
+            manifest.folderName = folder.name;
+        } catch (Exception ignored) {
+            manifest.folderId = "default";
+            manifest.folderName = "Default";
+        }
+
+        boolean recoveredOpenSegment = false;
+        java.util.Set<Integer> pcmSequences = new java.util.HashSet<>();
+        File[] files = dir.listFiles();
+        if (files != null) for (File file : files) {
+            Matcher pcm = OPEN_PCM_PATTERN.matcher(file.getName());
+            if (!pcm.matches()) continue;
+            recoveredOpenSegment = true;
+            int seq = Integer.parseInt(pcm.group(1));
+            int inputRate = Integer.parseInt(pcm.group(2));
+            pcmSequences.add(seq);
+            ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+            if (segment == null) { segment = new ReliableSessionManifest.Segment(); segment.seq = seq; manifest.segments.add(segment); }
+            segment.pcmJournalName = file.getName();
+            segment.pcmInputSampleRate = inputRate;
+            segment.pcmBytes = file.length();
+            long inputSamples = file.length() / 2L;
+            long outputSamples = inputSamples * ReliableSessionManifest.OUTPUT_SAMPLE_RATE / Math.max(1, inputRate);
+            segment.durationMs = outputSamples * 1000L / ReliableSessionManifest.OUTPUT_SAMPLE_RATE;
+            manifest.nextSeq = Math.max(manifest.nextSeq, seq + 1);
+        }
+        if (files != null) for (File file : files) {
+            String name = file.getName();
+            if (name.contains(".tmp")) { file.delete(); continue; }
+            Matcher wav = WAV_PATTERN.matcher(name);
+            if (wav.matches()) {
+                int seq = Integer.parseInt(wav.group(1));
+                if (name.contains(".open.")) {
+                    recoveredOpenSegment = true;
+                    repairWav(file);
+                    File closed = new File(dir, String.format(Locale.US, "segment_%06d.wav", seq));
+                    if (closed.exists()) closed.delete();
+                    if (!file.renameTo(closed)) throw new IOException("Could not recover interrupted WAV segment");
+                    file = closed;
+                } else repairWav(file);
+                ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+                if (segment == null) { segment = new ReliableSessionManifest.Segment(); segment.seq = seq; manifest.segments.add(segment); }
+                segment.wavName = file.getName();
+                segment.pcmBytes = Math.max(0L, file.length() - 44L);
+                segment.durationMs = segment.pcmBytes * 1000L / 32000L;
+                manifest.nextSeq = Math.max(manifest.nextSeq, seq + 1);
+                continue;
+            }
+            Matcher openMp3 = OPEN_MP3_PATTERN.matcher(name);
+            if (openMp3.matches()) {
+                recoveredOpenSegment = true;
+                int seq = Integer.parseInt(openMp3.group(1));
+                if (pcmSequences.contains(seq)) {
+                    file.delete();
+                    continue;
+                }
+                try {
+                    Mp3Frames.normalizeInPlace(file);
+                    File closed = new File(dir, String.format(Locale.US, "segment_%06d.mp3", seq));
+                    if (closed.exists()) closed.delete();
+                    if (!file.renameTo(closed)) throw new IOException("Could not recover interrupted MP3 segment");
+                    file = closed;
+                    name = file.getName();
+                } catch (IOException noFrames) {
+                    file.delete();
+                    continue;
+                }
+            }
+            Matcher mp3 = MP3_PATTERN.matcher(name);
+            if (mp3.matches()) {
+                int seq = Integer.parseInt(mp3.group(1));
+                Mp3Frames.Stats stats = Mp3Frames.normalizeInPlace(file);
+                ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+                if (segment == null) { segment = new ReliableSessionManifest.Segment(); segment.seq = seq; manifest.segments.add(segment); }
+                segment.mp3Name = file.getName();
+                segment.mp3Bytes = file.length();
+                segment.sha256 = sha256File(file);
+                segment.durationMs = stats.durationMs;
+                manifest.nextSeq = Math.max(manifest.nextSeq, seq + 1);
+            }
+        }
+        File finalMp3 = new File(dir, "recording.mp3");
+        if (recoveredOpenSegment && !manifest.recordingFinished && finalMp3.exists()) {
+            finalMp3.delete();
+            manifest.finalMp3Name = "";
+            manifest.finalMp3Bytes = 0L;
+            manifest.finalMp3Sha256 = "";
+        } else if (finalMp3.isFile() && finalMp3.length() > 0L) {
+            if (manifest.recordingFinished) manifest.conversionFinished = true;
+            manifest.finalMp3Name = finalMp3.getName();
+            manifest.finalMp3Bytes = finalMp3.length();
+            manifest.finalMp3Sha256 = sha256File(finalMp3);
+        }
+        if (manifest.isDiscardableEmptySession()) {
+            deleteRecursively(dir);
+            return;
+        }
+        if (!manifest.recordingFinished) {
+            if (manifest.paused && !recoveredOpenSegment) manifest.state = "PAUSED";
+            else {
+                manifest.paused = false;
+                manifest.state = "INTERRUPTED";
+            }
+        }
+        else if (!manifest.conversionFinished) manifest.state = "FINALIZING";
+        else if (manifest.remoteCommitted) manifest.state = "COMPLETE";
+        else manifest.state = "READY";
+        recalculate(manifest);
+        save(manifest);
+    }
+
+    private ReliableSessionManifest recoveredManifest(String sessionId) {
+        ReliableSessionManifest value = new ReliableSessionManifest();
+        value.sessionId = sessionId;
+        value.conversationId = conversationId;
+        value.createdAt = System.currentTimeMillis();
+        value.updatedAt = value.createdAt;
+        value.state = "INTERRUPTED";
+        return value;
+    }
+
+    private void recalculate(ReliableSessionManifest manifest) {
+        long pcmBytes = 0L, segmentBytes = 0L, duration = 0L;
+        for (ReliableSessionManifest.Segment segment : manifest.segments) {
+            pcmBytes += Math.max(0L, segment.pcmBytes);
+            segmentBytes += Math.max(0L, segment.mp3Bytes);
+            duration += Math.max(0L, segment.durationMs);
+        }
+        manifest.totalPcmBytes = pcmBytes;
+        manifest.totalSegmentBytes = segmentBytes;
+        manifest.totalDurationMs = duration;
+        long samples = 0L;
+        for (ReliableSessionManifest.Segment segment : manifest.segments) samples = Math.max(samples, segment.endSample);
+        manifest.totalOutputSamples = samples > 0L ? samples
+                : duration * ReliableSessionManifest.OUTPUT_SAMPLE_RATE / 1000L;
+    }
+
+    private void save(ReliableSessionManifest manifest) throws IOException {
+        manifest.updatedAt = System.currentTimeMillis();
+        File file = new File(sessionDir(manifest.folderId, manifest.sessionId), "manifest.json");
+        File temp = new File(file.getAbsolutePath() + ".tmp");
+        File backup = new File(file.getAbsolutePath() + ".bak");
+        byte[] bytes;
+        try { bytes = manifest.toJson().toString(2).getBytes(StandardCharsets.UTF_8); }
+        catch (Exception failure) { throw new IOException("Could not serialize session metadata", failure); }
+        try (FileOutputStream out = new FileOutputStream(temp)) {
+            out.write(bytes); out.flush(); out.getFD().sync();
+        }
+        if (backup.exists() && !backup.delete()) throw new IOException("Could not replace metadata backup");
+        boolean had = file.exists();
+        if (had && !file.renameTo(backup)) throw new IOException("Could not preserve metadata backup");
+        if (!temp.renameTo(file)) {
+            if (had) backup.renameTo(file);
+            throw new IOException("Could not publish session metadata");
+        }
+        backup.delete();
+        fsyncDirectory(file.getParentFile());
+    }
+
+    private File sessionDir(String folderId, String sessionId) throws IOException {
+        validateId(folderId); validateId(sessionId);
+        File sessions = new File(new File(foldersRoot, folderId), "sessions");
+        ensureDirectory(sessions);
+        File dir = new File(sessions, sessionId);
+        ensureDirectory(dir);
+        return dir;
+    }
+
+    private File findSessionDir(String sessionId) throws IOException {
+        validateId(sessionId);
+        File[] folders = foldersRoot.listFiles(File::isDirectory);
+        if (folders != null) for (File folder : folders) {
+            File candidate = new File(new File(folder, "sessions"), sessionId);
+            if (new File(candidate, "manifest.json").isFile()) return candidate;
+        }
+        return null;
+    }
+
+    private File sessionDir(String sessionId) throws IOException {
+        File found = findSessionDir(sessionId);
+        return found != null ? found : sessionDir("default", sessionId);
+    }
+
+    private File manifestFile(String sessionId) throws IOException {
+        File found = findSessionDir(sessionId);
+        return new File(found != null ? found : sessionDir("default", sessionId), "manifest.json");
+    }
+
+    private void ensureDefaultFolder() throws IOException {
+        if (!folderIndex.isFile()) {
+            JSONObject index = new JSONObject();
+            JSONArray folders = new JSONArray();
+            JSONObject value = new JSONObject();
+            try {
+                long now = System.currentTimeMillis();
+                value.put("folder_id", "default"); value.put("name", "Default");
+                value.put("created_at_ms", now); value.put("updated_at_ms", now);
+                folders.put(value); index.put("schema_version", 1); index.put("revision", 1);
+                index.put("folders", folders);
+            } catch (Exception failure) { throw new IOException(failure); }
+            durableJson(folderIndex, index);
+        }
+        ensureDirectory(new File(new File(foldersRoot, "default"), "sessions"));
+    }
+
+    private JSONObject readFolderIndex() throws IOException {
+        try { return new JSONObject(readText(folderIndex)); }
+        catch (Exception failure) { throw new IOException("Could not parse folder metadata", failure); }
+    }
+
+    private void migrateLegacySessions() throws IOException {
+        File defaultSessions = new File(new File(foldersRoot, "default"), "sessions");
+        ensureDirectory(defaultSessions);
+        File[] children = root.listFiles(File::isDirectory);
+        if (children == null) return;
+        for (File child : children) {
+            if ("folders".equals(child.getName()) || !SAFE_ID.matcher(child.getName()).matches()) continue;
+            File manifest = new File(child, "manifest.json");
+            if (!manifest.isFile()) continue;
+            File target = new File(defaultSessions, child.getName());
+            if (!target.exists() && !child.renameTo(target)) throw new IOException("Could not migrate recording into Default folder");
+        }
+        fsyncDirectory(defaultSessions);
+        fsyncDirectory(root);
+    }
+
+    private static void durableJson(File target, JSONObject value) throws IOException {
+        File temp = new File(target.getAbsolutePath() + ".tmp");
+        try (FileOutputStream out = new FileOutputStream(temp)) {
+            out.write(value.toString(2).getBytes(StandardCharsets.UTF_8));
+            out.flush(); out.getFD().sync();
+        } catch (Exception failure) { throw new IOException("Could not write durable JSON", failure); }
+        if (target.exists() && !target.delete()) throw new IOException("Could not replace JSON file");
+        if (!temp.renameTo(target)) throw new IOException("Could not publish JSON file");
+        fsyncDirectory(target.getParentFile());
+    }
+
+    private synchronized void rebuildTranscript(String sessionId) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        File target = new File(sessionDir(sessionId), "transcript.txt");
+        File temp = new File(target.getAbsolutePath() + ".tmp");
+        try (FileOutputStream out = new FileOutputStream(temp)) {
+            for (ReliableSessionManifest.Segment segment : manifest.orderedSegments()) {
+                if (!"COMPLETE".equals(segment.transcriptState)) continue;
+                String line = segment.transcriptText == null ? "" : segment.transcriptText.trim();
+                if (!line.isEmpty()) out.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+            out.flush(); out.getFD().sync();
+        }
+        if (target.exists() && !target.delete()) throw new IOException("Could not replace transcript");
+        if (!temp.renameTo(target)) throw new IOException("Could not publish transcript");
+        fsyncDirectory(target.getParentFile());
+    }
+
+    private static void fsyncDirectory(File directory) {
+        if (directory == null || !directory.isDirectory()) return;
+        try (FileChannel channel = FileChannel.open(directory.toPath(), StandardOpenOption.READ)) {
+            channel.force(true);
+        } catch (Exception ignored) {}
+    }
+
+    private String loadOrCreateConversationId() throws IOException {
+        File file = new File(root, "conversation.id");
+        if (file.isFile()) {
+            String value = readText(file).trim();
+            if (SAFE_ID.matcher(value).matches()) return value;
+        }
+        String value = "conversation-" + UUID.randomUUID();
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            out.write(value.getBytes(StandardCharsets.US_ASCII)); out.flush(); out.getFD().sync();
+        }
+        fsyncDirectory(root);
+        return value;
+    }
+
+    private static String readText(File file) throws IOException {
+        try (FileInputStream in = new FileInputStream(file); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192]; int read;
+            while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+        }
+    }
+
+    public static void writeWavHeader(RandomAccessFile out, long pcmBytes) throws IOException {
+        out.seek(0L); out.writeBytes("RIFF"); writeLe32(out, 36L + pcmBytes); out.writeBytes("WAVE");
+        out.writeBytes("fmt "); writeLe32(out, 16L); writeLe16(out, 1); writeLe16(out, 1);
+        writeLe32(out, 16000L); writeLe32(out, 32000L); writeLe16(out, 2); writeLe16(out, 16);
+        out.writeBytes("data"); writeLe32(out, pcmBytes);
+    }
+
+    public static void repairWav(File file) throws IOException {
+        try (RandomAccessFile out = new RandomAccessFile(file, "rw")) {
+            long pcm = Math.max(0L, out.length() - 44L);
+            if ((pcm & 1L) != 0L) { out.setLength(out.length() - 1L); pcm--; }
+            writeWavHeader(out, pcm); out.getFD().sync();
+        }
+    }
+
+    public static String sha256File(File file) throws IOException {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            try (FileInputStream in = new FileInputStream(file)) {
+                byte[] buffer = new byte[1024 * 1024]; int read;
+                while ((read = in.read(buffer)) != -1) digest.update(buffer, 0, read);
+            }
+            StringBuilder out = new StringBuilder(64);
+            for (byte value : digest.digest()) out.append(String.format(Locale.US, "%02x", value & 0xff));
+            return out.toString();
+        } catch (IOException failure) { throw failure; }
+        catch (Exception failure) { throw new IOException("Could not hash file", failure); }
+    }
+
+    private void deleteWavSources(String sessionId) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        for (ReliableSessionManifest.Segment segment : manifest.segments) {
+            if (!segment.wavName.isEmpty()) new File(sessionDir(sessionId), segment.wavName).delete();
+            segment.wavName = "";
+        }
+        save(manifest);
+    }
+
+    private void deleteTransferSegments(String sessionId) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        for (ReliableSessionManifest.Segment segment : manifest.segments) {
+            if (!segment.mp3Name.isEmpty()) new File(sessionDir(sessionId), segment.mp3Name).delete();
+        }
+    }
+
+    private static void validateId(String value) throws IOException {
+        if (value == null || !SAFE_ID.matcher(value).matches()) throw new IOException("Invalid session id");
+    }
+
+    private static void ensureDirectory(File dir) throws IOException {
+        if (dir.isDirectory()) return;
+        if (!dir.mkdirs() && !dir.isDirectory()) throw new IOException("Could not create audio directory");
+    }
+
+    private static long directoryBytes(File file) {
+        if (file == null || !file.exists()) return 0L;
+        if (file.isFile()) return Math.max(0L, file.length());
+        long total = 0L; File[] children = file.listFiles();
+        if (children != null) for (File child : children) total += directoryBytes(child);
+        return total;
+    }
+
+    private static void deleteRecursively(File file) throws IOException {
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) for (File child : children) deleteRecursively(child);
+        }
+        if (file.exists() && !file.delete()) throw new IOException("Could not delete " + file.getName());
+    }
+
+    private static void writeLe16(RandomAccessFile out, int value) throws IOException {
+        out.write(value & 0xff); out.write((value >>> 8) & 0xff);
+    }
+
+    private static void writeLe32(RandomAccessFile out, long value) throws IOException {
+        out.write((int)(value & 0xff)); out.write((int)((value >>> 8) & 0xff));
+        out.write((int)((value >>> 16) & 0xff)); out.write((int)((value >>> 24) & 0xff));
+    }
+}
