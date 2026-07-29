@@ -6,3 +6,6 @@ Required physical verification: prolonged built-in and Bluetooth capture, Androi
 
 
 Version 0.12 adds a visible version and quality badge, a blue recording-folder dropdown with `<Create new>`, live microphone RMS and peak feedback, signal detection, a determinate durable-server progress bar, forty-eight-kilohertz one-hundred-ninety-two-kilobit MP3, platform automatic gain control and conservative adaptive encode gain. The server protocol remains audio-v2 and already accepts the larger chunks without a compatibility change.
+
+
+Version 0.13 adds four-kibibyte resumable HTTPS parts, per-part fsync acknowledgements, restart-safe server offsets, partial-byte phone ledger state, byte-level GUI progress, short network timeouts, two-hundred-fifty-millisecond initial retry, five-second maximum retry, audio-first reconciliation and temporary-network wording.

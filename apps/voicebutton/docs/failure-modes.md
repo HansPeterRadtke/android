@@ -11,3 +11,8 @@ Jetson receiver, final assembly and STT are independent. Receiver acknowledgemen
 Pause and Finish drain blocks already returned by AudioRecord before the final chunk is committed. Unexpected process restart retains auto-resume intent; user Pause, Finish and explicit Close clear it. Explicit Android force-stop and device reboot remain operating-system boundaries.
 
 No local chunk is automatically deleted after remote acknowledgement. The destructive local cleanup action remains explicit, confirmed, and does not delete server folders, audio, or transcripts.
+
+
+A connection reset during a part upload cannot erase previously acknowledged bytes. If the acknowledgement itself is lost, Android requests the durable offset; Jetson either reports the appended offset or safely accepts an identical duplicate part. Overlap with different bytes, wrong offsets, wrong part hashes and whole-chunk hash mismatches are rejected. Partial files and sidecar metadata survive a Jetson service restart.
+
+A weak connection may still fail repeatedly, but no retry waits longer than five seconds after failure and no successful four-kibibyte part is retransmitted except as a verified idempotent duplicate. The UI progress bar advances by acknowledged bytes inside the current chunk.

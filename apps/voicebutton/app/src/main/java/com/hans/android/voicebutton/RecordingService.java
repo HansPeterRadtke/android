@@ -1058,6 +1058,9 @@ public final class RecordingService extends Service {
                 if (segment.remoteAccepted) {
                     uploadDurableBytes += segment.mp3Bytes;
                     uploadDurableChunks++;
+                } else {
+                    uploadDurableBytes += Math.max(0L,
+                            Math.min(segment.mp3Bytes, segment.remotePartialBytes));
                 }
             }
         }

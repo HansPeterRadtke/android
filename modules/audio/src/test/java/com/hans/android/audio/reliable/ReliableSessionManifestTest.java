@@ -75,7 +75,8 @@ public class ReliableSessionManifestTest {
         chunk.seq = 4; chunk.startSample = 128000; chunk.endSample = 160000;
         chunk.createdAtMs = 10; chunk.closedAtMs = 20; chunk.localDurableAtMs = 30;
         chunk.sendAttempts = 3; chunk.firstSendAtMs = 40; chunk.lastSendAtMs = 50;
-        chunk.remoteAccepted = true; chunk.remoteServerId = "jetson-primary";
+        chunk.remoteAccepted = true; chunk.remotePartialBytes = 12345;
+        chunk.remoteServerId = "jetson-primary";
         chunk.remoteManifestRevision = 7; chunk.remoteReceivedAtMs = 60;
         chunk.remoteDurableAtMs = 70; chunk.transcriptState = "COMPLETE";
         chunk.transcriptText = "hello world"; chunk.transcriptEngine = "vosk";
@@ -86,6 +87,7 @@ public class ReliableSessionManifestTest {
         assertTrue(restoredChunk.remoteAccepted);
         assertEquals(3, restoredChunk.sendAttempts);
         assertEquals(70L, restoredChunk.remoteDurableAtMs);
+        assertEquals(12345L, restoredChunk.remotePartialBytes);
         assertEquals("hello world", restoredChunk.transcriptText);
     }
 
@@ -108,6 +110,18 @@ public class ReliableSessionManifestTest {
         ReliableSessionManifest restored = ReliableSessionManifest.fromJson(value.toJson());
         assertTrue(restored.autoResumeRequested);
         assertTrue(restored.isInterrupted());
+    }
+
+    @Test public void partialRemoteBytesReducePendingBytesWithoutCompletingChunk() {
+        ReliableSessionManifest value = new ReliableSessionManifest();
+        ReliableSessionManifest.Segment chunk = new ReliableSessionManifest.Segment();
+        chunk.seq = 0;
+        chunk.mp3Bytes = 49152L;
+        chunk.remotePartialBytes = 16384L;
+        value.segments.add(chunk);
+        assertEquals(16384L, value.durableRemoteBytes());
+        assertEquals(32768L, value.pendingRemoteBytes());
+        org.junit.Assert.assertFalse(chunk.remoteAccepted);
     }
 
     private static String repeat(char value) {

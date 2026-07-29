@@ -427,6 +427,27 @@ public final class ReliableSessionStore {
         save(manifest);
     }
 
+    public synchronized void markRemotePartProgress(String sessionId, int seq,
+                                                        long durableBytes,
+                                                        String serverId,
+                                                        long revision) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+        if (segment == null || segment.remoteAccepted) return;
+        long normalized = Math.max(0L, Math.min(segment.mp3Bytes, durableBytes));
+        String normalizedServer = serverId == null ? "" : serverId;
+        if (segment.remotePartialBytes == normalized
+                && segment.remoteServerId.equals(normalizedServer)
+                && segment.remoteManifestRevision == revision) return;
+        segment.remotePartialBytes = normalized;
+        segment.remoteServerId = normalizedServer;
+        segment.remoteManifestRevision = revision;
+        manifest.remoteServerId = normalizedServer.isEmpty()
+                ? manifest.remoteServerId : normalizedServer;
+        manifest.remoteManifestRevision = Math.max(manifest.remoteManifestRevision, revision);
+        save(manifest);
+    }
+
     public synchronized void markRemoteAccepted(String sessionId, int seq) throws IOException {
         markRemoteAccepted(sessionId, seq, "", 0L, 0L, 0L);
     }
@@ -446,6 +467,7 @@ public final class ReliableSessionStore {
                 || !segment.lastSendError.isEmpty();
         if (!changed) return;
         segment.remoteAccepted = true;
+        segment.remotePartialBytes = segment.mp3Bytes;
         segment.remoteServerId = normalizedServer;
         segment.remoteManifestRevision = revision;
         segment.remoteReceivedAtMs = receivedAtMs;

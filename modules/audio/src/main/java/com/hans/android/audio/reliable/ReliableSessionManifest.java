@@ -31,6 +31,7 @@ public final class ReliableSessionManifest {
         public long closedAtMs;
         public long localDurableAtMs;
         public boolean remoteAccepted;
+        public long remotePartialBytes;
         public int sendAttempts;
         public long firstSendAtMs;
         public long lastSendAtMs;
@@ -63,6 +64,7 @@ public final class ReliableSessionManifest {
             value.put("closed_at_ms", closedAtMs);
             value.put("local_durable_at_ms", localDurableAtMs);
             value.put("remote_accepted", remoteAccepted);
+            value.put("remote_partial_bytes", remotePartialBytes);
             value.put("send_attempts", sendAttempts);
             value.put("first_send_at_ms", firstSendAtMs);
             value.put("last_send_at_ms", lastSendAtMs);
@@ -98,6 +100,8 @@ public final class ReliableSessionManifest {
             segment.closedAtMs = value.optLong("closed_at_ms", 0L);
             segment.localDurableAtMs = value.optLong("local_durable_at_ms", 0L);
             segment.remoteAccepted = value.optBoolean("remote_accepted", false);
+            segment.remotePartialBytes = value.optLong("remote_partial_bytes",
+                    segment.remoteAccepted ? segment.mp3Bytes : 0L);
             segment.sendAttempts = value.optInt("send_attempts", 0);
             segment.firstSendAtMs = value.optLong("first_send_at_ms", 0L);
             segment.lastSendAtMs = value.optLong("last_send_at_ms", 0L);
@@ -171,9 +175,22 @@ public final class ReliableSessionManifest {
         return count;
     }
 
+    public long durableRemoteBytes() {
+        long bytes = 0L;
+        for (Segment segment : segments) {
+            bytes += segment.remoteAccepted ? Math.max(0L, segment.mp3Bytes)
+                    : Math.max(0L, Math.min(segment.mp3Bytes, segment.remotePartialBytes));
+        }
+        return bytes;
+    }
+
     public long pendingRemoteBytes() {
         long bytes = 0L;
-        for (Segment segment : segments) if (!segment.remoteAccepted) bytes += Math.max(0L, segment.mp3Bytes);
+        for (Segment segment : segments) {
+            long durable = segment.remoteAccepted ? segment.mp3Bytes
+                    : Math.max(0L, Math.min(segment.mp3Bytes, segment.remotePartialBytes));
+            bytes += Math.max(0L, segment.mp3Bytes - durable);
+        }
         return bytes;
     }
 

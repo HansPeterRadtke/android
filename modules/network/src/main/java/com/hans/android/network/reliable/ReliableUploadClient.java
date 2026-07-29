@@ -11,6 +11,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.io.InterruptedIOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -21,6 +22,13 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class ReliableUploadClient {
+    public static final int UPLOAD_PART_BYTES = 4096;
+
+    public interface ProgressListener {
+        void onProgress(long durableBytes, long totalBytes,
+                        String serverId, long manifestRevision) throws Exception;
+    }
+
     public static final class RemoteSegment {
         public final int seq;
         public final String sha256;
@@ -91,7 +99,7 @@ public final class ReliableUploadClient {
     private final AtomicReference<HttpURLConnection> activeConnection = new AtomicReference<>();
 
     public ReliableUploadClient(String baseUrl) {
-        this(baseUrl, "VoiceButton/0.12 Android");
+        this(baseUrl, "VoiceButton/0.13 Android");
     }
 
     public ReliableUploadClient(String baseUrl, String userAgent) {
@@ -139,47 +147,107 @@ public final class ReliableUploadClient {
 
     public Ack uploadSegment(ReliableSessionManifest manifest,
                              ReliableSessionManifest.Segment segment,
-                             File mp3File) throws Exception {
-        String path = "/audio/v2/chunk?folder=" + encode(manifest.folderId)
+                             File mp3File,
+                             ProgressListener progressListener) throws Exception {
+        if (!mp3File.isFile() || mp3File.length() != segment.mp3Bytes) {
+            throw new IllegalStateException("Local MP3 chunk changed before upload");
+        }
+        String metadata = "folder=" + encode(manifest.folderId)
                 + "&sid=" + encode(manifest.sessionId)
                 + "&conversation=" + encode(manifest.conversationId)
                 + "&seq=" + segment.seq
                 + "&sha256=" + encode(segment.sha256)
-                + "&bytes=" + segment.mp3Bytes
-                + "&duration_ms=" + segment.durationMs
-                + "&start_sample=" + segment.startSample
-                + "&end_sample=" + segment.endSample
-                + "&sample_rate=" + segment.sampleRate
-                + "&created_at_ms=" + segment.createdAtMs
-                + "&closed_at_ms=" + segment.closedAtMs
-                + "&durable_at_ms=" + segment.localDurableAtMs;
-        HttpURLConnection connection = open(path, "POST");
-        try {
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Content-Type", "audio/mpeg");
-            connection.setFixedLengthStreamingMode(mp3File.length());
-            try (BufferedInputStream in = new BufferedInputStream(new FileInputStream(mp3File));
-                 BufferedOutputStream out = new BufferedOutputStream(connection.getOutputStream())) {
-                byte[] buffer = new byte[16384];
-                int read;
-                while ((read = in.read(buffer)) != -1) {
-                    checkInterrupted(); out.write(buffer, 0, read);
+                + "&bytes=" + segment.mp3Bytes;
+        JSONObject progress = getJson("/audio/v2/chunk-progress?" + metadata);
+        long offset = validateProgress(progress, segment.mp3Bytes);
+        notifyProgress(progressListener, offset, segment.mp3Bytes, progress);
+        if (progress.optBoolean("complete", false)) {
+            return ackFromCompleted(progress, segment);
+        }
+
+        try (RandomAccessFile input = new RandomAccessFile(mp3File, "r")) {
+            while (offset < segment.mp3Bytes) {
+                checkInterrupted();
+                int length = nextPartLength(offset, segment.mp3Bytes);
+                byte[] part = new byte[length];
+                input.seek(offset);
+                input.readFully(part);
+                String partHash = ReliableSessionManifest.sha256(part);
+                String path = "/audio/v2/chunk-part?" + metadata
+                        + "&offset=" + offset
+                        + "&part_sha256=" + encode(partHash)
+                        + "&part_bytes=" + length
+                        + "&duration_ms=" + segment.durationMs
+                        + "&start_sample=" + segment.startSample
+                        + "&end_sample=" + segment.endSample
+                        + "&sample_rate=" + segment.sampleRate
+                        + "&created_at_ms=" + segment.createdAtMs
+                        + "&closed_at_ms=" + segment.closedAtMs
+                        + "&durable_at_ms=" + segment.localDurableAtMs;
+                JSONObject response = postBytes(path, part,
+                        "application/octet-stream");
+                long next = validateProgress(response, segment.mp3Bytes);
+                if (next < offset + length && !response.optBoolean("complete", false)) {
+                    throw new ProtocolException(409,
+                            "Server did not durably advance the chunk offset");
+                }
+                offset = next;
+                notifyProgress(progressListener, offset, segment.mp3Bytes, response);
+                if (response.optBoolean("complete", false)) {
+                    return ackFromCompleted(response, segment);
                 }
             }
-            JSONObject response = readJsonResponse(connection);
-            if (!response.optBoolean("durable", false)
-                    || !segment.sha256.equals(response.optString("sha256", ""))
-                    || segment.mp3Bytes != response.optLong("bytes", -1L)) {
-                throw new ProtocolException(connection.getResponseCode(),
-                        "Server durable acknowledgement did not match the local chunk");
-            }
-            return new Ack(response.optString("server_id", ""),
-                    response.optLong("manifest_revision", 0L),
-                    response.optLong("server_received_at_ms", 0L),
-                    response.optLong("server_durable_at_ms", 0L));
-        } finally {
-            activeConnection.compareAndSet(connection, null); connection.disconnect();
         }
+        JSONObject completed = getJson("/audio/v2/chunk-progress?" + metadata);
+        notifyProgress(progressListener, validateProgress(completed, segment.mp3Bytes),
+                segment.mp3Bytes, completed);
+        return ackFromCompleted(completed, segment);
+    }
+
+    static int nextPartLength(long offset, long totalBytes) {
+        if (offset < 0L || totalBytes < 0L || offset >= totalBytes) return 0;
+        return (int)Math.min((long)UPLOAD_PART_BYTES, totalBytes - offset);
+    }
+
+    private static long validateProgress(JSONObject response, long totalBytes)
+            throws ProtocolException {
+        if (!response.optBoolean("durable", false)) {
+            throw new ProtocolException(409,
+                    "Server did not confirm durable part storage");
+        }
+        long offset = response.optLong("durable_offset", -1L);
+        long serverTotal = response.optLong("chunk_bytes", totalBytes);
+        if (offset < 0L || offset > totalBytes || serverTotal != totalBytes) {
+            throw new ProtocolException(409,
+                    "Server returned an invalid durable byte offset");
+        }
+        return offset;
+    }
+
+    private static void notifyProgress(ProgressListener listener,
+                                       long durableBytes, long totalBytes,
+                                       JSONObject response) throws Exception {
+        if (listener == null) return;
+        listener.onProgress(durableBytes, totalBytes,
+                response.optString("server_id", ""),
+                response.optLong("manifest_revision", 0L));
+    }
+
+    private static Ack ackFromCompleted(JSONObject response,
+                                        ReliableSessionManifest.Segment segment)
+            throws ProtocolException {
+        if (!response.optBoolean("complete", false)
+                || !response.optBoolean("durable", false)
+                || !segment.sha256.equals(response.optString("sha256", ""))
+                || segment.mp3Bytes != response.optLong("bytes", -1L)
+                || segment.mp3Bytes != response.optLong("durable_offset", -1L)) {
+            throw new ProtocolException(409,
+                    "Server completed-chunk acknowledgement did not match local bytes");
+        }
+        return new Ack(response.optString("server_id", ""),
+                response.optLong("manifest_revision", 0L),
+                response.optLong("server_received_at_ms", 0L),
+                response.optLong("server_durable_at_ms", 0L));
     }
 
     public Status commit(ReliableSessionManifest manifest) throws Exception {
@@ -224,6 +292,26 @@ public final class ReliableUploadClient {
         return readJsonResponse(open(path, "GET"));
     }
 
+    private JSONObject postBytes(String path, byte[] bytes,
+                                 String contentType) throws Exception {
+        HttpURLConnection connection = open(path, "POST");
+        try {
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", contentType);
+            connection.setFixedLengthStreamingMode(bytes.length);
+            try (BufferedOutputStream out = new BufferedOutputStream(
+                    connection.getOutputStream())) {
+                checkInterrupted();
+                out.write(bytes);
+                out.flush();
+            }
+            return readJsonResponse(connection);
+        } finally {
+            activeConnection.compareAndSet(connection, null);
+            connection.disconnect();
+        }
+    }
+
     private JSONObject postJson(String path, JSONObject payload) throws Exception {
         byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
         HttpURLConnection connection = open(path, "POST");
@@ -243,7 +331,8 @@ public final class ReliableUploadClient {
     private HttpURLConnection open(String path, String method) throws Exception {
         checkInterrupted();
         HttpURLConnection connection = (HttpURLConnection) new URL(baseUrl + path).openConnection();
-        connection.setConnectTimeout(7000); connection.setReadTimeout(30000);
+        connection.setConnectTimeout(2500);
+        connection.setReadTimeout(6000);
         connection.setRequestMethod(method);
         connection.setRequestProperty("User-Agent", userAgent);
         connection.setRequestProperty("Accept", "application/json, audio/mpeg");

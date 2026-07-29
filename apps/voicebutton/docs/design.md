@@ -14,3 +14,8 @@ Classic Bluetooth HFP uses the communication sink from Android's available commu
 Version 0.12 raises the normal quality target from speech-only sixteen-kilohertz, thirty-two-kilobit MP3 to forty-eight-kilohertz, one-hundred-ninety-two-kilobit MP3. The raw PCM journal preserves the unamplified microphone samples. Only the encoded playback and transfer stream receives adaptive gain, capped at plus twelve decibels with immediate downward adjustment when a block approaches clipping. The live meter reports the unmodified microphone signal in dBFS, so it remains a truthful input diagnostic.
 
 The main screen uses one transmission progress bar and one narrow microphone meter. The folder menu has a blue outline, a visible dropdown label and a version badge so an old installation is immediately obvious.
+
+
+Version 0.13 separates the two-second audio-storage chunk from the network retry unit. A high-quality chunk is approximately forty-eight kilobytes, but its upload unit is four kibibytes. Each part has its own SHA-256, offset, byte length and fsync acknowledgement. The server keeps an append-only partial file and durable sidecar metadata. After restart, the client asks for the exact durable offset and continues there. The final part triggers whole-chunk SHA-256 verification, atomic publication, manifest update and STT queueing.
+
+The uploader prioritizes audio parts over full-session metadata. It remembers folders already synchronized during the process, retries active audio after two hundred fifty milliseconds, caps exponential retry delay at five seconds, and polls transcript-only work at one-second intervals. The existing whole-chunk endpoint remains available for version 0.12 and earlier clients.
