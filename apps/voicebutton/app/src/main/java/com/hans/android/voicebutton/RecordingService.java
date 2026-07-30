@@ -280,7 +280,10 @@ public final class RecordingService extends Service {
             else if (ACTION_FINISH_AND_START.equals(action)) finishInterruptedAndStart(sessionId, deviceId, folderId, folderName);
             else if (ACTION_PAUSE.equals(action)) pauseRecording();
             else if (ACTION_FINISH.equals(action) || ACTION_STOP.equals(action)) finishRecording(sessionId);
-            else if (ACTION_RETRY.equals(action)) { uploader.signal(); refresh("RECONCILING", "Checking durable server segments", false, snapshot.routedInput); }
+            else if (ACTION_RETRY.equals(action)) {
+                restartUploader("manual_retry");
+                refresh("RECONCILING", "Restarted the transfer worker and checking Jetson durable offsets", false, snapshot.routedInput);
+            }
             else if (ACTION_DELETE_LOCAL.equals(action)) deleteLocalFiles();
             else if (ACTION_EXIT.equals(action)) shutdownForUserExit("explicit_close");
         } catch (Exception failure) {
@@ -332,6 +335,118 @@ public final class RecordingService extends Service {
         }, "voicebutton-folder-sync").start();
         refresh(snapshot.state, snapshot.explanation, snapshot.recording, snapshot.routedInput);
         return folder;
+    }
+
+    public synchronized String buildDebugReport() {
+        StringBuilder out = new StringBuilder(16384);
+        Snapshot value = snapshot;
+        out.append("Voice Button debug report\n");
+        out.append("generated_wall_ms=").append(System.currentTimeMillis()).append('\n');
+        out.append("app_version=").append(BuildConfig.VERSION_NAME)
+                .append(" code=").append(BuildConfig.VERSION_CODE).append('\n');
+        out.append("device=").append(Build.MANUFACTURER).append(' ')
+                .append(Build.MODEL).append(" sdk=").append(Build.VERSION.SDK_INT)
+                .append(" android=").append(Build.VERSION.RELEASE).append('\n');
+        PhoneDiagnostics diagnosticValue = diagnostics;
+        out.append("installation_id=")
+                .append(diagnosticValue == null ? "unavailable" : diagnosticValue.getInstallationId())
+                .append('\n');
+        out.append("server_url=").append(BuildConfig.VOICE_BASE_URL).append('\n');
+        out.append("state=").append(value.state)
+                .append(" explanation=").append(value.explanation).append('\n');
+        out.append("recording=").append(value.recording)
+                .append(" paused=").append(value.paused)
+                .append(" current_session=").append(value.currentSessionId).append('\n');
+        out.append("selected_input=").append(value.selectedInput)
+                .append(" routed_input=").append(value.routedInput).append('\n');
+        out.append("input_rms_dbfs=").append(value.inputRmsDbfs)
+                .append(" input_peak_dbfs=").append(value.inputPeakDbfs)
+                .append(" input_level_permille=").append(value.inputLevelPermille)
+                .append(" signal_detected=").append(value.inputSignalDetected).append('\n');
+        out.append("upload_bytes=").append(value.uploadDurableBytes).append('/')
+                .append(value.uploadTotalBytes)
+                .append(" pending=").append(value.uploadPendingBytes)
+                .append(" progress_permille=").append(value.uploadProgressPermille).append('\n');
+        out.append("upload_chunks=").append(value.uploadDurableChunks).append('/')
+                .append(value.uploadTotalChunks).append('\n');
+        ReliableUploader uploaderValue = uploader;
+        out.append("uploader=")
+                .append(uploaderValue == null ? "unavailable" : uploaderValue.debugSummary())
+                .append('\n');
+        out.append("local_total_bytes=").append(value.localBytes)
+                .append(" session_count=").append(value.sessions.size()).append('\n');
+        List<ReliableSessionManifest> sessions = new ArrayList<>(value.sessions);
+        sessions.sort(Comparator.comparingLong(session -> session.createdAt));
+        for (ReliableSessionManifest session : sessions) {
+            out.append("\nSESSION ").append(session.sessionId).append('\n');
+            out.append(" folder=").append(session.folderId).append(" name=")
+                    .append(session.folderName).append('\n');
+            out.append(" state=").append(session.state)
+                    .append(" recording_finished=").append(session.recordingFinished)
+                    .append(" paused=").append(session.paused)
+                    .append(" conversion_finished=").append(session.conversionFinished)
+                    .append(" remote_committed=").append(session.remoteCommitted)
+                    .append(" auto_resume=").append(session.autoResumeRequested).append('\n');
+            out.append(" created_at=").append(session.createdAt)
+                    .append(" updated_at=").append(session.updatedAt)
+                    .append(" duration_ms=").append(session.totalDurationMs)
+                    .append(" segment_bytes=").append(session.totalSegmentBytes)
+                    .append(" final_bytes=").append(session.finalMp3Bytes).append('\n');
+            out.append(" server_id=").append(session.remoteServerId)
+                    .append(" server_revision=").append(session.remoteManifestRevision)
+                    .append(" error=").append(session.error).append('\n');
+            for (ReliableSessionManifest.Segment segment : session.orderedSegments()) {
+                out.append("  CHUNK seq=").append(segment.seq)
+                        .append(" bytes=").append(segment.mp3Bytes)
+                        .append(" local_durable_at=").append(segment.localDurableAtMs)
+                        .append(" remote_accepted=").append(segment.remoteAccepted)
+                        .append(" remote_partial=").append(segment.remotePartialBytes)
+                        .append(" attempts=").append(segment.sendAttempts)
+                        .append(" first_send=").append(segment.firstSendAtMs)
+                        .append(" last_send=").append(segment.lastSendAtMs)
+                        .append(" server=").append(segment.remoteServerId)
+                        .append(" revision=").append(segment.remoteManifestRevision)
+                        .append(" server_received=").append(segment.remoteReceivedAtMs)
+                        .append(" server_durable=").append(segment.remoteDurableAtMs)
+                        .append(" transcript=").append(segment.transcriptState)
+                        .append(" last_error=").append(segment.lastSendError)
+                        .append(" sha256=").append(segment.sha256)
+                        .append('\n');
+                if (store != null) {
+                    try {
+                        File file = store.mp3File(session.sessionId, segment);
+                        out.append("   local_file_exists=").append(file.isFile())
+                                .append(" local_file_bytes=").append(file.isFile() ? file.length() : -1L)
+                                .append('\n');
+                    } catch (Exception failure) {
+                        out.append("   local_file_check_error=")
+                                .append(failure.getClass().getSimpleName()).append(": ")
+                                .append(failure.getMessage()).append('\n');
+                    }
+                }
+            }
+        }
+        return out.toString();
+    }
+
+    private synchronized void restartUploader(String reason) throws IOException {
+        if (store == null) throw new IOException("Recording storage is not ready");
+        ReliableUploader old = uploader;
+        String oldSummary = old == null ? "unavailable" : old.debugSummary();
+        if (old != null) {
+            old.stop();
+            old.awaitStopped(1500L);
+        }
+        ReliableUploader replacement = new ReliableUploader(
+                this, store, BuildConfig.VOICE_BASE_URL, uploaderListener);
+        uploader = replacement;
+        replacement.start();
+        replacement.signal();
+        diag(PhoneDiagnostics.WARN, "upload.worker_restarted", null,
+                "The transfer worker was replaced",
+                PhoneDiagnostics.fields("reason", reason,
+                        "previous_worker", oldSummary,
+                        "new_worker", replacement.debugSummary()));
     }
 
     private void startNew(int deviceId, String folderId, String folderName) throws Exception {

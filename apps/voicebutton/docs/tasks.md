@@ -9,3 +9,6 @@ Version 0.12 adds a visible version and quality badge, a blue recording-folder d
 
 
 Version 0.13 adds four-kibibyte resumable HTTPS parts, per-part fsync acknowledgements, restart-safe server offsets, partial-byte phone ledger state, byte-level GUI progress, short network timeouts, two-hundred-fifty-millisecond initial retry, five-second maximum retry, audio-first reconciliation and temporary-network wording.
+
+
+Version 0.14 adds an upload no-progress watchdog, active-connection cancellation, complete uploader replacement on manual retry, uploader watchdog diagnostics and a Copy debug clipboard report containing the complete local and remote-part ledger.

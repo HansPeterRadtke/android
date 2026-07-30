@@ -32,6 +32,14 @@ public final class ReliableUploader {
     private final Object wake = new Object();
     private final Set<String> remoteFoldersKnown = new HashSet<>();
     private Thread thread;
+    private volatile String currentOperation = "idle";
+    private volatile String currentSessionId = "";
+    private volatile int currentSequence = -1;
+    private volatile long currentDurableBytes;
+    private volatile long currentTotalBytes;
+    private volatile long lastProgressWallMs;
+    private volatile String lastFailure = "";
+    private volatile int watchdogTrips;
 
     public ReliableUploader(Context context, ReliableSessionStore store,
                             String baseUrl, Listener listener) {
@@ -61,6 +69,19 @@ public final class ReliableUploader {
         }
     }
 
+    public String debugSummary() {
+        Thread value = thread;
+        return "running=" + running.get()
+                + ", worker_alive=" + (value != null && value.isAlive())
+                + ", operation=" + currentOperation
+                + ", session=" + currentSessionId
+                + ", seq=" + currentSequence
+                + ", part=" + currentDurableBytes + "/" + currentTotalBytes
+                + ", last_progress_wall_ms=" + lastProgressWallMs
+                + ", watchdog_trips=" + watchdogTrips
+                + ", last_failure=" + lastFailure;
+    }
+
     private void loop() {
         long backoff = 250L;
         while (running.get()) {
@@ -85,6 +106,8 @@ public final class ReliableUploader {
             } catch (Exception failure) {
                 if (!running.get() || Thread.currentThread().isInterrupted()
                         || failure instanceof java.io.InterruptedIOException) break;
+                lastFailure = failure.getClass().getSimpleName() + ": " + failure.getMessage();
+                currentOperation = "retry_backoff";
                 String exact = humanFailure(failure, backoff);
                 listener.onDiagnostic("ERROR", "upload.worker_failure", "", exact,
                         fields("backoff_ms", backoff,
@@ -95,6 +118,7 @@ public final class ReliableUploader {
                 backoff = Math.min(5000L, Math.max(250L, backoff * 2L));
             }
         }
+        currentOperation = "stopped";
     }
 
     private static boolean hasPendingAudio(ReliableSessionManifest manifest) {
@@ -112,6 +136,9 @@ public final class ReliableUploader {
 
     private void reconcile(ReliableSessionManifest snapshot) throws Exception {
         String sessionId = snapshot.sessionId;
+        currentSessionId = sessionId;
+        currentOperation = "reconcile";
+        lastProgressWallMs = System.currentTimeMillis();
         if (!remoteFoldersKnown.contains(snapshot.folderId)) {
             client.createFolder(snapshot.folderId, snapshot.folderName);
             remoteFoldersKnown.add(snapshot.folderId);
@@ -130,11 +157,34 @@ public final class ReliableUploader {
             store.markSendAttempt(sessionId, segment.seq, attemptAt, "");
             listener.onState(sessionId, "Sending chunk " + (segment.seq + 1)
                     + " of " + manifest.segments.size());
+            currentOperation = "upload_chunk";
+            currentSequence = segment.seq;
+            currentDurableBytes = Math.max(0L, segment.remotePartialBytes);
+            currentTotalBytes = segment.mp3Bytes;
+            lastProgressWallMs = System.currentTimeMillis();
+            UploadStallWatchdog watchdog = new UploadStallWatchdog(
+                    UploadStallWatchdog.DEFAULT_TIMEOUT_MS, () -> {
+                        watchdogTrips++;
+                        lastFailure = "Upload stalled for twelve seconds without a durable acknowledgement";
+                        listener.onDiagnostic("ERROR", "upload.watchdog_timeout", sessionId,
+                                lastFailure,
+                                fields("seq", segment.seq,
+                                        "durable_bytes", currentDurableBytes,
+                                        "total_bytes", currentTotalBytes,
+                                        "operation", currentOperation,
+                                        "watchdog_trips", watchdogTrips), null);
+                        client.cancelActiveRequest();
+                    });
             try {
                 final int chunkNumber = segment.seq + 1;
                 final int chunkCount = manifest.segments.size();
                 ReliableUploadClient.Ack ack = client.uploadSegment(manifest, segment, file,
                         (durableBytes, totalBytes, serverId, revision) -> {
+                            watchdog.heartbeat();
+                            currentDurableBytes = durableBytes;
+                            currentTotalBytes = totalBytes;
+                            lastProgressWallMs = System.currentTimeMillis();
+                            lastFailure = "";
                             store.markRemotePartProgress(sessionId, segment.seq,
                                     durableBytes, serverId, revision);
                             listener.onState(sessionId, "Sending chunk " + chunkNumber
@@ -151,11 +201,18 @@ public final class ReliableUploader {
                         });
                 store.markRemoteAccepted(sessionId, segment.seq, ack.serverId,
                         ack.manifestRevision, ack.receivedAtMs, ack.durableAtMs);
+                currentDurableBytes = segment.mp3Bytes;
+                lastProgressWallMs = System.currentTimeMillis();
+                lastFailure = "";
             } catch (Exception failure) {
+                lastFailure = failure.getClass().getSimpleName() + ": " + failure.getMessage();
                 store.markSendError(sessionId, segment.seq, System.currentTimeMillis(),
                         failure.getClass().getSimpleName() + ": " + failure.getMessage());
                 throw failure;
+            } finally {
+                watchdog.close();
             }
+            currentOperation = "chunk_complete";
             manifest = store.load(sessionId);
         }
 
@@ -176,6 +233,11 @@ public final class ReliableUploader {
             applyStatus(manifest, status);
         }
         if (status.committed) store.markRemoteCommitted(sessionId);
+        currentOperation = "idle";
+        currentSequence = -1;
+        currentDurableBytes = 0L;
+        currentTotalBytes = 0L;
+        lastProgressWallMs = System.currentTimeMillis();
         listener.onChanged();
     }
 

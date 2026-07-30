@@ -4,6 +4,8 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -25,6 +27,7 @@ import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -245,10 +248,16 @@ public final class MainActivity extends Activity {
         recordingsButton.setOnClickListener(v -> startActivity(new Intent(this, RecordingsActivity.class)));
         content.addView(recordingsButton);
 
-        Button retry = AndroidUi.button(this, "Synchronize with server now");
+        Button retry = AndroidUi.button(this, "Retry server transfer now");
         retry.setMinHeight(AndroidUi.dp(this, 50));
         retry.setOnClickListener(v -> sendAction(RecordingService.ACTION_RETRY, null, false));
         content.addView(retry);
+
+        Button copyDebug = AndroidUi.button(this, "Copy debug");
+        copyDebug.setMinHeight(AndroidUi.dp(this, 50));
+        copyDebug.setContentDescription("Copy complete Voice Button debug report to clipboard");
+        copyDebug.setOnClickListener(v -> copyDebugReport(copyDebug));
+        content.addView(copyDebug);
 
         setContentView(scroll);
     }
@@ -510,6 +519,45 @@ public final class MainActivity extends Activity {
                     sendAction(RecordingService.ACTION_FINISH_AND_START, interrupted.sessionId, true);
                 })
                 .show();
+    }
+
+    private void copyDebugReport(Button button) {
+        button.setEnabled(false);
+        button.setText("Building debug report…");
+        new Thread(() -> {
+            String report;
+            try {
+                RecordingService value = service;
+                if (value == null) {
+                    report = "Voice Button debug report\napp_version="
+                            + BuildConfig.VERSION_NAME + "\nservice=not_connected\n"
+                            + "snapshot_state=" + snapshot.state + "\n"
+                            + "snapshot_explanation=" + snapshot.explanation + "\n";
+                } else {
+                    report = value.buildDebugReport();
+                }
+            } catch (Exception failure) {
+                report = "Voice Button debug report failed: "
+                        + failure.getClass().getName() + ": " + failure.getMessage();
+            }
+            String finalReport = report;
+            runOnUiThread(() -> {
+                ClipboardManager clipboard = (ClipboardManager)
+                        getSystemService(Context.CLIPBOARD_SERVICE);
+                if (clipboard != null) {
+                    clipboard.setPrimaryClip(ClipData.newPlainText(
+                            "Voice Button debug", finalReport));
+                    Toast.makeText(this, "Debug report copied", Toast.LENGTH_LONG).show();
+                    diag(PhoneDiagnostics.INFO, "ui.copy_debug", snapshot.currentSessionId,
+                            "Complete debug report was copied to the clipboard",
+                            PhoneDiagnostics.fields("characters", finalReport.length()));
+                } else {
+                    Toast.makeText(this, "Clipboard is unavailable", Toast.LENGTH_LONG).show();
+                }
+                button.setText("Copy debug");
+                button.setEnabled(true);
+            });
+        }, "voicebutton-copy-debug").start();
     }
 
     private void sendAction(String action, String sessionId, boolean foreground) {
