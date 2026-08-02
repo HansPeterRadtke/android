@@ -45,6 +45,13 @@ public final class PhoneDiagnostics {
     private static final int MAX_BATCH_EVENTS = 100;
     private static final int MAX_BATCH_BYTES = 512 * 1024;
     private static final AtomicReference<PhoneDiagnostics> INSTANCE = new AtomicReference<>();
+    private static final ScheduledThreadPoolExecutor INITIALIZER =
+            new ScheduledThreadPoolExecutor(1, runnable -> {
+                Thread thread = new Thread(runnable, "voicebutton-diagnostics-init");
+                thread.setDaemon(true);
+                return thread;
+            });
+    static { INITIALIZER.setRemoveOnCancelPolicy(true); }
 
     private final Context context;
     private final File root;
@@ -100,6 +107,13 @@ public final class PhoneDiagnostics {
         } catch (Exception failure) {
             return null;
         }
+    }
+
+    public static void initializeAsync(Context context, String baseUrl,
+                                       String appVersion) {
+        if (INSTANCE.get() != null) return;
+        try { INITIALIZER.execute(() -> initialize(context, baseUrl, appVersion)); }
+        catch (RuntimeException ignored) {}
     }
 
     public static PhoneDiagnostics get() { return INSTANCE.get(); }

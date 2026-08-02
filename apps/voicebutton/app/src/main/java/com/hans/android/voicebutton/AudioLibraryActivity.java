@@ -61,8 +61,6 @@ public final class AudioLibraryActivity extends Activity {
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         preferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        try { store = new ReliableSessionStore(this); }
-        catch (Exception failure) { Toast.makeText(this, failure.getMessage(), Toast.LENGTH_LONG).show(); }
         buildScreen();
         showRecordings();
     }

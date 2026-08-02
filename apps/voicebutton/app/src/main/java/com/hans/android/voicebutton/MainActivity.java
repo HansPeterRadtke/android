@@ -102,7 +102,7 @@ public final class MainActivity extends Activity {
         uiHandler.post(() -> {
             if (renderScheduled) return;
             renderScheduled = true;
-            uiHandler.postDelayed(renderPending, 100L);
+            uiHandler.postDelayed(renderPending, 250L);
         });
     };
 
@@ -128,8 +128,11 @@ public final class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        diagnostics = PhoneDiagnostics.initialize(this,
-                BuildConfig.VOICE_BASE_URL, BuildConfig.VERSION_NAME);
+        diagnostics = PhoneDiagnostics.get();
+        if (diagnostics == null) {
+            PhoneDiagnostics.initializeAsync(this, BuildConfig.VOICE_BASE_URL,
+                    BuildConfig.VERSION_NAME);
+        }
         diag(PhoneDiagnostics.INFO, "ui.main.create", null,
                 "MainActivity onCreate", PhoneDiagnostics.fields("has_saved_state", savedInstanceState != null));
         buildScreen();
@@ -806,6 +809,10 @@ public final class MainActivity extends Activity {
     private void diag(String level, String event, String sessionId,
                       String message, org.json.JSONObject fields) {
         PhoneDiagnostics value = diagnostics;
+        if (value == null) {
+            value = PhoneDiagnostics.get();
+            diagnostics = value;
+        }
         if (value != null) value.log(level, event, sessionId, message, fields);
     }
 

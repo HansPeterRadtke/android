@@ -22,3 +22,6 @@ Version 0.16 adds the LibVLC broad-format player, decoded waveform seeking, conf
 
 
 Version 0.17 rebuilds recorder, player, and library screens from the infra GUI question-first and rejection-gate guidelines. It adds stable scaled text geometry, one-primary-action hierarchy, progressive disclosure, coalesced rendering, background microphone and folder enumeration, recycled library rows, bounded verified clipboard summaries, full diagnostic file export, and batched noncritical diagnostic writes.
+
+
+Version 0.18 moves recording-service recovery and every service command to a named single-thread executor, moves LibVLC construction and all playback operations to a dedicated audio-priority HandlerThread, opens Storage Access Framework content through a retained file descriptor, removes synchronous diagnostics and store construction from activities, makes application diagnostics initialization asynchronous, reduces player and recorder UI polling, caches recursive storage-byte scans, rate-limits buffering callbacks, enables debug StrictMode, and adds a main-loop stall watchdog.

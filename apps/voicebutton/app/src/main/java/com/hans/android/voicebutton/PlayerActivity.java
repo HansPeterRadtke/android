@@ -123,7 +123,7 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
     private final Runnable ticker = new Runnable() {
         @Override public void run() {
             updatePosition();
-            main.postDelayed(this, 250L);
+            main.postDelayed(this, 500L);
         }
     };
     private final Runnable sleepStop = () -> {
@@ -136,7 +136,13 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
         settings = new PlayerSettings(this);
         studioClient = new ThorStudioClient(this);
         buildScreen();
+        long playerCreateStarted = SystemClock.elapsedRealtime();
         player = new VlcAudioPlayer(this, this);
+        playerDiagnostic(PhoneDiagnostics.INFO, "player.engine_created",
+                "LibVLC engine thread was created",
+                PhoneDiagnostics.fields("activity_thread", Thread.currentThread().getName(),
+                        "constructor_ms", Math.max(0L,
+                                SystemClock.elapsedRealtime() - playerCreateStarted)));
         ContextCompat.registerReceiver(this, noisyReceiver,
                 new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
                 ContextCompat.RECEIVER_NOT_EXPORTED);
@@ -311,6 +317,11 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
         waveformBitmapBytes = 0L;
         waveformView.setImageDrawable(null);
         titleText.setText(source.title); stateText.setText("Opening " + source.kind);
+        playerDiagnostic(PhoneDiagnostics.INFO, "player.open", source.title,
+                PhoneDiagnostics.fields("kind", source.kind,
+                        "uri_scheme", source.uri.getScheme(),
+                        "bytes", source.bytes,
+                        "activity_thread", Thread.currentThread().getName()));
         updateMediaMetadata();
         player.open(source.uri, autoplay, settings.speed, settings.volume, settings.muted, settings.loop);
         loadWaveform(source, generation);
@@ -640,13 +651,26 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
 
     @Override public void onState(String state){stateText.setText(state);playButton.setText(player.isPlaying()?"Pause":"Play");updateMediaSessionState(state);if("ended".equals(state)&&settings.autoplay)changeQueue(1);}
     @Override public void onPosition(long timeMs,long lengthMs){logicalDurationMs=PlayerTimeline.logicalLength(lengthMs,studioActive,studioSpeed);updateMediaMetadata();updatePosition();}
-    @Override public void onError(String detail){stateText.setText(detail);Toast.makeText(this,detail,Toast.LENGTH_LONG).show();}
+    @Override public void onError(String detail){
+        stateText.setText(detail);
+        playerDiagnostic(PhoneDiagnostics.ERROR, "player.error", detail,
+                PhoneDiagnostics.fields("source", originalSource == null ? "" : originalSource.title,
+                        "uri_scheme", originalSource == null ? "" : originalSource.uri.getScheme(),
+                        "engine", player == null ? "unavailable" : player.technicalSummary()));
+        Toast.makeText(this,detail,Toast.LENGTH_LONG).show();
+    }
 
     private void updatePosition(){if(player==null)return;long logical=logicalPosition(),length=logicalDuration();timeText.setText(formatTime(logical)+" / "+formatTime(length));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));playButton.setText(player.isPlaying()?"Pause":"Play");long now=SystemClock.elapsedRealtime();if(now-lastMediaSessionUpdateMs>=1000L){lastMediaSessionUpdateMs=now;updateMediaSessionState(player.isPlaying()?"playing":"paused");}}
     private long logicalPosition(){return PlayerTimeline.logicalTime(player==null?0L:player.time(),studioActive,studioSpeed);}
     private long logicalDuration(){long value=PlayerTimeline.logicalLength(player==null?0L:player.length(),studioActive,studioSpeed);return value>0?value:logicalDurationMs;}
     private void updateLabels(){speedText.setText(formatSpeed(settings.speed));backSkipButton.setText("−"+formatSeconds(settings.skipBack));forwardSkipButton.setText("+"+formatSeconds(settings.skipForward));}
     private void scheduleSleepTimer(){main.removeCallbacks(sleepStop);if(settings.sleepMinutes>0)main.postDelayed(sleepStop,settings.sleepMinutes*60_000L);}
+
+    private void playerDiagnostic(String level, String event, String message,
+                                  org.json.JSONObject fields) {
+        PhoneDiagnostics value = PhoneDiagnostics.get();
+        if (value != null) value.log(level, event, null, message, fields);
+    }
 
     private LinearLayout row(){LinearLayout row=new LinearLayout(this);row.setOrientation(LinearLayout.HORIZONTAL);row.setGravity(Gravity.CENTER);return row;}
     private LinearLayout.LayoutParams weighted(){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,AndroidUi.dp(this,52),1f);p.setMargins(AndroidUi.dp(this,2),AndroidUi.dp(this,2),AndroidUi.dp(this,2),AndroidUi.dp(this,2));return p;}

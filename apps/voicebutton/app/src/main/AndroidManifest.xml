@@ -29,10 +29,6 @@
             android:name=".AudioLibraryActivity"
             android:exported="false" />
         <activity
-            android:name=".RecordingsActivity"
-            android:exported="false" />
-
-        <activity
             android:name=".MainActivity"
             android:exported="true">
             <intent-filter>
