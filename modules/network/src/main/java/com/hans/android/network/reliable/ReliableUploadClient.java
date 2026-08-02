@@ -99,7 +99,7 @@ public final class ReliableUploadClient {
     private final AtomicReference<HttpURLConnection> activeConnection = new AtomicReference<>();
 
     public ReliableUploadClient(String baseUrl) {
-        this(baseUrl, "VoiceButton/0.15 Android");
+        this(baseUrl, "VoiceButton/0.16 Android");
     }
 
     public ReliableUploadClient(String baseUrl, String userAgent) {
@@ -115,6 +115,31 @@ public final class ReliableUploadClient {
         payload.put("folder_id", folderId);
         payload.put("name", name);
         postJson("/audio/v2/folders", payload);
+    }
+
+    public void moveSession(String sourceFolderId, String destinationFolderId,
+                            String sessionId) throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("source_folder_id", sourceFolderId);
+        payload.put("destination_folder_id", destinationFolderId);
+        payload.put("session_id", sessionId);
+        JSONObject response = postJson("/audio/v2/move", payload);
+        if (!response.optBoolean("ok", false)
+                || !destinationFolderId.equals(response.optString("folder_id", ""))) {
+            throw new ProtocolException(409, "Server did not confirm the recording move");
+        }
+    }
+
+    public void updateMetadata(ReliableSessionManifest manifest) throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("display_name", manifest.displayName == null
+                || manifest.displayName.trim().isEmpty()
+                ? manifest.sessionId : manifest.displayName.trim());
+        JSONObject response = postJson("/audio/v2/metadata?folder=" + encode(manifest.folderId)
+                + "&sid=" + encode(manifest.sessionId), payload);
+        if (!response.optBoolean("ok", false)) {
+            throw new ProtocolException(409, "Server did not confirm recording metadata");
+        }
     }
 
     public Status status(ReliableSessionManifest manifest) throws Exception {

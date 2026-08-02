@@ -124,6 +124,30 @@ public class ReliableSessionManifestTest {
         org.junit.Assert.assertFalse(chunk.remoteAccepted);
     }
 
+    @Test public void metadataChangesRemainPendingUntilServerConfirmation() {
+        ReliableSessionManifest value = new ReliableSessionManifest();
+        value.folderId = "local";
+        value.folderName = "Local Folder";
+        value.remoteFolderId = "remote";
+        value.remoteFolderName = "Remote Folder";
+        value.displayName = "New title";
+        value.remoteDisplayName = "Old title";
+        assertTrue(value.hasPendingMetadata());
+        value.remoteFolderId = value.folderId;
+        value.remoteFolderName = value.folderName;
+        value.remoteDisplayName = value.displayName;
+        org.junit.Assert.assertFalse(value.hasPendingMetadata());
+    }
+
+    @Test public void folderSynchronizationStateIsExplicit() {
+        ReliableSessionStore.Folder pending = new ReliableSessionStore.Folder(
+                "folder", "Renamed", 1L, "Old name");
+        ReliableSessionStore.Folder complete = new ReliableSessionStore.Folder(
+                "folder", "Renamed", 1L, "Renamed");
+        assertTrue(pending.needsRemoteSync());
+        org.junit.Assert.assertFalse(complete.needsRemoteSync());
+    }
+
     private static String repeat(char value) {
         StringBuilder out = new StringBuilder();
         for (int i = 0; i < 64; i++) out.append(value);

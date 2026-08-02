@@ -187,6 +187,7 @@ public final class RecordingService extends Service {
     private volatile long lastHeartbeatElapsedMs;
     private volatile long lastNotificationElapsedMs;
     private volatile boolean backgroundWorkCached;
+    private volatile boolean pendingFolderSyncCached;
     private volatile long lastUploaderRefreshElapsedMs;
     private final AtomicReference<RefreshRequest> pendingUploaderRefresh = new AtomicReference<>();
     private volatile String lastLoggedState = "";
@@ -435,6 +436,8 @@ public final class RecordingService extends Service {
                 new ReliableUploadClient(BuildConfig.VOICE_BASE_URL,
                         "VoiceButton/" + BuildConfig.VERSION_NAME + " Android")
                         .createFolder(folder.id, folder.name);
+                store.markFolderRemote(folder.id, folder.name);
+                if (uploader != null) uploader.signal();
                 diag(PhoneDiagnostics.INFO, "folder.remote_created", null,
                         "Recording folder was created on the server",
                         PhoneDiagnostics.fields("folder_id", folder.id, "folder_name", folder.name));
@@ -1374,6 +1377,7 @@ public final class RecordingService extends Service {
         int inputLevelPermille = RecordingFeedback.levelPermille(peakDbfs);
         boolean inputSignalDetected = actualRecording && levelAgeMs < 1500L && peakDbfs > -50f;
         long localBytes = store == null ? 0L : store.localBytes();
+        pendingFolderSyncCached = store != null && store.hasPendingFolderSync();
         return new Snapshot(state, explanation, actualRecording, actualPaused,
                 duration, localBytes, rmsDbfs, peakDbfs,
                 inputLevelPermille, inputSignalDetected,
@@ -1388,7 +1392,7 @@ public final class RecordingService extends Service {
         if (exitRequested.get()) return;
         snapshot = built;
         currentSessionId = built.currentSessionId;
-        backgroundWorkCached = computeBackgroundWork(built.sessions);
+        backgroundWorkCached = pendingFolderSyncCached || computeBackgroundWork(built.sessions);
         boolean stateChanged = !built.state.equals(lastLoggedState)
                 || !built.explanation.equals(lastLoggedExplanation);
         if (stateChanged) {

@@ -74,6 +74,15 @@ final class RecordingUi {
         } catch (Exception ignored) { return ""; }
     }
 
+
+    static String title(ReliableSessionManifest manifest) {
+        if (manifest == null) return "Recording";
+        if (manifest.displayName != null && !manifest.displayName.trim().isEmpty()) {
+            return manifest.displayName.trim();
+        }
+        return manifest.recordingFinished ? date(manifest.createdAt) : "Current recording";
+    }
+
     static String humanState(ReliableSessionManifest manifest) {
         if (manifest == null) return "Unknown";
         if (!manifest.recordingFinished) {

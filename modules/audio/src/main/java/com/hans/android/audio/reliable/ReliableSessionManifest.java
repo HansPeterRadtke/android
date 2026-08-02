@@ -123,6 +123,10 @@ public final class ReliableSessionManifest {
     public String conversationId;
     public String folderId = "default";
     public String folderName = "Default";
+    public String remoteFolderId = "default";
+    public String remoteFolderName = "Default";
+    public String displayName = "";
+    public String remoteDisplayName = "";
     public long createdAt;
     public long updatedAt;
     public String selectedInput = "Built-in microphone";
@@ -194,6 +198,17 @@ public final class ReliableSessionManifest {
         return bytes;
     }
 
+
+    public boolean hasPendingMetadata() {
+        String localFolderName = folderName == null ? "" : folderName;
+        String remoteName = remoteFolderName == null ? "" : remoteFolderName;
+        String localTitle = displayName == null ? "" : displayName;
+        String remoteTitle = remoteDisplayName == null ? "" : remoteDisplayName;
+        return !folderId.equals(remoteFolderId)
+                || !localFolderName.equals(remoteName)
+                || !localTitle.equals(remoteTitle);
+    }
+
     public boolean isOpen() { return !recordingFinished; }
     public boolean isDiscardableEmptySession() {
         return !remoteCommitted && segments.isEmpty() && totalDurationMs <= 0L
@@ -213,6 +228,10 @@ public final class ReliableSessionManifest {
         value.put("conversation_id", conversationId);
         value.put("folder_id", folderId);
         value.put("folder_name", folderName);
+        value.put("remote_folder_id", remoteFolderId);
+        value.put("remote_folder_name", remoteFolderName);
+        value.put("display_name", displayName);
+        value.put("remote_display_name", remoteDisplayName);
         value.put("created_at", createdAt);
         value.put("updated_at", updatedAt);
         value.put("selected_input", selectedInput);
@@ -248,6 +267,10 @@ public final class ReliableSessionManifest {
         manifest.conversationId = value.optString("conversation_id", manifest.sessionId);
         manifest.folderId = value.optString("folder_id", "default");
         manifest.folderName = value.optString("folder_name", "Default");
+        manifest.remoteFolderId = value.optString("remote_folder_id", manifest.folderId);
+        manifest.remoteFolderName = value.optString("remote_folder_name", manifest.folderName);
+        manifest.displayName = value.optString("display_name", "");
+        manifest.remoteDisplayName = value.optString("remote_display_name", "");
         manifest.createdAt = value.optLong("created_at", System.currentTimeMillis());
         manifest.updatedAt = value.optLong("updated_at", manifest.createdAt);
         manifest.selectedInput = value.optString("selected_input", "Built-in microphone");

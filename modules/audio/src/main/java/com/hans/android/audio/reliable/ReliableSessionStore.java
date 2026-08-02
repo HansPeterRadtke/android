@@ -16,8 +16,10 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.List;
@@ -31,13 +33,20 @@ public final class ReliableSessionStore {
         public final String id;
         public final String name;
         public final long createdAtMs;
+        public final String remoteName;
 
         public Folder(String id, String name, long createdAtMs) {
+            this(id, name, createdAtMs, name);
+        }
+
+        public Folder(String id, String name, long createdAtMs, String remoteName) {
             this.id = id;
             this.name = name;
             this.createdAtMs = createdAtMs;
+            this.remoteName = remoteName == null ? "" : remoteName;
         }
 
+        public boolean needsRemoteSync() { return !name.equals(remoteName); }
         @Override public String toString() { return name; }
     }
 
@@ -75,8 +84,12 @@ public final class ReliableSessionStore {
             JSONArray array = index.optJSONArray("folders");
             if (array != null) for (int i = 0; i < array.length(); i++) {
                 JSONObject item = array.optJSONObject(i);
-                if (item != null) result.add(new Folder(item.optString("folder_id", "default"),
-                        item.optString("name", "Default"), item.optLong("created_at_ms", 0L)));
+                if (item != null) {
+                    String name = item.optString("name", "Default");
+                    result.add(new Folder(item.optString("folder_id", "default"), name,
+                            item.optLong("created_at_ms", 0L),
+                            item.has("remote_name") ? item.optString("remote_name", "") : name));
+                }
             }
         } catch (Exception ignored) {}
         if (result.isEmpty()) result.add(new Folder("default", "Default", 0L));
@@ -97,6 +110,7 @@ public final class ReliableSessionStore {
         try {
             if (array == null) { array = new JSONArray(); index.put("folders", array); }
             value.put("folder_id", id); value.put("name", name);
+            value.put("remote_name", "");
             value.put("created_at_ms", now); value.put("updated_at_ms", now);
             array.put(value); index.put("revision", index.optLong("revision", 0L) + 1L);
         } catch (Exception failure) { throw new IOException("Could not serialize folder metadata", failure); }
@@ -113,6 +127,40 @@ public final class ReliableSessionStore {
         throw new IOException("Unknown recording folder");
     }
 
+    public synchronized List<Folder> foldersNeedingSync() {
+        List<Folder> result = new ArrayList<>();
+        for (Folder folder : listFolders()) if (folder.needsRemoteSync()) result.add(folder);
+        return result;
+    }
+
+    public synchronized boolean hasPendingFolderSync() {
+        for (Folder folder : listFolders()) if (folder.needsRemoteSync()) return true;
+        return false;
+    }
+
+    public synchronized void markFolderRemote(String folderId, String remoteName) throws IOException {
+        validateId(folderId);
+        JSONObject index = readFolderIndex();
+        JSONArray array = index.optJSONArray("folders");
+        boolean found = false;
+        try {
+            if (array != null) for (int i = 0; i < array.length(); i++) {
+                JSONObject item = array.optJSONObject(i);
+                if (item != null && folderId.equals(item.optString("folder_id"))) {
+                    item.put("remote_name", remoteName == null ? "" : remoteName);
+                    item.put("updated_at_ms", System.currentTimeMillis());
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) throw new IOException("Unknown recording folder");
+            index.put("revision", index.optLong("revision", 0L) + 1L);
+        } catch (org.json.JSONException failure) {
+            throw new IOException("Could not update folder synchronization metadata", failure);
+        }
+        durableJson(folderIndex, index);
+    }
+
     public synchronized ReliableSessionManifest createSession(String selectedInput, int selectedDeviceId) throws IOException {
         return createSession(selectedInput, selectedDeviceId, "default", "Default");
     }
@@ -127,6 +175,10 @@ public final class ReliableSessionStore {
         manifest.updatedAt = manifest.createdAt;
         manifest.folderId = folder.id;
         manifest.folderName = folderName == null || folderName.isEmpty() ? folder.name : folderName;
+        manifest.remoteFolderId = folder.id;
+        manifest.remoteFolderName = folder.name;
+        manifest.displayName = "Recording " + new SimpleDateFormat(
+                "yyyy-MM-dd HH-mm-ss", Locale.US).format(new Date(manifest.createdAt));
         manifest.selectedInput = selectedInput;
         manifest.selectedDeviceId = selectedDeviceId;
         manifest.state = "RECORDING";
@@ -550,6 +602,150 @@ public final class ReliableSessionStore {
         return new File(sessionDir(sessionId), manifest.finalMp3Name.isEmpty() ? "recording.mp3" : manifest.finalMp3Name);
     }
 
+    public synchronized Folder renameFolder(String folderId, String requestedName) throws IOException {
+        Folder existing = getFolder(folderId);
+        String name = cleanDisplayName(requestedName, "Folder name");
+        JSONObject index = readFolderIndex();
+        JSONArray array = index.optJSONArray("folders");
+        boolean found = false;
+        try {
+            if (array != null) for (int i = 0; i < array.length(); i++) {
+                JSONObject item = array.optJSONObject(i);
+                if (item != null && folderId.equals(item.optString("folder_id"))) {
+                    String previousName = item.optString("name", "Default");
+                    if (!item.has("remote_name")) item.put("remote_name", previousName);
+                    item.put("name", name);
+                    item.put("updated_at_ms", System.currentTimeMillis());
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) throw new IOException("Unknown recording folder");
+            index.put("revision", index.optLong("revision", 0L) + 1L);
+        } catch (org.json.JSONException failure) {
+            throw new IOException("Could not update folder metadata", failure);
+        }
+        durableJson(folderIndex, index);
+        for (ReliableSessionManifest manifest : list()) {
+            if (!folderId.equals(manifest.folderId)) continue;
+            manifest.folderName = name;
+            save(manifest);
+        }
+        return new Folder(existing.id, name, existing.createdAtMs);
+    }
+
+    public synchronized ReliableSessionManifest renameSession(String sessionId,
+                                                               String requestedName) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        String name = cleanDisplayName(requestedName, "Recording name");
+        File directory = sessionDir(sessionId);
+        File existing = finalMp3File(sessionId);
+        if (existing.isFile()) {
+            String targetName = safeAudioFileName(name);
+            File target = new File(directory, targetName);
+            if (!existing.equals(target)) {
+                if (target.exists()) throw new IOException("A recording with that filename already exists");
+                if (!existing.renameTo(target)) throw new IOException("Could not rename the audio file");
+                fsyncDirectory(directory);
+                manifest.finalMp3Name = targetName;
+                manifest.finalMp3Bytes = target.length();
+                manifest.finalMp3Sha256 = sha256File(target);
+            }
+        }
+        manifest.displayName = name;
+        save(manifest);
+        return manifest.copy();
+    }
+
+    public synchronized ReliableSessionManifest moveSession(String sessionId,
+                                                             String destinationFolderId) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        if (!manifest.recordingFinished && !manifest.paused) {
+            throw new IOException("Pause or finish the recording before moving it");
+        }
+        Folder destination = getFolder(destinationFolderId);
+        if (destination.id.equals(manifest.folderId)) return manifest.copy();
+        String oldFolderId = manifest.folderId;
+        File oldDirectory = findSessionDir(sessionId);
+        if (oldDirectory == null) throw new IOException("Recording directory is missing");
+        File destinationParent = new File(new File(foldersRoot, destination.id), "sessions");
+        ensureDirectory(destinationParent);
+        File target = new File(destinationParent, sessionId);
+        if (target.exists()) throw new IOException("Destination already contains this recording");
+        if (!oldDirectory.renameTo(target)) throw new IOException("Could not move the recording directory");
+        fsyncDirectory(oldDirectory.getParentFile());
+        fsyncDirectory(destinationParent);
+        try {
+            if (manifest.remoteFolderId == null || manifest.remoteFolderId.isEmpty()) {
+                manifest.remoteFolderId = oldFolderId;
+            }
+            manifest.folderId = destination.id;
+            manifest.folderName = destination.name;
+            save(manifest);
+        } catch (IOException failure) {
+            target.renameTo(oldDirectory);
+            throw failure;
+        }
+        return manifest.copy();
+    }
+
+    public synchronized void markRemoteFolder(String sessionId, String folderId,
+                                              String folderName) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        manifest.remoteFolderId = folderId == null || folderId.isEmpty()
+                ? manifest.folderId : folderId;
+        manifest.remoteFolderName = folderName == null || folderName.isEmpty()
+                ? manifest.folderName : folderName;
+        save(manifest);
+    }
+
+    public synchronized void markRemoteDisplayName(String sessionId,
+                                                   String displayName) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        manifest.remoteDisplayName = displayName == null ? "" : displayName;
+        save(manifest);
+    }
+
+    public synchronized long studioCacheSafeSourceBytes(String sessionId) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        return recordingBytes(manifest);
+    }
+
+    private static long recordingBytes(ReliableSessionManifest manifest) {
+        if (manifest.finalMp3Bytes > 0L) return manifest.finalMp3Bytes;
+        return Math.max(manifest.totalSegmentBytes, manifest.totalPcmBytes);
+    }
+
+    private static String cleanDisplayName(String value, String label) throws IOException {
+        String name = value == null ? "" : value.trim().replaceAll("\s+", " ");
+        if (name.isEmpty() || name.length() > 96 || containsUnsafePathCharacter(name)) {
+            throw new IOException(label + " must contain one to ninety-six safe characters");
+        }
+        return name;
+    }
+
+    private static boolean containsUnsafePathCharacter(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char character = value.charAt(i);
+            if (character < 32 || character == 127 || character == '/' || character == '\\') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String safeAudioFileName(String displayName) {
+        StringBuilder out = new StringBuilder(displayName.length() + 4);
+        for (int i = 0; i < displayName.length(); i++) {
+            char character = displayName.charAt(i);
+            out.append(character < 32 || character == 127 || character == '/' || character == '\\'
+                    ? '_' : character);
+        }
+        String base = out.toString().trim();
+        if (base.toLowerCase(Locale.US).endsWith(".mp3")) return base;
+        return base + ".mp3";
+    }
+
     public synchronized void ensureWritable(long additionalBytes) throws IOException {
         StatFs stat = new StatFs(root.getAbsolutePath());
         if (stat.getAvailableBytes() - additionalBytes < MIN_FREE_BYTES) {
@@ -709,6 +905,9 @@ public final class ReliableSessionStore {
         value.createdAt = System.currentTimeMillis();
         value.updatedAt = value.createdAt;
         value.state = "INTERRUPTED";
+        value.displayName = "Recovered recording " + sessionId.substring(0, Math.min(8, sessionId.length()));
+        value.remoteFolderId = "default";
+        value.remoteFolderName = "Default";
         return value;
     }
 
@@ -787,6 +986,7 @@ public final class ReliableSessionStore {
             try {
                 long now = System.currentTimeMillis();
                 value.put("folder_id", "default"); value.put("name", "Default");
+                value.put("remote_name", "Default");
                 value.put("created_at_ms", now); value.put("updated_at_ms", now);
                 folders.put(value); index.put("schema_version", 1); index.put("revision", 1);
                 index.put("folders", folders);

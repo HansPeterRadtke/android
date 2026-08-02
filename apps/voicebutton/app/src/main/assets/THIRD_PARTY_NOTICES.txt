@@ -1,0 +1,15 @@
+Voice Button third-party notices
+
+LibVLC / VLC media engine
+Copyright VideoLAN and contributors.
+LibVLC is licensed under LGPL-2.1-or-later. The Android package uses the published org.videolan.android:libvlc-all 3.7.0 artifacts. Source and license information are available from the VideoLAN project.
+
+AndroidX DocumentFile
+Copyright The Android Open Source Project.
+Licensed under the Apache License 2.0.
+
+TAndroidLame / LAME
+The recording encoder uses the existing TAndroidLame integration and LAME components under their applicable GPL licensing terms described by the project documentation.
+
+Rubber Band Library
+High-quality studio-speed rendering runs on the separately operated Thor server and is not bundled in this APK. The server uses Rubber Band R3 fine mode under the server installation's applicable license.

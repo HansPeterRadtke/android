@@ -240,10 +240,10 @@ public final class MainActivity extends Activity {
         setupCard.addView(refresh);
         content.addView(setupCard);
 
-        recordingsButton = AndroidUi.button(this, "Open recordings");
+        recordingsButton = AndroidUi.button(this, "Player and files");
         recordingsButton.setMinHeight(AndroidUi.dp(this, 54));
         recordingsButton.setOnClickListener(v ->
-                startActivity(new Intent(this, RecordingsActivity.class)));
+                startActivity(new Intent(this, AudioLibraryActivity.class)));
         content.addView(recordingsButton);
 
         LinearLayout tools = new LinearLayout(this);
@@ -667,7 +667,7 @@ public final class MainActivity extends Activity {
         recordingsButton.setEnabled(!"CLEANING".equals(snapshot.state));
         finishButton.setVisibility(openRecording ? View.VISIBLE : View.GONE);
         finishReason.setVisibility(openRecording ? View.VISIBLE : View.GONE);
-        recordingsButton.setText("Open recordings (" + snapshot.sessions.size() + ")");
+        recordingsButton.setText("Player and files (" + snapshot.sessions.size() + ")");
 
         if (snapshot.interrupted != null
                 && !snapshot.recording

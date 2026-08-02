@@ -10,9 +10,11 @@ android {
         applicationId 'com.hans.android.voicebutton'
         minSdk 24
         targetSdk 34
-        versionCode 15
-        versionName '0.15'
+        versionCode 16
+        versionName '0.16'
         buildConfigField 'String', 'VOICE_BASE_URL', '"https://jetson-fdx.jimmyandjonny.work"'
+        buildConfigField 'String', 'THOR_PLAYER_BASE_URL', '"https://thor.jonnyontherun.org/speech-mobile"'
+        buildConfigField 'String', 'THOR_PLAYER_TOKEN', '"-xad-MEIqaxraJg-CwU2oO3779SxDwFeNau0klgZWHfNuWg2"'
     }
 
     buildFeatures {
@@ -37,5 +39,7 @@ dependencies {
     implementation project(':modules:network')
     implementation project(':modules:common_ui')
     implementation 'androidx.core:core:1.12.0'
+    implementation 'androidx.documentfile:documentfile:1.1.0'
+    implementation 'org.videolan.android:libvlc-all:3.7.0'
     testImplementation 'junit:junit:4.13.2'
 }

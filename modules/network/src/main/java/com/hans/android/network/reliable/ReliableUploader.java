@@ -88,6 +88,22 @@ public final class ReliableUploader {
             boolean found = false;
             boolean urgentAudio = false;
             try {
+                List<ReliableSessionStore.Folder> pendingFolders = store.foldersNeedingSync();
+                if (!pendingFolders.isEmpty()) {
+                    found = true;
+                    if (!hasNetwork()) {
+                        listener.onState("", "Waiting for network; folder changes remain queued");
+                    } else {
+                        for (ReliableSessionStore.Folder folder : pendingFolders) {
+                            if (!running.get()) break;
+                            listener.onState("", "Synchronizing folder " + folder.name);
+                            client.createFolder(folder.id, folder.name);
+                            store.markFolderRemote(folder.id, folder.name);
+                            remoteFoldersKnown.add(folder.id + "\u0000" + folder.name);
+                            listener.onChanged();
+                        }
+                    }
+                }
                 List<ReliableSessionManifest> sessions = store.list();
                 for (ReliableSessionManifest manifest : sessions) {
                     if (!running.get()) break;
@@ -129,7 +145,8 @@ public final class ReliableUploader {
     }
 
     private static boolean needsWork(ReliableSessionManifest manifest) {
-        if (hasPendingAudio(manifest)
+        if (manifest.hasPendingMetadata()
+                || hasPendingAudio(manifest)
                 || manifest.transcriptChunkCount() < manifest.segments.size()) return true;
         return manifest.recordingFinished && !manifest.remoteCommitted;
     }
@@ -139,11 +156,39 @@ public final class ReliableUploader {
         currentSessionId = sessionId;
         currentOperation = "reconcile";
         lastProgressWallMs = System.currentTimeMillis();
-        if (!remoteFoldersKnown.contains(snapshot.folderId)) {
+        String folderKey = snapshot.folderId + "\u0000" + snapshot.folderName;
+        if (!remoteFoldersKnown.contains(folderKey)) {
             client.createFolder(snapshot.folderId, snapshot.folderName);
-            remoteFoldersKnown.add(snapshot.folderId);
+            store.markFolderRemote(snapshot.folderId, snapshot.folderName);
+            remoteFoldersKnown.add(folderKey);
         }
         ReliableSessionManifest manifest = store.load(sessionId);
+        boolean serverHasSession = manifest.remoteCommitted
+                || manifest.remoteManifestRevision > 0L;
+        if (!serverHasSession) {
+            for (ReliableSessionManifest.Segment value : manifest.segments) {
+                if (value.remoteAccepted || value.remotePartialBytes > 0L) {
+                    serverHasSession = true;
+                    break;
+                }
+            }
+        }
+        String remoteFolder = manifest.remoteFolderId == null
+                || manifest.remoteFolderId.isEmpty() ? manifest.folderId : manifest.remoteFolderId;
+        if (!remoteFolder.equals(manifest.folderId)) {
+            if (serverHasSession) {
+                listener.onState(sessionId, "Moving recording to " + manifest.folderName + " on the server");
+                client.moveSession(remoteFolder, manifest.folderId, manifest.sessionId);
+            }
+            store.markRemoteFolder(sessionId, manifest.folderId, manifest.folderName);
+            manifest = store.load(sessionId);
+        } else if (!manifest.folderName.equals(manifest.remoteFolderName)) {
+            store.markRemoteFolder(sessionId, manifest.folderId, manifest.folderName);
+            manifest = store.load(sessionId);
+        }
+        client.updateMetadata(manifest);
+        store.markRemoteDisplayName(sessionId, manifest.displayName);
+        manifest = store.load(sessionId);
 
         for (ReliableSessionManifest.Segment segment : manifest.orderedSegments()) {
             if (!running.get()) return;
