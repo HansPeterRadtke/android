@@ -45,6 +45,10 @@ Rejected elements: eagerly rendered player cards for every file, nested tables, 
 Acceptance tests: the current recording appears immediately; selecting another row changes the single player; paused current audio is playable; active current audio shows why Play is disabled; all closed recordings remain selectable; cleanup confirmation states exactly what is deleted and what remains on the server; list rows and controls survive large font settings.
 
 
-## App close contract
+## App background contract
 
-Back from the main recording screen means close the application, not leave a background worker. If microphone capture or local MP3 file work is active, the screen asks whether to keep the app open or close immediately. Close stops all workers and removes the notification. If only paused state or resumable server synchronization exists, Back closes immediately. Resume from PAUSED never opens the interrupted-recording dialog.
+Back, Home, or swiping the task removes the activity only. An already-started microphone foreground service continues recording, journaling, synchronizing, alarming, and recovering until the user presses Pause or Finish. The persistent notification provides Pause, Finish, and Silence alarm actions. Android force-stop and device shutdown remain external boundaries.
+
+## Performance contract
+
+The live microphone meter and duration may refresh several times per second, but they SHALL use in-memory state only. Filesystem scans, manifest parsing, recursive storage-size calculation, notification rebuilding, and diagnostic fsync SHALL NOT run in the live UI loop. Repository reconciliation SHALL be coalesced on a background worker. Hundred-millisecond durability fsync remains mandatory but SHALL NOT emit one diagnostic record per fsync.

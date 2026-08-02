@@ -19,3 +19,7 @@ A weak connection may still fail repeatedly, but no retry waits longer than five
 
 
 A network operation that remains blocked without a durable acknowledgement for twelve seconds is actively disconnected and retried. Jetson's resumable-part status remains authoritative, so retry begins at the server's fsynced byte offset. The manual Retry button replaces a blocked uploader instance. Copy debug exposes both the persisted per-chunk offset and the live worker offset so a disagreement is immediately visible.
+
+Swiping the Android task is a UI action only and does not call service shutdown. The service remains foreground while recording, recovering, alarming, converting or synchronizing. A default-network callback wakes the uploader immediately whenever any usable network appears, while the normal resumable retry loop remains authoritative.
+
+Android force-stop, revoked microphone permission, device shutdown, destroyed hardware, kernel loss and samples never delivered by AudioRecord remain platform boundaries. Every PCM block already returned by AudioRecord continues through the bounded queue and durable journal; the application never intentionally discards such a block.

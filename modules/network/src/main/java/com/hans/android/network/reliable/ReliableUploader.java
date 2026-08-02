@@ -129,9 +129,9 @@ public final class ReliableUploader {
     }
 
     private static boolean needsWork(ReliableSessionManifest manifest) {
-        return !manifest.remoteCommitted
-                || manifest.durableRemoteChunkCount() < manifest.segments.size()
-                || manifest.transcriptChunkCount() < manifest.segments.size();
+        if (hasPendingAudio(manifest)
+                || manifest.transcriptChunkCount() < manifest.segments.size()) return true;
+        return manifest.recordingFinished && !manifest.remoteCommitted;
     }
 
     private void reconcile(ReliableSessionManifest snapshot) throws Exception {
@@ -190,14 +190,6 @@ public final class ReliableUploader {
                             listener.onState(sessionId, "Sending chunk " + chunkNumber
                                     + " of " + chunkCount + " · " + durableBytes
                                     + " of " + totalBytes + " bytes durable");
-                            listener.onDiagnostic("DEBUG", "upload.part_durable", sessionId,
-                                    "Server durably acknowledged an upload part",
-                                    fields("seq", segment.seq,
-                                            "durable_bytes", durableBytes,
-                                            "total_bytes", totalBytes,
-                                            "server_id", serverId,
-                                            "manifest_revision", revision), null);
-                            listener.onChanged();
                         });
                 store.markRemoteAccepted(sessionId, segment.seq, ack.serverId,
                         ack.manifestRevision, ack.receivedAtMs, ack.durableAtMs);

@@ -431,6 +431,9 @@ public final class JournaledMp3Recorder {
         private int levelPeak;
         private long levelSampleCount;
         private float encodingGain = 1.0f;
+        private long syncCount;
+        private long totalSyncDurationMs;
+        private long maxSyncDurationMs;
         private boolean closed;
 
         ChunkWriter(ReliableSessionStore store, String sessionId, int seq,
@@ -512,11 +515,10 @@ public final class JournaledMp3Recorder {
             pcmOut.flush(); pcmOut.getFD().sync();
             mp3Out.flush(); mp3Out.getFD().sync();
             samplesSinceSync = 0L;
-            listener.onRecorderEvent("writer.chunk_sync", seq,
-                    pcmOpen.length() + mp3Open.length(),
-                    inputSamples * 1000L / inputSampleRate,
-                    "sync_duration_ms=" + Math.max(0L,
-                            SystemClock.elapsedRealtime() - started));
+            long durationMs = Math.max(0L, SystemClock.elapsedRealtime() - started);
+            syncCount++;
+            totalSyncDurationMs += durationMs;
+            maxSyncDurationMs = Math.max(maxSyncDurationMs, durationMs);
         }
 
         ChunkResult closeAndCommit() throws Exception {
@@ -549,6 +551,9 @@ public final class JournaledMp3Recorder {
                     "start_sample=" + startOutputSample + ", end_sample=" + endOutputSample
                             + ", frames=" + stats.frames
                             + ", final_encoding_gain=" + encodingGain
+                            + ", durability_sync_count=" + syncCount
+                            + ", durability_sync_total_ms=" + totalSyncDurationMs
+                            + ", durability_sync_max_ms=" + maxSyncDurationMs
                             + ", sha256=" + ReliableSessionStore.sha256File(mp3));
             return new ChunkResult(mp3, durationMs, endOutputSample);
         }

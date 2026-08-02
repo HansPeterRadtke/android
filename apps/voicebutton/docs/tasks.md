@@ -12,3 +12,8 @@ Version 0.13 adds four-kibibyte resumable HTTPS parts, per-part fsync acknowledg
 
 
 Version 0.14 adds an upload no-progress watchdog, active-connection cancellation, complete uploader replacement on manual retry, uploader watchdog diagnostics and a Copy debug clipboard report containing the complete local and remote-part ledger.
+
+Version 0.15 adds task-swipe-safe foreground recording, sticky background synchronization, continuity wake-lock renewal, immediate network callbacks, automatic microphone recovery, a repeating alarm-stream failure signal, high-priority error notification, in-app Silence alarm and Pause automatic recovery controls.
+
+
+Version 0.15 performance repair removes per-fsync and per-upload-part diagnostic writes, coalesces repository reconciliation on a dedicated worker, keeps live duration and microphone telemetry in memory, throttles notification rebuilds, avoids duplicate microphone enumeration, and places the primary action inside the top trust-state card.
