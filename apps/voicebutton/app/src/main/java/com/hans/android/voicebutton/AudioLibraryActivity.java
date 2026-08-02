@@ -428,8 +428,13 @@ public final class AudioLibraryActivity extends Activity {
             return new LibraryItem(folder.name,count+" recordings",true,false,null,null,folder,null);
         }
         static LibraryItem recording(ReliableSessionManifest manifest,File file,boolean playable){
-            PlayerSource source=playable?PlayerSource.recording(file,RecordingUi.title(manifest),file.length(),manifest.sessionId,manifest.folderId):null;
-            return new LibraryItem(RecordingUi.title(manifest),RecordingUi.humanState(manifest)+" · "+RecordingUi.formatBytes(RecordingUi.recordingBytes(manifest)),false,playable,null,manifest,null,source);
+            String fileName = playable && file != null ? file.getName()
+                    : RecordingUi.title(manifest) + ".mp3";
+            PlayerSource source=playable?PlayerSource.recording(file,fileName,file.length(),manifest.sessionId,manifest.folderId):null;
+            String detail = RecordingUi.title(manifest) + " · "
+                    + RecordingUi.humanState(manifest) + " · "
+                    + RecordingUi.formatBytes(RecordingUi.recordingBytes(manifest));
+            return new LibraryItem(fileName,detail,false,playable,null,manifest,null,source);
         }
         static LibraryItem document(DocumentFile file,Uri parent){
             String name=file.getName()==null?"Unnamed":file.getName();boolean directory=file.isDirectory();
@@ -442,9 +447,7 @@ public final class AudioLibraryActivity extends Activity {
         private final ArrayList<LibraryItem> items = new ArrayList<>();
 
         void replace(List<LibraryItem> values) {
-            items.clear();
-            items.addAll(values);
-            notifyDataSetChanged();
+            items.clear(); items.addAll(values); notifyDataSetChanged();
         }
         LibraryItem item(int position) { return items.get(position); }
         int position(LibraryItem item) { return items.indexOf(item); }
@@ -461,23 +464,36 @@ public final class AudioLibraryActivity extends Activity {
                 LinearLayout row = new LinearLayout(AudioLibraryActivity.this);
                 row.setOrientation(LinearLayout.VERTICAL);
                 row.setPadding(AndroidUi.dp(AudioLibraryActivity.this, 12),
-                        AndroidUi.dp(AudioLibraryActivity.this, 8),
+                        AndroidUi.dp(AudioLibraryActivity.this, 9),
                         AndroidUi.dp(AudioLibraryActivity.this, 12),
-                        AndroidUi.dp(AudioLibraryActivity.this, 8));
+                        AndroidUi.dp(AudioLibraryActivity.this, 9));
                 row.setBackgroundColor(Color.WHITE);
-                TextView title = AndroidUi.text(AudioLibraryActivity.this,
+                TextView head = AndroidUi.text(AudioLibraryActivity.this,
                         "", 16, true, AndroidUi.INK);
-                AndroidUi.stableLine(AudioLibraryActivity.this, title, 30);
+                head.setSingleLine(false);
+                head.setHorizontallyScrolling(false);
+                head.setEllipsize(null);
+                TextView tail = AndroidUi.text(AudioLibraryActivity.this,
+                        "", 13, false, AndroidUi.INK);
+                tail.setSingleLine(false);
+                tail.setHorizontallyScrolling(false);
+                tail.setEllipsize(null);
                 TextView detail = AndroidUi.small(AudioLibraryActivity.this, "");
-                AndroidUi.stableLine(AudioLibraryActivity.this, detail, 26);
-                row.addView(title);
+                detail.setSingleLine(false);
+                detail.setEllipsize(null);
+                row.addView(head);
+                row.addView(tail);
                 row.addView(detail);
-                holder = new RowHolder(row, title, detail);
+                holder = new RowHolder(row, head, tail, detail);
                 row.setTag(holder);
                 convert = row;
             }
             LibraryItem item = items.get(position);
-            holder.title.setText((item.directory ? "Folder · " : "") + item.title);
+            String completeName = (item.directory ? "Folder · " : "") + item.title;
+            FileNameParts parts = FileNameParts.split(completeName, 44);
+            holder.head.setText(parts.head);
+            holder.tail.setText(parts.tail);
+            holder.tail.setVisibility(parts.tail.isEmpty() ? View.GONE : View.VISIBLE);
             holder.detail.setText(item.detail);
             return convert;
         }
@@ -485,11 +501,13 @@ public final class AudioLibraryActivity extends Activity {
 
     private static final class RowHolder {
         final LinearLayout row;
-        final TextView title;
+        final TextView head;
+        final TextView tail;
         final TextView detail;
-        RowHolder(LinearLayout row, TextView title, TextView detail) {
+        RowHolder(LinearLayout row, TextView head, TextView tail, TextView detail) {
             this.row = row;
-            this.title = title;
+            this.head = head;
+            this.tail = tail;
             this.detail = detail;
         }
     }

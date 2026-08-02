@@ -550,7 +550,7 @@ public final class MainActivity extends Activity {
     }
 
     private void openPlayer() {
-        startActivity(new Intent(this, AudioLibraryActivity.class));
+        startActivity(new Intent(this, PlayerActivity.class));
     }
 
     private void showStatusDetails() {
