@@ -27,4 +27,37 @@ final class MainScreenText {
                 ? "Local protection: active · " + folderName
                 : "Local protection: ready";
     }
+    static String stateTitle(String state, boolean recording, boolean paused,
+                             boolean alarmActive) {
+        if (alarmActive) return "NEEDS ATTENTION";
+        if (recording) return "RECORDING";
+        if (paused) return "PAUSED";
+        if ("PREPARING".equals(state)) return "STARTING";
+        if ("FINISHING".equals(state) || "PAUSING".equals(state)) return "SAVING";
+        if ("FAILED".equals(state)) return "FAILED";
+        return "READY";
+    }
+
+    static String stateSummary(String state, boolean recording, boolean paused,
+                               boolean alarmActive, boolean openRecording) {
+        if (alarmActive) return "Recording stopped unexpectedly. Recovery is active.";
+        if (recording) return "Audio is being protected locally while server sync continues.";
+        if (paused) return "Recording is paused and safe to resume.";
+        if ("PREPARING".equals(state)) return "Opening the selected microphone.";
+        if ("FINISHING".equals(state) || "PAUSING".equals(state)) return "Saving the current audio safely.";
+        if ("FAILED".equals(state)) return "An action failed. Open More for details and recovery.";
+        if (openRecording) return "An unfinished recording is safe on this phone.";
+        return "Ready to start a protected recording.";
+    }
+
+    static String structureKey(String state, boolean recording, boolean paused,
+                               boolean alarmActive, boolean alarmAudible,
+                               boolean openRecording, String folderId,
+                               int deviceId, int sessionCount) {
+        return stateTitle(state, recording, paused, alarmActive) + '|'
+                + recording + '|' + paused + '|' + alarmActive + '|'
+                + alarmAudible + '|' + openRecording + '|'
+                + String.valueOf(folderId) + '|' + deviceId + '|' + sessionCount;
+    }
+
 }

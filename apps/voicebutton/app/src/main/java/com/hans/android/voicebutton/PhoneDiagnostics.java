@@ -220,20 +220,28 @@ public final class PhoneDiagnostics {
                         fields("dropped_debug_events", droppedDebugEvents,
                                 "dropped_info_events", droppedInfoEvents,
                                 "pending_bytes", pendingFile.length()), null);
-                appendBytes((dropped.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+                appendBytes((dropped.toString() + "\n").getBytes(StandardCharsets.UTF_8), true);
                 droppedDebugEvents = 0L;
                 droppedInfoEvents = 0L;
                 writeQueuePressureState();
             }
-            appendBytes(bytes);
+            appendBytes(bytes, WARN.equals(level) || ERROR.equals(level));
         } catch (Exception ignored) {
             // Diagnostics must never stop microphone capture or file recovery.
         }
     }
 
-    private void appendBytes(byte[] bytes) throws Exception {
+    private void appendBytes(byte[] bytes, boolean durable) throws Exception {
         try (FileOutputStream out = new FileOutputStream(pendingFile, true)) {
             out.write(bytes);
+            out.flush();
+            if (durable) out.getFD().sync();
+        }
+    }
+
+    private void syncPendingFile() throws Exception {
+        if (!pendingFile.isFile() || pendingFile.length() <= 0L) return;
+        try (FileOutputStream out = new FileOutputStream(pendingFile, true)) {
             out.flush();
             out.getFD().sync();
         }
@@ -248,6 +256,7 @@ public final class PhoneDiagnostics {
 
     private void flush() throws Exception {
         if (!pendingFile.isFile() || pendingFile.length() <= 0L) return;
+        syncPendingFile();
         Batch batch = readBatch();
         if (batch.events.length() == 0) {
             if (batch.consumedLines > 0) removeLeadingLines(batch.consumedLines);

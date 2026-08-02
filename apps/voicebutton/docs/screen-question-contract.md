@@ -52,3 +52,16 @@ Back, Home, or swiping the task removes the activity only. An already-started mi
 ## Performance contract
 
 The live microphone meter and duration may refresh several times per second, but they SHALL use in-memory state only. Filesystem scans, manifest parsing, recursive storage-size calculation, notification rebuilding, and diagnostic fsync SHALL NOT run in the live UI loop. Repository reconciliation SHALL be coalesced on a background worker. Hundred-millisecond durability fsync remains mandatory but SHALL NOT emit one diagnostic record per fsync.
+
+
+## Version 0.17 GUI acceptance contract
+
+The recorder overview answers only five questions: whether capture is active, how long it has run, whether local protection is active, whether the selected microphone has signal, and whether server synchronization is complete. It exposes one dominant recording action and one context-dependent secondary action. Folder and microphone selection are compact controls. Player, diagnostics, retry, refresh, version information, and raw status details live behind More.
+
+No normal overview may display worker names, protocol revisions, hashes, chunk sequence details, HTTP errors, retry backoff, or full service explanations. Every live text region is single-line, ellipsized, and allocated a stable height derived from the active Android font scale. Normal duration, level, and synchronization updates SHALL NOT add, remove, resize, or reorder views. Structural controls update only when the recording state, selected source, or available action changes.
+
+The player overview answers what is loaded, whether it is playing, where playback is, how to play or pause, how to skip, what the current speed is, and how to reach the library. Settings, file actions, engine details, memory, cache, and studio controls live behind More. The studio progress slot retains its geometry while idle.
+
+The library overview answers which source is being browsed, the current location, and which items are available. Management and import actions live behind More or the selected item's long-press menu. List rows SHALL reuse existing views rather than reconstructing their child hierarchy while scrolling.
+
+Copy support summary is bounded to twenty-four thousand characters and verifies that Android retained the exact clipboard text before reporting success. The complete per-session and per-chunk ledger is exported to a user-selected text document and is never placed on the clipboard. Ordinary diagnostic events are batched without a per-event fsync; warning and error events remain immediately durable.

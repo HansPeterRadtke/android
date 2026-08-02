@@ -175,17 +175,25 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
     private void buildScreen() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(AndroidUi.dp(this, 12), AndroidUi.dp(this, 8), AndroidUi.dp(this, 12), AndroidUi.dp(this, 8));
+        root.setPadding(AndroidUi.dp(this, 12), AndroidUi.dp(this, 8),
+                AndroidUi.dp(this, 12), AndroidUi.dp(this, 8));
         root.setBackgroundColor(AndroidUi.BG);
 
         LinearLayout toolbar = row();
-        Button back = compact("Back"); back.setOnClickListener(v -> finish());
-        Button home = compact("Home"); home.setOnClickListener(v -> home());
-        toolbar.addView(back, weighted()); toolbar.addView(home, weighted()); root.addView(toolbar);
+        Button back = AndroidUi.toolbarButton(this, "Back");
+        back.setOnClickListener(v -> finish());
+        Button home = AndroidUi.toolbarButton(this, "Home");
+        home.setOnClickListener(v -> home());
+        toolbar.addView(back, weighted());
+        toolbar.addView(home, weighted());
+        root.addView(toolbar);
 
         titleText = AndroidUi.text(this, "Player", 21, true, AndroidUi.INK);
-        titleText.setMaxLines(1); root.addView(titleText);
-        stateText = AndroidUi.small(this, "No audio selected"); root.addView(stateText);
+        AndroidUi.stableLine(this, titleText, 38);
+        root.addView(titleText);
+        stateText = AndroidUi.small(this, "Choose audio from Library");
+        AndroidUi.stableLine(this, stateText, 30);
+        root.addView(stateText);
 
         waveformView = new WaveformView(this);
         waveformView.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
@@ -193,58 +201,106 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
         waveformView.setBackgroundColor(Color.rgb(238, 242, 248));
         waveformView.setContentDescription("Decoded audio waveform. Tap to seek.");
         waveformView.setOnTouchListener((view, event) -> {
-            if (event.getAction() == android.view.MotionEvent.ACTION_UP && logicalDuration() > 0L) {
+            if (event.getAction() == android.view.MotionEvent.ACTION_UP
+                    && logicalDuration() > 0L) {
                 view.performClick();
-                float ratio = Math.max(0f, Math.min(1f, event.getX() / Math.max(1f, view.getWidth())));
+                float ratio = Math.max(0f, Math.min(1f,
+                        event.getX() / Math.max(1f, view.getWidth())));
                 long logical = Math.round(logicalDuration() * ratio);
-                player.seek(PlayerTimeline.physicalTime(logical, studioActive, studioSpeed));
+                player.seek(PlayerTimeline.physicalTime(logical,
+                        studioActive, studioSpeed));
                 return true;
             }
             return true;
         });
         root.addView(waveformView, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 92)));
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 94)));
 
-        seek = new SeekBar(this); seek.setMax(1000); seek.setContentDescription("Playback position");
+        seek = new SeekBar(this);
+        seek.setMax(1000);
+        seek.setContentDescription("Playback position");
         seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar bar, int value, boolean fromUser) {}
-            @Override public void onStartTrackingTouch(SeekBar bar) { userSeeking = true; }
+            @Override public void onProgressChanged(SeekBar bar, int value,
+                                                    boolean fromUser) {}
+            @Override public void onStartTrackingTouch(SeekBar bar) {
+                userSeeking = true;
+            }
             @Override public void onStopTrackingTouch(SeekBar bar) {
-                long logical = PlayerTimeline.fromProgress(bar.getProgress(), logicalDuration());
-                player.seek(PlayerTimeline.physicalTime(logical, studioActive, studioSpeed));
+                long logical = PlayerTimeline.fromProgress(
+                        bar.getProgress(), logicalDuration());
+                player.seek(PlayerTimeline.physicalTime(logical,
+                        studioActive, studioSpeed));
                 userSeeking = false;
             }
         });
-        root.addView(seek, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 42)));
-        timeText = AndroidUi.text(this, "00:00 / 00:00", 16, true, AndroidUi.INK); timeText.setGravity(Gravity.CENTER); root.addView(timeText);
+        root.addView(seek, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 38)));
+        timeText = AndroidUi.text(this, "00:00 / 00:00", 16, true, AndroidUi.INK);
+        timeText.setTypeface(android.graphics.Typeface.MONOSPACE,
+                android.graphics.Typeface.BOLD);
+        timeText.setGravity(Gravity.CENTER);
+        AndroidUi.stableLine(this, timeText, 30);
+        root.addView(timeText);
 
         LinearLayout transport = row();
-        previousButton = compact("Previous"); previousButton.setOnClickListener(v -> changeQueue(-1));
-        backSkipButton = compact("−10s"); backSkipButton.setOnClickListener(v -> player.skip(-settings.skipBack));
-        playButton = compact("Play"); playButton.setMinHeight(AndroidUi.dp(this, 58)); playButton.setOnClickListener(v -> player.playPause());
-        forwardSkipButton = compact("+10s"); forwardSkipButton.setOnClickListener(v -> player.skip(settings.skipForward));
-        nextButton = compact("Next"); nextButton.setOnClickListener(v -> changeQueue(1));
-        transport.addView(previousButton, weighted()); transport.addView(backSkipButton, weighted());
-        transport.addView(playButton, weighted()); transport.addView(forwardSkipButton, weighted()); transport.addView(nextButton, weighted()); root.addView(transport);
+        backSkipButton = AndroidUi.secondaryButton(this, "−10s");
+        backSkipButton.setOnClickListener(v -> player.skip(-settings.skipBack));
+        playButton = AndroidUi.primaryButton(this, "Play");
+        playButton.setOnClickListener(v -> player.playPause());
+        forwardSkipButton = AndroidUi.secondaryButton(this, "+10s");
+        forwardSkipButton.setOnClickListener(v -> player.skip(settings.skipForward));
+        transport.addView(backSkipButton, weighted());
+        LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(
+                0, AndroidUi.dp(this, 58), 1.35f);
+        playParams.setMargins(AndroidUi.dp(this, 3), AndroidUi.dp(this, 3),
+                AndroidUi.dp(this, 3), AndroidUi.dp(this, 3));
+        transport.addView(playButton, playParams);
+        transport.addView(forwardSkipButton, weighted());
+        root.addView(transport);
 
-        LinearLayout speedRow = row();
-        Button down = compact("Speed −"); down.setOnClickListener(v -> changeSpeed(-1));
-        speedText = AndroidUi.button(this, "1.00×"); speedText.setGravity(Gravity.CENTER); speedText.setOnClickListener(v -> showSpeedPresets());
-        Button up = compact("Speed +"); up.setOnClickListener(v -> changeSpeed(1));
-        speedRow.addView(down, weighted()); speedRow.addView(speedText, weighted()); speedRow.addView(up, weighted()); root.addView(speedRow);
-        modeText = AndroidUi.small(this, "Studio · Rubber Band R3 fine"); modeText.setGravity(Gravity.CENTER); root.addView(modeText);
-        studioProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal); studioProgress.setMax(1000); studioProgress.setVisibility(View.GONE); root.addView(studioProgress);
-        studioText = AndroidUi.small(this, ""); studioText.setGravity(Gravity.CENTER); root.addView(studioText);
+        LinearLayout queue = row();
+        previousButton = AndroidUi.toolbarButton(this, "Previous");
+        previousButton.setOnClickListener(v -> changeQueue(-1));
+        speedText = AndroidUi.secondaryButton(this, "1.00×");
+        speedText.setOnClickListener(v -> showSpeedPresets());
+        nextButton = AndroidUi.toolbarButton(this, "Next");
+        nextButton.setOnClickListener(v -> changeQueue(1));
+        queue.addView(previousButton, weighted());
+        queue.addView(speedText, weighted());
+        queue.addView(nextButton, weighted());
+        root.addView(queue);
 
-        LinearLayout menus = row();
-        Button library = compact("Library"); library.setOnClickListener(v -> openLibrary());
-        Button settingsButton = compact("Settings"); settingsButton.setOnClickListener(v -> showSettings());
-        Button file = compact("File"); file.setOnClickListener(v -> showFileActions());
-        Button info = compact("Memory"); info.setOnClickListener(v -> showMemory());
-        menus.addView(library, weighted()); menus.addView(settingsButton, weighted()); menus.addView(file, weighted()); menus.addView(info, weighted()); root.addView(menus);
-        root.addView(AndroidUi.small(this, "LibVLC broad-format playback · studio speed rendered on Thor"));
+        modeText = AndroidUi.small(this, "Studio speed is ready");
+        modeText.setGravity(Gravity.CENTER);
+        AndroidUi.stableLine(this, modeText, 28);
+        root.addView(modeText);
+        studioProgress = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        studioProgress.setMax(1000);
+        studioProgress.setProgress(0);
+        studioProgress.setVisibility(View.INVISIBLE);
+        root.addView(studioProgress, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8)));
+        studioText = AndroidUi.small(this, "Instant playback available");
+        studioText.setGravity(Gravity.CENTER);
+        AndroidUi.stableLine(this, studioText, 28);
+        root.addView(studioText);
+
+        Button library = AndroidUi.secondaryButton(this, "Library");
+        library.setOnClickListener(v -> openLibrary());
+        root.addView(library, fullWidthButton(50));
+        Button more = AndroidUi.toolbarButton(this, "More");
+        more.setOnClickListener(v -> showPlayerMenu());
+        root.addView(more, fullWidthButton(46));
         setContentView(root);
         updateLabels();
+    }
+
+    private LinearLayout.LayoutParams fullWidthButton(int heightDp) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, heightDp));
+        params.setMargins(0, AndroidUi.dp(this, 3), 0, AndroidUi.dp(this, 3));
+        return params;
     }
 
     private void openSource(PlayerSource source, boolean autoplay) {
@@ -327,14 +383,14 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
                         player.seek(PlayerTimeline.physicalTime(logical, true, studioSpeed));
                         if (!playing) player.pause();
                     }, 350L);
-                    studioProgress.setVisibility(View.GONE);
+                    studioProgress.setVisibility(View.INVISIBLE);
                     studioText.setText(result.engine + " · exact " + formatSpeed(result.speed));
                     modeText.setText("Studio · " + result.engine);
                 });
             } catch (Exception failure) {
                 runOnUiThread(() -> {
                     if (generation != studioGeneration.get()) return;
-                    studioProgress.setVisibility(View.GONE);
+                    studioProgress.setVisibility(View.INVISIBLE);
                     studioText.setText("Studio unavailable: " + failure.getMessage() + " · using instant mode");
                     modeText.setText("Instant fallback · pitch preserved");
                 });
@@ -360,7 +416,7 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
 
     private void cancelStudio() {
         studioGeneration.incrementAndGet(); if (studioFuture != null) studioFuture.cancel(true); studioFuture = null;
-        studioProgress.setVisibility(View.GONE);
+        studioProgress.setVisibility(View.INVISIBLE);
     }
 
     private void changeSpeed(int direction) { settings.adjust(direction); applySpeed(); }
@@ -373,6 +429,30 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
             if(which==0)settings.speed=1f; else if(which==1){showSettings();return;} else settings.speed=settings.presets.get(which-2);
             settings.save(); applySpeed();
         }).setNegativeButton("Back",null).show();
+    }
+
+    private void showPlayerMenu() {
+        String[] actions = {
+                "Player settings",
+                "File actions",
+                "Memory and engine",
+                "Clear studio cache",
+                "About player"
+        };
+        new AlertDialog.Builder(this).setTitle("More")
+                .setItems(actions, (dialog, which) -> {
+                    if (which == 0) showSettings();
+                    else if (which == 1) showFileActions();
+                    else if (which == 2) showMemory();
+                    else if (which == 3) clearStudioCache();
+                    else showPlayerAbout();
+                }).setNegativeButton("Back", null).show();
+    }
+
+    private void showPlayerAbout() {
+        new AlertDialog.Builder(this).setTitle("Player")
+                .setMessage("LibVLC provides broad-format playback. Studio speed uses Rubber Band R3 fine rendering on Thor. Detailed controls are hidden from the playback overview by design.")
+                .setPositiveButton("Back", null).show();
     }
 
     private void showSettings() {
@@ -570,7 +650,7 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
 
     private LinearLayout row(){LinearLayout row=new LinearLayout(this);row.setOrientation(LinearLayout.HORIZONTAL);row.setGravity(Gravity.CENTER);return row;}
     private LinearLayout.LayoutParams weighted(){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,AndroidUi.dp(this,52),1f);p.setMargins(AndroidUi.dp(this,2),AndroidUi.dp(this,2),AndroidUi.dp(this,2),AndroidUi.dp(this,2));return p;}
-    private Button compact(String text){Button b=AndroidUi.button(this,text);b.setTextSize(12);b.setPadding(2,0,2,0);return b;}
+    private Button compact(String text){return AndroidUi.toolbarButton(this,text);}
     private EditText field(LinearLayout box,String label,float value){return textField(box,label,String.format(Locale.US,"%g",value));}
     private EditText textField(LinearLayout box,String label,String value){box.addView(AndroidUi.small(this,label));EditText input=new EditText(this);input.setSingleLine(true);input.setText(value);box.addView(input);return input;}
     private RadioButton radio(String label,boolean checked){RadioButton b=new RadioButton(this);b.setId(View.generateViewId());b.setText(label);b.setChecked(checked);return b;}

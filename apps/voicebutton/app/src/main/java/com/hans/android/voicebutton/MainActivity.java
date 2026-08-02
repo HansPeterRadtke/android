@@ -11,12 +11,16 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.view.View;
+import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
@@ -38,12 +42,18 @@ import com.hans.android.audio.reliable.ReliableSessionManifest;
 import com.hans.android.audio.reliable.ReliableSessionStore;
 import com.hans.android.common_ui.AndroidUi;
 
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @SuppressLint("SetTextI18n")
 public final class MainActivity extends Activity {
     private static final int PERMISSION_REQUEST = 1001;
+    private static final int DEBUG_EXPORT_REQUEST = 1002;
 
     private final List<AudioInputOption> inputs = new ArrayList<>();
     private final List<ReliableSessionStore.Folder> folders = new ArrayList<>();
@@ -52,20 +62,16 @@ public final class MainActivity extends Activity {
     private TextView statusDetail;
     private ProgressBar progressBar;
     private TextView transferText;
-    private Spinner folderSpinner;
-    private TextView folderSummaryText;
-    private Spinner inputSpinner;
+    private TextView currentText;
     private TextView routedText;
     private TextView durationText;
-    private TextView storageText;
-    private TextView currentText;
     private TextView micLevelText;
     private ProgressBar micLevelBar;
     private Button primaryButton;
-    private Button finishButton;
-    private TextView finishReason;
-    private Button recordingsButton;
-    private Button silenceAlarmButton;
+    private Button secondaryButton;
+    private Button folderButton;
+    private Button inputButton;
+    private Button moreButton;
 
     private int selectedDeviceId = AudioInputOption.DEFAULT_DEVICE_ID;
     private String selectedFolderId = "default";
@@ -77,9 +83,28 @@ public final class MainActivity extends Activity {
     private RecordingService.Snapshot snapshot = RecordingService.Snapshot.initial();
     private String promptedSessionId = "";
     private PhoneDiagnostics diagnostics;
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private final ExecutorService uiWorker = Executors.newSingleThreadExecutor();
+    private final AtomicBoolean inputRefreshRunning = new AtomicBoolean(false);
+    private final AtomicBoolean folderRefreshRunning = new AtomicBoolean(false);
+    private volatile RecordingService.Snapshot pendingSnapshot;
+    private boolean renderScheduled;
+    private String lastStructureKey = "";
 
-    private final RecordingService.StatusListener statusListener = value ->
-            runOnUiThread(() -> render(value));
+    private final Runnable renderPending = () -> {
+        renderScheduled = false;
+        RecordingService.Snapshot value = pendingSnapshot;
+        if (value != null) render(value);
+    };
+
+    private final RecordingService.StatusListener statusListener = value -> {
+        pendingSnapshot = value;
+        uiHandler.post(() -> {
+            if (renderScheduled) return;
+            renderScheduled = true;
+            uiHandler.postDelayed(renderPending, 100L);
+        });
+    };
 
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -134,63 +159,66 @@ public final class MainActivity extends Activity {
         super.onStop();
     }
 
+    @Override protected void onDestroy() {
+        uiHandler.removeCallbacksAndMessages(null);
+        uiWorker.shutdownNow();
+        super.onDestroy();
+    }
+
     private void buildScreen() {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(AndroidUi.BG);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        int pad = AndroidUi.dp(this, 14);
-        content.setPadding(pad, pad, pad, pad * 2);
+        int pad = AndroidUi.dp(this, 12);
+        content.setPadding(pad, pad, pad, pad);
         scroll.addView(content, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        content.addView(AndroidUi.title(this, "Voice Button"));
-        content.addView(AndroidUi.subtitle(this,
-                "Recording and transfer continue when this screen is closed. Use Pause or Finish to stop recording."));
+        TextView title = AndroidUi.title(this, "Voice Button");
+        AndroidUi.stableLine(this, title, 42);
+        content.addView(title);
 
         statusCard = AndroidUi.card(this);
-        statusTitle = AndroidUi.text(this, "READY", 22, true, AndroidUi.GREEN);
-        statusDetail = AndroidUi.body(this, "Choose a microphone and start recording");
-        durationText = AndroidUi.text(this, "00:00:00", 28, true, AndroidUi.INK);
-        currentText = AndroidUi.body(this, "Local protection: ready");
-        storageText = AndroidUi.small(this, "Local storage: 0 B");
-        routedText = AndroidUi.body(this, "Microphone: not recording");
+        statusCard.setPadding(AndroidUi.dp(this, 16), AndroidUi.dp(this, 12),
+                AndroidUi.dp(this, 16), AndroidUi.dp(this, 12));
+        statusTitle = AndroidUi.text(this, "READY", 20, true, AndroidUi.GREEN);
+        AndroidUi.stableLine(this, statusTitle, 34);
+        durationText = AndroidUi.text(this, "00:00:00", 34, true, AndroidUi.INK);
+        durationText.setTypeface(android.graphics.Typeface.MONOSPACE,
+                android.graphics.Typeface.BOLD);
+        durationText.setGravity(Gravity.CENTER);
+        durationText.setMinHeight(AndroidUi.dp(this, 52));
+        durationText.setMaxHeight(AndroidUi.dp(this, 52));
+        statusDetail = AndroidUi.body(this, "Ready to start a protected recording.");
+        AndroidUi.stableLine(this, statusDetail, 38);
+        currentText = AndroidUi.small(this, "Local protection: ready");
+        AndroidUi.stableLine(this, currentText, 30);
+        routedText = AndroidUi.small(this, "Microphone: checking…");
+        AndroidUi.stableLine(this, routedText, 30);
         micLevelText = AndroidUi.small(this, "Microphone signal: not recording");
+        AndroidUi.stableLine(this, micLevelText, 28);
         micLevelBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        micLevelBar.setIndeterminate(false);
-        micLevelBar.setMax(1000);
-        micLevelBar.setProgress(0);
+        micLevelBar.setMax(1000); micLevelBar.setProgress(0);
         micLevelBar.setContentDescription("Live microphone input level");
         transferText = AndroidUi.small(this, "Server: nothing waiting");
+        AndroidUi.stableLine(this, transferText, 30);
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        progressBar.setIndeterminate(false);
-        progressBar.setMax(1000);
-        progressBar.setProgress(0);
-        progressBar.setContentDescription("Server transmission progress");
-
-        silenceAlarmButton = AndroidUi.button(this, "Silence recording error alarm");
-        silenceAlarmButton.setMinHeight(AndroidUi.dp(this, 54));
-        silenceAlarmButton.setTextColor(Color.WHITE);
-        silenceAlarmButton.setBackground(AndroidUi.round(AndroidUi.RED,
-                AndroidUi.RED, AndroidUi.dp(this, 14)));
-        silenceAlarmButton.setOnClickListener(v -> sendAction(
-                RecordingService.ACTION_SILENCE_ALARM, snapshot.currentSessionId, false));
-        silenceAlarmButton.setVisibility(View.GONE);
-
-        primaryButton = AndroidUi.button(this, "Start recording");
-        primaryButton.setMinHeight(AndroidUi.dp(this, 64));
-        primaryButton.setTextSize(18);
+        progressBar.setMax(1000); progressBar.setProgress(0);
+        progressBar.setContentDescription("Server synchronization progress");
+        primaryButton = AndroidUi.primaryButton(this, "Start recording");
         primaryButton.setContentDescription("Primary recording action");
         primaryButton.setOnClickListener(v -> primaryAction());
+        secondaryButton = AndroidUi.secondaryButton(this, "Player and files");
+        secondaryButton.setOnClickListener(v -> openPlayer());
 
         statusCard.addView(statusTitle);
-        statusCard.addView(statusDetail);
         statusCard.addView(durationText);
+        statusCard.addView(statusDetail);
         statusCard.addView(currentText);
-        statusCard.addView(silenceAlarmButton);
-        statusCard.addView(primaryButton);
-        statusCard.addView(storageText);
+        statusCard.addView(primaryButton, fixedButtonParams(58));
+        statusCard.addView(secondaryButton, fixedButtonParams(50));
         statusCard.addView(routedText);
         statusCard.addView(micLevelText);
         statusCard.addView(micLevelBar, new LinearLayout.LayoutParams(
@@ -198,256 +226,216 @@ public final class MainActivity extends Activity {
         statusCard.addView(transferText);
         statusCard.addView(progressBar, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 12)));
-
         content.addView(statusCard);
 
-        finishButton = AndroidUi.button(this, "Finish recording");
-        finishButton.setMinHeight(AndroidUi.dp(this, 54));
-        finishButton.setTextColor(AndroidUi.RED);
-        finishButton.setBackground(AndroidUi.round(Color.WHITE, AndroidUi.RED,
-                AndroidUi.dp(this, 14)));
-        finishButton.setOnClickListener(v -> finishCurrent());
-        content.addView(finishButton);
-        finishReason = AndroidUi.small(this,
-                "Finish closes this recording permanently. Pause keeps it open for Resume.");
-        content.addView(finishReason);
+        LinearLayout setup = new LinearLayout(this);
+        setup.setOrientation(LinearLayout.HORIZONTAL);
+        folderButton = AndroidUi.secondaryButton(this, "Folder: Default");
+        folderButton.setSingleLine(true);
+        folderButton.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        folderButton.setOnClickListener(v -> showFolderPicker());
+        inputButton = AndroidUi.secondaryButton(this, "Microphone: checking…");
+        inputButton.setSingleLine(true);
+        inputButton.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        inputButton.setOnClickListener(v -> showInputPicker());
+        setup.addView(folderButton, weightedButtonParams());
+        setup.addView(inputButton, weightedButtonParams());
+        content.addView(setup);
 
-        LinearLayout setupCard = AndroidUi.card(this);
-        setupCard.addView(AndroidUi.section(this, "Recording setup"));
-        folderSummaryText = AndroidUi.small(this, "Folder: Default");
-        setupCard.addView(folderSummaryText);
-        folderSpinner = new Spinner(this);
-        folderSpinner.setMinimumHeight(AndroidUi.dp(this, 52));
-        folderSpinner.setPadding(AndroidUi.dp(this, 12), 0,
-                AndroidUi.dp(this, 12), 0);
-        folderSpinner.setBackground(AndroidUi.round(Color.WHITE,
-                Color.rgb(205, 214, 225), AndroidUi.dp(this, 12)));
-        folderSpinner.setPrompt("Recording folder");
-        folderSpinner.setContentDescription("Recording folder menu. Includes create new.");
-        setupCard.addView(folderSpinner, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 52)));
-        inputSpinner = new Spinner(this);
-        inputSpinner.setMinimumHeight(AndroidUi.dp(this, 52));
-        inputSpinner.setContentDescription("Choose microphone input");
-        setupCard.addView(inputSpinner);
-        Button refresh = AndroidUi.button(this, "Refresh microphones");
-        refresh.setMinHeight(AndroidUi.dp(this, 48));
-        refresh.setOnClickListener(v -> {
-            diag(PhoneDiagnostics.INFO, "microphone.refresh_pressed", snapshot.currentSessionId,
-                    "Refresh microphones was pressed", PhoneDiagnostics.fields());
-            refreshInputs();
-        });
-        setupCard.addView(refresh);
-        content.addView(setupCard);
-
-        recordingsButton = AndroidUi.button(this, "Player and files");
-        recordingsButton.setMinHeight(AndroidUi.dp(this, 54));
-        recordingsButton.setOnClickListener(v ->
-                startActivity(new Intent(this, AudioLibraryActivity.class)));
-        content.addView(recordingsButton);
-
-        LinearLayout tools = new LinearLayout(this);
-        tools.setOrientation(LinearLayout.HORIZONTAL);
-        Button retry = AndroidUi.button(this, "Retry transfer");
-        retry.setOnClickListener(v -> sendAction(RecordingService.ACTION_RETRY, null, false));
-        LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(0,
-                AndroidUi.dp(this, 52), 1f);
-        half.setMargins(0, AndroidUi.dp(this, 6), AndroidUi.dp(this, 4), 0);
-        tools.addView(retry, half);
-        Button copyDebug = AndroidUi.button(this, "Copy debug");
-        copyDebug.setContentDescription("Copy complete Voice Button debug report to clipboard");
-        copyDebug.setOnClickListener(v -> copyDebugReport(copyDebug));
-        LinearLayout.LayoutParams otherHalf = new LinearLayout.LayoutParams(0,
-                AndroidUi.dp(this, 52), 1f);
-        otherHalf.setMargins(AndroidUi.dp(this, 4), AndroidUi.dp(this, 6), 0, 0);
-        tools.addView(copyDebug, otherHalf);
-        content.addView(tools);
-        content.addView(AndroidUi.small(this, "Version " + BuildConfig.VERSION_NAME));
+        moreButton = AndroidUi.toolbarButton(this, "More");
+        moreButton.setOnClickListener(v -> showMoreMenu());
+        content.addView(moreButton, fixedButtonParams(48));
 
         setContentView(scroll);
     }
 
+    private LinearLayout.LayoutParams fixedButtonParams(int heightDp) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, heightDp));
+        params.setMargins(0, AndroidUi.dp(this, 4), 0, AndroidUi.dp(this, 4));
+        return params;
+    }
+
+    private LinearLayout.LayoutParams weightedButtonParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                0, AndroidUi.dp(this, 52), 1f);
+        params.setMargins(AndroidUi.dp(this, 3), AndroidUi.dp(this, 4),
+                AndroidUi.dp(this, 3), AndroidUi.dp(this, 4));
+        return params;
+    }
+
     private void refreshFolders() {
-        if (folderSpinner == null) return;
-        updatingFolders = true;
-        folders.clear();
-        if (service != null) folders.addAll(service.listFolders());
-        if (folders.isEmpty()) folders.add(new ReliableSessionStore.Folder("default", "Default", 0L));
-        List<String> labels = new ArrayList<>();
-        int selectedPosition = 0;
-        for (int i = 0; i < folders.size(); i++) {
-            ReliableSessionStore.Folder folder = folders.get(i);
-            labels.add(folder.name);
-            if (folder.id.equals(selectedFolderId)) selectedPosition = i;
-        }
-        labels.add("<Create new>");
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_dropdown_item, labels);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        folderSpinner.setAdapter(adapter);
-        folderSpinner.setSelection(selectedPosition);
-        ReliableSessionStore.Folder selected = folders.get(selectedPosition);
-        selectedFolderId = selected.id;
-        selectedFolderName = selected.name;
-        folderSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (updatingFolders) return;
-                if (position == folders.size()) {
-                    int restore = 0;
-                    for (int i = 0; i < folders.size(); i++) {
-                        if (folders.get(i).id.equals(selectedFolderId)) restore = i;
+        RecordingService value = service;
+        if (value == null || !folderRefreshRunning.compareAndSet(false, true)) return;
+        uiWorker.execute(() -> {
+            List<ReliableSessionStore.Folder> loaded = new ArrayList<>();
+            try { loaded.addAll(value.listFolders()); }
+            catch (Exception ignored) {}
+            if (loaded.isEmpty()) loaded.add(new ReliableSessionStore.Folder(
+                    "default", "Default", 0L));
+            runOnUiThread(() -> {
+                folderRefreshRunning.set(false);
+                folders.clear(); folders.addAll(loaded);
+                boolean selectedExists = false;
+                for (ReliableSessionStore.Folder folder : folders) {
+                    if (folder.id.equals(selectedFolderId)) {
+                        selectedFolderName = folder.name;
+                        selectedExists = true;
+                        break;
                     }
-                    updatingFolders = true;
-                    folderSpinner.setSelection(restore);
-                    updatingFolders = false;
-                    showCreateFolderDialog();
-                    return;
                 }
-                if (position >= 0 && position < folders.size()) {
-                    ReliableSessionStore.Folder folder = folders.get(position);
-                    selectedFolderId = folder.id;
-                    selectedFolderName = folder.name;
-                    diag(PhoneDiagnostics.INFO, "folder.selected", snapshot.currentSessionId,
-                            "A recording folder was selected",
-                            PhoneDiagnostics.fields("folder_id", folder.id, "folder_name", folder.name));
+                if (!selectedExists) {
+                    selectedFolderId = folders.get(0).id;
+                    selectedFolderName = folders.get(0).name;
                 }
-            }
-            @Override public void onNothingSelected(AdapterView<?> parent) {}
+                updateSetupButtons();
+            });
         });
-        updatingFolders = false;
+    }
+
+    private void showFolderPicker() {
+        if (snapshot.recording || snapshot.openSession != null) {
+            new AlertDialog.Builder(this).setTitle("Folder locked for this recording")
+                    .setMessage("Pause or finish the current recording before changing its folder.")
+                    .setPositiveButton("Back", null).show();
+            return;
+        }
+        String[] labels = new String[folders.size() + 1];
+        for (int i = 0; i < folders.size(); i++) labels[i] = folders.get(i).name;
+        labels[folders.size()] = "Create new folder…";
+        new AlertDialog.Builder(this).setTitle("Recording folder")
+                .setItems(labels, (dialog, which) -> {
+                    if (which == folders.size()) {
+                        showCreateFolderDialog();
+                    } else {
+                        ReliableSessionStore.Folder folder = folders.get(which);
+                        selectedFolderId = folder.id;
+                        selectedFolderName = folder.name;
+                        updateSetupButtons();
+                        diag(PhoneDiagnostics.INFO, "folder.selected", snapshot.currentSessionId,
+                                "A recording folder was selected",
+                                PhoneDiagnostics.fields("folder_id", folder.id,
+                                        "folder_name", folder.name));
+                    }
+                }).setNegativeButton("Back", null).show();
     }
 
     private void showCreateFolderDialog() {
-        if (snapshot.recording || snapshot.openSession != null) {
-            new AlertDialog.Builder(this)
-                    .setTitle("Finish the current recording first")
-                    .setMessage("A recording keeps its original folder. Finish it before creating or switching folders.")
-                    .setPositiveButton("OK", null).show();
-            return;
-        }
         EditText input = new EditText(this);
-        input.setSingleLine(true);
-        input.setHint("Folder name");
+        input.setSingleLine(true); input.setHint("Folder name");
         int pad = AndroidUi.dp(this, 20);
         LinearLayout container = new LinearLayout(this);
         container.setPadding(pad, 0, pad, 0);
         container.addView(input, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Create recording folder")
-                .setView(container)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Create", null)
-                .create();
+                .setTitle("Create recording folder").setView(container)
+                .setNegativeButton("Back", null).setPositiveButton("Create", null).create();
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
                 .setOnClickListener(view -> {
                     String name = input.getText().toString().trim();
-                    if (name.isEmpty()) {
-                        input.setError("Enter a folder name");
-                        return;
-                    }
-                    if (service == null) {
-                        input.setError("Recording service is not ready");
-                        return;
-                    }
+                    if (name.isEmpty()) { input.setError("Enter a folder name"); return; }
+                    RecordingService value = service;
+                    if (value == null) { input.setError("Recording service is not ready"); return; }
                     dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
-                    new Thread(() -> {
+                    uiWorker.execute(() -> {
                         try {
-                            ReliableSessionStore.Folder created = service.createFolder(name);
+                            ReliableSessionStore.Folder created = value.createFolder(name);
                             runOnUiThread(() -> {
                                 selectedFolderId = created.id;
                                 selectedFolderName = created.name;
-                                refreshFolders();
-                                dialog.dismiss();
+                                dialog.dismiss(); refreshFolders(); updateSetupButtons();
                             });
                         } catch (Exception failure) {
                             runOnUiThread(() -> {
                                 dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
-                                input.setError(PhoneDiagnostics.exactFailure("Creating folder", failure));
+                                input.setError(PhoneDiagnostics.exactFailure(
+                                        "Creating folder", failure));
                             });
                         }
-                    }, "voicebutton-create-folder").start();
+                    });
                 }));
         dialog.show();
     }
 
     private void refreshInputs() {
         inputsLoaded = true;
+        if (!inputRefreshRunning.compareAndSet(false, true)) return;
+        inputButton.setText("Microphone: checking…");
+        inputButton.setEnabled(false);
         int preserve = selectedDeviceId;
-        long refreshStarted = android.os.SystemClock.elapsedRealtime();
-        inputs.clear();
-        inputs.addAll(AudioInputCatalog.list(this));
-        org.json.JSONArray available = new org.json.JSONArray();
-        for (AudioInputOption option : inputs) {
-            org.json.JSONObject item = new org.json.JSONObject();
-            try {
-                item.put("device_id", option.getDeviceId());
-                item.put("device_type", option.getDeviceType());
-                item.put("label", option.getLabel());
-                item.put("category", option.getCategory().name());
-            } catch (Exception ignored) {}
-            available.put(item);
-        }
-        org.json.JSONObject rawDiagnostics = AudioInputCatalog.diagnosticSnapshot(this);
-        diag(PhoneDiagnostics.INFO, "microphone.refresh_result", snapshot.currentSessionId,
-                "Currently available physical microphone list was refreshed",
-                PhoneDiagnostics.fields("available_count", inputs.size(),
-                        "devices", available,
-                        "android_audio_diagnostics", rawDiagnostics,
-                        "refresh_duration_ms", Math.max(0L,
-                                android.os.SystemClock.elapsedRealtime() - refreshStarted),
-                        "bluetooth_permission", Build.VERSION.SDK_INT < 31
-                                || hasPermission(Manifest.permission.BLUETOOTH_CONNECT),
-                        "record_permission", hasPermission(Manifest.permission.RECORD_AUDIO)));
-        ArrayAdapter<AudioInputOption> adapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, inputs);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        inputSpinner.setAdapter(adapter);
+        uiWorker.execute(() -> {
+            long started = android.os.SystemClock.elapsedRealtime();
+            List<AudioInputOption> loaded = AudioInputCatalog.list(this);
+            org.json.JSONObject rawDiagnostics = AudioInputCatalog.diagnosticSnapshot(this);
+            long duration = Math.max(0L, android.os.SystemClock.elapsedRealtime() - started);
+            runOnUiThread(() -> applyInputs(loaded, preserve));
+            diag(PhoneDiagnostics.INFO, "microphone.refresh_result", snapshot.currentSessionId,
+                    "Currently available microphone list was refreshed",
+                    PhoneDiagnostics.fields("available_count", loaded.size(),
+                            "android_audio_diagnostics", rawDiagnostics,
+                            "refresh_duration_ms", duration));
+        });
+    }
+
+    private void applyInputs(List<AudioInputOption> loaded, int preserve) {
+        inputRefreshRunning.set(false);
+        inputs.clear(); inputs.addAll(loaded);
         if (inputs.isEmpty()) {
             selectedDeviceId = AudioInputOption.DEFAULT_DEVICE_ID;
-            inputSpinner.setEnabled(false);
-            inputSpinner.setContentDescription("No real microphone is currently available");
-            routedText.setText("Available input: none. Connect a microphone and press Refresh connected inputs.");
-            if (snapshot != null) render(snapshot);
+            inputButton.setText("Microphone: none available");
+            inputButton.setEnabled(true);
+            render(snapshot);
             return;
         }
         int selected = 0;
-        boolean preserved = false;
         for (int i = 0; i < inputs.size(); i++) {
-            if (inputs.get(i).getDeviceId() == preserve) {
-                selected = i;
-                preserved = true;
-                break;
-            }
+            if (inputs.get(i).getDeviceId() == preserve) { selected = i; break; }
         }
-        inputSpinner.setSelection(selected);
         selectedDeviceId = inputs.get(selected).getDeviceId();
-        inputSpinner.setEnabled(!snapshot.recording);
-        inputSpinner.setContentDescription("Choose a currently available microphone input");
-        inputSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (position >= 0 && position < inputs.size()) {
-                    AudioInputOption selected = inputs.get(position);
+        inputButton.setEnabled(true);
+        updateSetupButtons();
+        render(snapshot);
+    }
+
+    private void showInputPicker() {
+        if (snapshot.recording) {
+            new AlertDialog.Builder(this).setTitle("Microphone locked while recording")
+                    .setMessage("Pause the recording before selecting another microphone.")
+                    .setPositiveButton("Back", null).show();
+            return;
+        }
+        String[] labels = new String[inputs.size() + 1];
+        for (int i = 0; i < inputs.size(); i++) labels[i] = inputs.get(i).getLabel();
+        labels[inputs.size()] = "Refresh microphone list";
+        new AlertDialog.Builder(this).setTitle("Microphone")
+                .setItems(labels, (dialog, which) -> {
+                    if (which == inputs.size()) { refreshInputs(); return; }
+                    AudioInputOption selected = inputs.get(which);
                     selectedDeviceId = selected.getDeviceId();
+                    updateSetupButtons();
                     diag(PhoneDiagnostics.INFO, "microphone.selected", snapshot.currentSessionId,
                             "A microphone was selected",
                             PhoneDiagnostics.fields("device_id", selected.getDeviceId(),
                                     "device_type", selected.getDeviceType(),
-                                    "label", selected.getLabel(),
-                                    "category", selected.getCategory().name()));
-                }
-            }
-            @Override public void onNothingSelected(AdapterView<?> parent) {
-                selectedDeviceId = AudioInputOption.DEFAULT_DEVICE_ID;
-            }
-        });
-        if (!preserved && preserve != AudioInputOption.DEFAULT_DEVICE_ID) {
-            routedText.setText("The previous microphone disconnected. Select one of the currently available inputs.");
+                                    "label", selected.getLabel()));
+                }).setNegativeButton("Back", null).show();
+    }
+
+    private void updateSetupButtons() {
+        if (folderButton != null) folderButton.setText("Folder: " + selectedFolderName);
+        if (inputButton != null) inputButton.setText("Microphone: " + selectedInputLabel());
+    }
+
+    private String selectedInputLabel() {
+        for (AudioInputOption input : inputs) {
+            if (input.getDeviceId() == selectedDeviceId) return input.getLabel();
         }
-        if (snapshot != null) render(snapshot);
+        return inputs.isEmpty() ? "none available" : inputs.get(0).getLabel();
     }
 
     private void primaryAction() {
+
         diag(PhoneDiagnostics.INFO, "ui.main.primary_pressed", snapshot.currentSessionId,
                 "Primary recording action was pressed",
                 PhoneDiagnostics.fields("state", snapshot.state,
@@ -497,12 +485,17 @@ public final class MainActivity extends Activity {
         ReliableSessionManifest open = snapshot.openSession;
         if (open == null && !snapshot.recording) return;
         String sessionId = open == null ? snapshot.currentSessionId : open.sessionId;
-        diag(PhoneDiagnostics.INFO, "ui.main.finish_pressed", sessionId,
-                "Finish recording button was pressed and accepted immediately",
-                PhoneDiagnostics.fields("state", snapshot.state,
-                        "recording", snapshot.recording,
-                        "paused", snapshot.paused));
-        sendAction(RecordingService.ACTION_FINISH, sessionId, false);
+        new AlertDialog.Builder(this).setTitle("Finish this recording?")
+                .setMessage("Finish closes this recording permanently. Audio already captured stays safe and synchronization continues in the background.")
+                .setNegativeButton("Back", null)
+                .setPositiveButton("Finish recording", (dialog, which) -> {
+                    diag(PhoneDiagnostics.INFO, "ui.main.finish_pressed", sessionId,
+                            "Finish recording was confirmed",
+                            PhoneDiagnostics.fields("state", snapshot.state,
+                                    "recording", snapshot.recording,
+                                    "paused", snapshot.paused));
+                    sendAction(RecordingService.ACTION_FINISH, sessionId, false);
+                }).show();
     }
 
     private void showRecoveryDialog(ReliableSessionManifest interrupted) {
@@ -531,46 +524,120 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
-    private void copyDebugReport(Button button) {
-        button.setEnabled(false);
-        button.setText("Building debug report…");
-        new Thread(() -> {
-            String report;
-            try {
-                RecordingService value = service;
-                if (value == null) {
-                    report = "Voice Button debug report\napp_version="
-                            + BuildConfig.VERSION_NAME + "\nservice=not_connected\n"
-                            + "snapshot_state=" + snapshot.state + "\n"
-                            + "snapshot_explanation=" + snapshot.explanation + "\n";
-                } else {
-                    report = value.buildDebugReport();
-                }
-            } catch (Exception failure) {
-                report = "Voice Button debug report failed: "
-                        + failure.getClass().getName() + ": " + failure.getMessage();
+    private void showMoreMenu() {
+        String[] actions = {
+                "Player and files",
+                "Current status details",
+                "Refresh microphones",
+                "Retry synchronization",
+                "Copy support summary",
+                "Export full diagnostics",
+                "About"
+        };
+        new AlertDialog.Builder(this).setTitle("More")
+                .setItems(actions, (dialog, which) -> {
+                    if (which == 0) openPlayer();
+                    else if (which == 1) showStatusDetails();
+                    else if (which == 2) refreshInputs();
+                    else if (which == 3) sendAction(RecordingService.ACTION_RETRY, null, false);
+                    else if (which == 4) copySupportSummary();
+                    else if (which == 5) exportFullDiagnostics();
+                    else showAbout();
+                }).setNegativeButton("Back", null).show();
+    }
+
+    private void openPlayer() {
+        startActivity(new Intent(this, AudioLibraryActivity.class));
+    }
+
+    private void showStatusDetails() {
+        String message = "State: " + snapshot.state
+                + "\n\n" + snapshot.explanation
+                + "\n\nMicrophone: " + snapshot.routedInput
+                + "\nFolder: " + selectedFolderName
+                + "\nPending server data: "
+                + RecordingUi.formatBytes(snapshot.uploadPendingBytes);
+        new AlertDialog.Builder(this).setTitle("Current status")
+                .setMessage(message).setPositiveButton("Back", null).show();
+    }
+
+    private void copySupportSummary() {
+        String report;
+        RecordingService value = service;
+        if (value == null) {
+            report = "Voice Button support summary\napp_version="
+                    + BuildConfig.VERSION_NAME + "\nservice=not_connected\nstate="
+                    + snapshot.state + "\nstatus=" + snapshot.explanation + "\n";
+        } else report = value.buildSupportSummary();
+        try {
+            ClipboardManager clipboard = (ClipboardManager)
+                    getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipboard == null) throw new IllegalStateException("Clipboard is unavailable");
+            clipboard.setPrimaryClip(ClipData.newPlainText("Voice Button support summary", report));
+            ClipData copied = clipboard.getPrimaryClip();
+            CharSequence copiedText = copied == null || copied.getItemCount() == 0
+                    ? null : copied.getItemAt(0).coerceToText(this);
+            if (copiedText == null || !report.contentEquals(copiedText)) {
+                throw new IllegalStateException("Android did not retain the copied text");
             }
-            String finalReport = report;
-            runOnUiThread(() -> {
-                ClipboardManager clipboard = (ClipboardManager)
-                        getSystemService(Context.CLIPBOARD_SERVICE);
-                if (clipboard != null) {
-                    clipboard.setPrimaryClip(ClipData.newPlainText(
-                            "Voice Button debug", finalReport));
-                    Toast.makeText(this, "Debug report copied", Toast.LENGTH_LONG).show();
-                    diag(PhoneDiagnostics.INFO, "ui.copy_debug", snapshot.currentSessionId,
-                            "Complete debug report was copied to the clipboard",
-                            PhoneDiagnostics.fields("characters", finalReport.length()));
-                } else {
-                    Toast.makeText(this, "Clipboard is unavailable", Toast.LENGTH_LONG).show();
+            diag(PhoneDiagnostics.INFO, "ui.copy_debug", snapshot.currentSessionId,
+                    "Bounded support summary was verified on the clipboard",
+                    PhoneDiagnostics.fields("characters", report.length()));
+            new AlertDialog.Builder(this).setTitle("Support summary copied")
+                    .setMessage(report.length() + " characters are on the clipboard and ready to paste.")
+                    .setPositiveButton("OK", null).show();
+        } catch (Exception failure) {
+            new AlertDialog.Builder(this).setTitle("Copy failed")
+                    .setMessage(PhoneDiagnostics.exactFailure(
+                            "Copying the support summary", failure))
+                    .setPositiveButton("Back", null).show();
+        }
+    }
+
+    private void exportFullDiagnostics() {
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.setType("text/plain");
+        intent.putExtra(Intent.EXTRA_TITLE,
+                "voicebutton-diagnostics-" + BuildConfig.VERSION_NAME + ".txt");
+        startActivityForResult(intent, DEBUG_EXPORT_REQUEST);
+    }
+
+    private void writeFullDiagnostics(Uri destination) {
+        RecordingService value = service;
+        uiWorker.execute(() -> {
+            try {
+                String report = value == null ? "Recording service is not connected.\n"
+                        + "Support summary:\n" + snapshot.state + "\n" + snapshot.explanation
+                        : value.buildDebugReport();
+                try (OutputStream output = getContentResolver().openOutputStream(destination, "w")) {
+                    if (output == null) throw new java.io.IOException("Destination could not be opened");
+                    output.write(report.getBytes(StandardCharsets.UTF_8));
+                    output.flush();
                 }
-                button.setText("Copy debug");
-                button.setEnabled(true);
-            });
-        }, "voicebutton-copy-debug").start();
+                runOnUiThread(() -> new AlertDialog.Builder(this)
+                        .setTitle("Diagnostics exported")
+                        .setMessage("The full diagnostic ledger was written to the selected file.")
+                        .setPositiveButton("OK", null).show());
+            } catch (Exception failure) {
+                runOnUiThread(() -> new AlertDialog.Builder(this)
+                        .setTitle("Export failed")
+                        .setMessage(PhoneDiagnostics.exactFailure(
+                                "Exporting diagnostics", failure))
+                        .setPositiveButton("Back", null).show());
+            }
+        });
+    }
+
+    private void showAbout() {
+        new AlertDialog.Builder(this).setTitle("Voice Button")
+                .setMessage("Version " + BuildConfig.VERSION_NAME
+                        + "\nRecording and synchronization continue in the foreground after this screen closes."
+                        + "\n\nOverview diagnostics are intentionally hidden. Use Current status details, Copy support summary, or Export full diagnostics when needed.")
+                .setPositiveButton("Back", null).show();
     }
 
     private void sendAction(String action, String sessionId, boolean foreground) {
+
         diag(PhoneDiagnostics.INFO, "ui.service_action_sent", sessionId,
                 "Main screen sent a RecordingService action",
                 PhoneDiagnostics.fields("action", action,
@@ -589,99 +656,95 @@ public final class MainActivity extends Activity {
 
     private void render(RecordingService.Snapshot value) {
         snapshot = value == null ? RecordingService.Snapshot.initial() : value;
-        int color = RecordingUi.stateColor(snapshot.state);
-        statusTitle.setText(snapshot.state);
-        statusTitle.setTextColor(color);
-        statusDetail.setText(snapshot.explanation);
-        statusCard.setBackground(round(tint(color), color, AndroidUi.dp(this, 16)));
-        progressBar.setVisibility(View.VISIBLE);
-        progressBar.setProgress(snapshot.uploadProgressPermille);
-        transferText.setText(MainScreenText.transfer(snapshot.recording,
+        ReliableSessionManifest open = snapshot.openSession;
+        if (open != null) {
+            selectedFolderId = open.folderId;
+            selectedFolderName = open.folderName;
+        }
+        String structureKey = MainScreenText.structureKey(snapshot.state,
+                snapshot.recording, snapshot.paused,
+                snapshot.recordingErrorActive, snapshot.recordingErrorAlarmAudible,
+                open != null, selectedFolderId, selectedDeviceId,
+                snapshot.sessions.size());
+        if (!structureKey.equals(lastStructureKey)) {
+            lastStructureKey = structureKey;
+            int color = RecordingUi.stateColor(snapshot.state);
+            setTextIfChanged(statusTitle, MainScreenText.stateTitle(snapshot.state,
+                    snapshot.recording, snapshot.paused, snapshot.recordingErrorActive));
+            statusTitle.setTextColor(color);
+            statusCard.setBackground(AndroidUi.round(
+                    tint(color), color, AndroidUi.dp(this, 16)));
+            setTextIfChanged(statusDetail, MainScreenText.stateSummary(snapshot.state,
+                    snapshot.recording, snapshot.paused,
+                    snapshot.recordingErrorActive, open != null));
+            if (open != null && open.paused) primaryButton.setText("Resume recording");
+            else if (snapshot.recording) primaryButton.setText("Pause recording");
+            else if (snapshot.recordingErrorActive) primaryButton.setText("Pause recovery");
+            else if (snapshot.interrupted != null) primaryButton.setText("Recover recording");
+            else primaryButton.setText("Start recording");
+            primaryButton.setEnabled(PrimaryActionPolicy.isEnabled(
+                    snapshot.recording, snapshot.state, open != null,
+                    open != null && open.paused, snapshot.interrupted != null,
+                    !inputs.isEmpty()));
+            configureSecondaryAction(open);
+            updateSetupButtons();
+        }
+        setTextIfChanged(durationText, RecordingUi.formatDuration(snapshot.durationMs));
+        setTextIfChanged(currentText, MainScreenText.localProtection(
+                open == null ? selectedFolderName : open.folderName, open != null));
+        String microphone = snapshot.recording ? snapshot.routedInput : selectedInputLabel();
+        setTextIfChanged(routedText, "Microphone: " + microphone);
+        setTextIfChanged(micLevelText, MainScreenText.microphone(
+                snapshot.recording, snapshot.inputSignalDetected));
+        int level = snapshot.recording ? snapshot.inputLevelPermille : 0;
+        if (Math.abs(micLevelBar.getProgress() - level) >= 8) micLevelBar.setProgress(level);
+        micLevelBar.setContentDescription(micLevelText.getText());
+        setTextIfChanged(transferText, MainScreenText.transfer(snapshot.recording,
                 snapshot.uploadTotalBytes, snapshot.uploadPendingBytes,
                 snapshot.uploadProgressPermille));
+        if (progressBar.getProgress() != snapshot.uploadProgressPermille) {
+            progressBar.setProgress(snapshot.uploadProgressPermille);
+        }
         progressBar.setContentDescription(transferText.getText());
-        inputSpinner.setEnabled(!snapshot.recording && !inputs.isEmpty());
-        if (snapshot.openSession != null) {
-            selectedFolderId = snapshot.openSession.folderId;
-            selectedFolderName = snapshot.openSession.folderName;
-        }
-        if (folderSummaryText != null) {
-            folderSummaryText.setText("Folder: " + selectedFolderName
-                    + (snapshot.recording || snapshot.openSession != null
-                    ? " · locked for this recording" : ""));
-        }
-        if (folderSpinner != null) {
-            folderSpinner.setEnabled(!snapshot.recording && snapshot.openSession == null);
-            int folderPosition = -1;
-            for (int i = 0; i < folders.size(); i++) {
-                if (folders.get(i).id.equals(selectedFolderId)) folderPosition = i;
-            }
-            if (folderPosition >= 0 && folderSpinner.getSelectedItemPosition() != folderPosition) {
-                updatingFolders = true;
-                folderSpinner.setSelection(folderPosition);
-                updatingFolders = false;
-            }
-        }
-        if (inputs.isEmpty() && !snapshot.recording) {
-            routedText.setText("Microphone: none available");
-        } else {
-            routedText.setText("Microphone: " + snapshot.routedInput
-                    + (snapshot.recording ? " · selection locked until Pause" : ""));
-        }
-        durationText.setText(RecordingUi.formatDuration(snapshot.durationMs));
-        storageText.setText("Local storage: " + RecordingUi.formatBytes(snapshot.localBytes));
-
-        ReliableSessionManifest open = snapshot.openSession;
-        currentText.setText(MainScreenText.localProtection(
-                open == null ? selectedFolderName : open.folderName, open != null));
-
-        micLevelBar.setProgress(snapshot.recording ? snapshot.inputLevelPermille : 0);
-        micLevelText.setText(MainScreenText.microphone(
-                snapshot.recording, snapshot.inputSignalDetected));
-        micLevelBar.setContentDescription(micLevelText.getText());
-
-        if (snapshot.openSession != null && snapshot.openSession.paused) {
-            primaryButton.setText("Resume recording");
-        } else if (snapshot.recording) primaryButton.setText("Pause recording");
-        else if (snapshot.recordingErrorActive) primaryButton.setText("Pause automatic recovery");
-        else if (snapshot.interrupted != null) primaryButton.setText("Resolve interrupted recording");
-        else primaryButton.setText("Start recording");
-
-        boolean openRecording = snapshot.recording || open != null;
-        primaryButton.setEnabled(PrimaryActionPolicy.isEnabled(
-                snapshot.recording,
-                snapshot.state,
-                open != null,
-                open != null && open.paused,
-                snapshot.interrupted != null,
-                !inputs.isEmpty()));
-        finishButton.setEnabled(snapshot.recording
-                || (open != null && !"CLEANING".equals(snapshot.state)
-                && !"PREPARING".equals(snapshot.state)
-                && !"PAUSING".equals(snapshot.state)));
-        silenceAlarmButton.setVisibility(snapshot.recordingErrorActive
-                && snapshot.recordingErrorAlarmAudible ? View.VISIBLE : View.GONE);
-        silenceAlarmButton.setText(snapshot.recordingRecoveryAttempt > 0
-                ? "Silence alarm · recovery attempt " + snapshot.recordingRecoveryAttempt
-                : "Silence recording error alarm");
-        recordingsButton.setEnabled(!"CLEANING".equals(snapshot.state));
-        finishButton.setVisibility(openRecording ? View.VISIBLE : View.GONE);
-        finishReason.setVisibility(openRecording ? View.VISIBLE : View.GONE);
-        recordingsButton.setText("Player and files (" + snapshot.sessions.size() + ")");
-
-        if (snapshot.interrupted != null
-                && !snapshot.recording
+        if (snapshot.interrupted != null && !snapshot.recording
                 && !snapshot.recordingErrorActive
                 && !"RECOVERING".equals(snapshot.state)
                 && !snapshot.interrupted.sessionId.equals(promptedSessionId)
                 && hasPermission(Manifest.permission.RECORD_AUDIO)
-                && !inputs.isEmpty()) {
-            showRecoveryDialog(snapshot.interrupted);
-        }
+                && !inputs.isEmpty()) showRecoveryDialog(snapshot.interrupted);
         if (snapshot.interrupted == null) promptedSessionId = "";
     }
 
+    private void configureSecondaryAction(ReliableSessionManifest open) {
+        if (snapshot.recordingErrorActive && snapshot.recordingErrorAlarmAudible) {
+            secondaryButton.setText("Silence alarm");
+            secondaryButton.setTextColor(AndroidUi.RED);
+            secondaryButton.setBackground(AndroidUi.round(Color.WHITE,
+                    AndroidUi.RED, AndroidUi.dp(this, 12)));
+            secondaryButton.setOnClickListener(v -> sendAction(
+                    RecordingService.ACTION_SILENCE_ALARM,
+                    snapshot.currentSessionId, false));
+        } else if (snapshot.recording || open != null) {
+            secondaryButton.setText("Finish recording");
+            secondaryButton.setTextColor(AndroidUi.RED);
+            secondaryButton.setBackground(AndroidUi.round(Color.WHITE,
+                    AndroidUi.RED, AndroidUi.dp(this, 12)));
+            secondaryButton.setOnClickListener(v -> finishCurrent());
+        } else {
+            secondaryButton.setText("Player and files");
+            secondaryButton.setTextColor(AndroidUi.BLUE);
+            secondaryButton.setBackground(AndroidUi.round(Color.WHITE,
+                    Color.rgb(201, 211, 224), AndroidUi.dp(this, 12)));
+            secondaryButton.setOnClickListener(v -> openPlayer());
+        }
+    }
+
+    private static void setTextIfChanged(TextView view, String text) {
+        if (!String.valueOf(view.getText()).equals(text)) view.setText(text);
+    }
+
     private void requestPermissionsIfNeeded() {
+
         List<String> missing = new ArrayList<>();
         if (!hasPermission(Manifest.permission.RECORD_AUDIO)) missing.add(Manifest.permission.RECORD_AUDIO);
         if (Build.VERSION.SDK_INT >= 31 && !hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) missing.add(Manifest.permission.BLUETOOTH_CONNECT);
@@ -709,6 +772,15 @@ public final class MainActivity extends Activity {
                     "Android permission request completed", PhoneDiagnostics.fields("results", result));
             refreshInputs();
             render(snapshot);
+        }
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode,
+                                              Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == DEBUG_EXPORT_REQUEST && resultCode == RESULT_OK
+                && data != null && data.getData() != null) {
+            writeFullDiagnostics(data.getData());
         }
     }
 

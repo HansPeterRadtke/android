@@ -19,4 +19,20 @@ public class MainScreenTextTest {
     @Test public void quietSignalIsExplicitlyStillRecording() {
         assertTrue(MainScreenText.microphone(true, false).contains("recording continues"));
     }
+    @Test public void overviewStateDoesNotExposeUploaderDebugNoise() {
+        String value = MainScreenText.stateSummary("SYNCHRONIZING", false, false,
+                false, false);
+        assertFalse(value.contains("chunk"));
+        assertFalse(value.contains("revision"));
+        assertFalse(value.contains("HTTP"));
+    }
+
+    @Test public void structureKeyIgnoresVolatileExplanationText() {
+        String first = MainScreenText.structureKey("RECORDING", true, false,
+                false, false, true, "default", 4, 10);
+        String second = MainScreenText.structureKey("RECORDING", true, false,
+                false, false, true, "default", 4, 10);
+        org.junit.Assert.assertEquals(first, second);
+    }
+
 }

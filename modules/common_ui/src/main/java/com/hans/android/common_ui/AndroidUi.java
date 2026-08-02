@@ -43,11 +43,63 @@ public final class AndroidUi {
     }
 
     public static Button button(Context c, String text) {
-        Button b = new Button(c);
-        b.setText(text);
-        b.setAllCaps(false);
-        b.setMinHeight(dp(c, 44));
-        return b;
+        return secondaryButton(c, text);
+    }
+
+    public static Button primaryButton(Context c, String text) {
+        Button button = baseButton(c, text);
+        button.setTextColor(Color.WHITE);
+        button.setTextSize(17);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setMinHeight(dp(c, 56));
+        button.setBackground(round(BLUE, BLUE, dp(c, 14)));
+        return button;
+    }
+
+    public static Button secondaryButton(Context c, String text) {
+        Button button = baseButton(c, text);
+        button.setTextColor(BLUE);
+        button.setBackground(round(Color.WHITE, Color.rgb(201, 211, 224), dp(c, 12)));
+        return button;
+    }
+
+    public static Button dangerButton(Context c, String text) {
+        Button button = baseButton(c, text);
+        button.setTextColor(RED);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setBackground(round(Color.WHITE, RED, dp(c, 12)));
+        return button;
+    }
+
+    public static Button toolbarButton(Context c, String text) {
+        Button button = baseButton(c, text);
+        button.setTextColor(INK);
+        button.setTextSize(13);
+        button.setMinHeight(dp(c, 44));
+        button.setBackground(round(Color.TRANSPARENT, Color.rgb(218, 224, 232), dp(c, 12)));
+        return button;
+    }
+
+    private static Button baseButton(Context c, String text) {
+        Button button = new Button(c);
+        button.setText(text);
+        button.setAllCaps(false);
+        button.setTextSize(15);
+        button.setMinHeight(dp(c, 48));
+        button.setPadding(dp(c, 12), 0, dp(c, 12), 0);
+        button.setGravity(android.view.Gravity.CENTER);
+        return button;
+    }
+
+    public static void stableLine(Context c, TextView view, int minimumHeightDp) {
+        view.setSingleLine(true);
+        view.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        int scaledTextHeight = (int)Math.ceil(view.getTextSize() * 1.45f)
+                + dp(c, 8);
+        int stableHeight = Math.max(dp(c, minimumHeightDp), scaledTextHeight);
+        view.setMinHeight(stableHeight);
+        view.setMaxHeight(stableHeight);
+        view.setGravity(android.view.Gravity.CENTER_VERTICAL);
     }
 
     public static Button modeButton(Context c, String text, boolean selected) {

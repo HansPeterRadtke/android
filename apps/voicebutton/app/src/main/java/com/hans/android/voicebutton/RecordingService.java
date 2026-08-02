@@ -451,6 +451,57 @@ public final class RecordingService extends Service {
         return folder;
     }
 
+    public String buildSupportSummary() {
+        Snapshot value = snapshot;
+        StringBuilder out = new StringBuilder(8192);
+        out.append("Voice Button support summary\n");
+        out.append("app_version=").append(BuildConfig.VERSION_NAME)
+                .append(" code=").append(BuildConfig.VERSION_CODE).append('\n');
+        out.append("device=").append(Build.MANUFACTURER).append(' ')
+                .append(Build.MODEL).append(" android=").append(Build.VERSION.RELEASE)
+                .append(" sdk=").append(Build.VERSION.SDK_INT).append('\n');
+        PhoneDiagnostics diagnosticValue = diagnostics;
+        out.append("installation_id=")
+                .append(diagnosticValue == null ? "unavailable" : diagnosticValue.getInstallationId())
+                .append('\n');
+        out.append("state=").append(value.state)
+                .append(" recording=").append(value.recording)
+                .append(" paused=").append(value.paused)
+                .append(" alarm=").append(value.recordingErrorActive).append('\n');
+        out.append("status=").append(limit(value.explanation, 400)).append('\n');
+        out.append("microphone=").append(limit(value.routedInput, 240))
+                .append(" signal=").append(value.inputSignalDetected).append('\n');
+        out.append("duration_ms=").append(value.durationMs)
+                .append(" local_bytes=").append(value.localBytes).append('\n');
+        out.append("sync_bytes=").append(value.uploadDurableBytes).append('/')
+                .append(value.uploadTotalBytes)
+                .append(" pending=").append(value.uploadPendingBytes)
+                .append(" progress_permille=").append(value.uploadProgressPermille).append('\n');
+        out.append("sessions=").append(value.sessions.size())
+                .append(" current_session=").append(value.currentSessionId).append('\n');
+        ReliableUploader uploaderValue = uploader;
+        out.append("uploader=").append(uploaderValue == null
+                ? "unavailable" : limit(uploaderValue.debugSummary(), 1000)).append('\n');
+        int start = Math.max(0, value.sessions.size() - 5);
+        for (int i = start; i < value.sessions.size(); i++) {
+            ReliableSessionManifest session = value.sessions.get(i);
+            out.append("session ").append(session.sessionId)
+                    .append(" folder=").append(limit(session.folderName, 120))
+                    .append(" state=").append(session.state)
+                    .append(" chunks=").append(session.segments.size())
+                    .append(" remote=").append(session.durableRemoteChunkCount())
+                    .append(" pending_bytes=").append(session.pendingRemoteBytes())
+                    .append(" error=").append(limit(session.error, 300)).append('\n');
+        }
+        if (out.length() > 24000) return out.substring(0, 24000) + "\n[summary truncated]\n";
+        return out.toString();
+    }
+
+    private static String limit(String value, int maximum) {
+        String text = value == null ? "" : value.replace('\n', ' ').replace('\r', ' ');
+        return text.length() <= maximum ? text : text.substring(0, maximum) + "…";
+    }
+
     public synchronized String buildDebugReport() {
         StringBuilder out = new StringBuilder(16384);
         Snapshot value = snapshot;

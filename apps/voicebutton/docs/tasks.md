@@ -19,3 +19,6 @@ Version 0.15 adds task-swipe-safe foreground recording, sticky background synchr
 Version 0.15 performance repair removes per-fsync and per-upload-part diagnostic writes, coalesces repository reconciliation on a dedicated worker, keeps live duration and microphone telemetry in memory, throttles notification rebuilds, avoids duplicate microphone enumeration, and places the primary action inside the top trust-state card.
 
 Version 0.16 adds the LibVLC broad-format player, decoded waveform seeking, configurable 0.25x to 8x speed range and step, independent skip values, presets, volume, mute, loop, autoplay, sleep timer, queue previous and next, Android media-session controls, Thor Rubber Band R3 fine studio rendering, studio WAV export, RAM and cache inspection, app-folder library, Storage Access Framework browser, recording and folder rename, atomic recording move, external file rename and move, and Jetson metadata/location reconciliation.
+
+
+Version 0.17 rebuilds recorder, player, and library screens from the infra GUI question-first and rejection-gate guidelines. It adds stable scaled text geometry, one-primary-action hierarchy, progressive disclosure, coalesced rendering, background microphone and folder enumeration, recycled library rows, bounded verified clipboard summaries, full diagnostic file export, and batched noncritical diagnostic writes.

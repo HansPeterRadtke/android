@@ -80,15 +80,25 @@ public final class AudioLibraryActivity extends Activity {
     private void buildScreen() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(AndroidUi.dp(this, 12), AndroidUi.dp(this, 8), AndroidUi.dp(this, 12), AndroidUi.dp(this, 8));
+        root.setPadding(AndroidUi.dp(this, 12), AndroidUi.dp(this, 8),
+                AndroidUi.dp(this, 12), AndroidUi.dp(this, 8));
         root.setBackgroundColor(AndroidUi.BG);
 
         LinearLayout toolbar = row();
-        Button back = AndroidUi.button(this, "Back"); back.setOnClickListener(v -> navigateBack());
-        Button home = AndroidUi.button(this, "Home"); home.setOnClickListener(v -> home());
-        toolbar.addView(back, half()); toolbar.addView(home, half()); root.addView(toolbar);
-        root.addView(AndroidUi.title(this, "Player library"));
-        stateText = AndroidUi.small(this, "Choose a recording or phone file"); root.addView(stateText);
+        Button back = AndroidUi.toolbarButton(this, "Back");
+        back.setOnClickListener(v -> navigateBack());
+        Button home = AndroidUi.toolbarButton(this, "Home");
+        home.setOnClickListener(v -> home());
+        toolbar.addView(back, half());
+        toolbar.addView(home, half());
+        root.addView(toolbar);
+
+        TextView title = AndroidUi.title(this, "Library");
+        AndroidUi.stableLine(this, title, 40);
+        root.addView(title);
+        stateText = AndroidUi.small(this, "Choose audio to play");
+        AndroidUi.stableLine(this, stateText, 30);
+        root.addView(stateText);
 
         LinearLayout modes = row();
         recordingsModeButton = AndroidUi.modeButton(this, "App recordings", true);
@@ -98,27 +108,68 @@ public final class AudioLibraryActivity extends Activity {
             showRecordings();
         });
         filesModeButton.setOnClickListener(v -> showPhoneRoot());
-        modes.addView(recordingsModeButton); modes.addView(filesModeButton); root.addView(modes);
+        modes.addView(recordingsModeButton);
+        modes.addView(filesModeButton);
+        root.addView(modes);
 
         LinearLayout navigation = row();
-        upButton = AndroidUi.button(this, "Up"); upButton.setOnClickListener(v -> up());
-        pathText = AndroidUi.body(this, "App folders"); pathText.setGravity(Gravity.CENTER_VERTICAL);
-        navigation.addView(upButton, new LinearLayout.LayoutParams(AndroidUi.dp(this, 72), AndroidUi.dp(this, 48)));
-        navigation.addView(pathText, new LinearLayout.LayoutParams(0, AndroidUi.dp(this, 48), 1f));
+        upButton = AndroidUi.toolbarButton(this, "Up");
+        upButton.setOnClickListener(v -> up());
+        pathText = AndroidUi.body(this, "App recording folders");
+        AndroidUi.stableLine(this, pathText, 46);
+        navigation.addView(upButton, new LinearLayout.LayoutParams(
+                AndroidUi.dp(this, 72), AndroidUi.dp(this, 46)));
+        navigation.addView(pathText, new LinearLayout.LayoutParams(
+                0, AndroidUi.dp(this, 46), 1f));
         root.addView(navigation);
 
-        list = new ListView(this); list.setAdapter(adapter); list.setDividerHeight(1);
-        list.setOnItemClickListener((parent, view, position, id) -> open(adapter.item(position), position));
-        list.setOnItemLongClickListener((parent, view, position, id) -> { manage(adapter.item(position)); return true; });
-        root.addView(list, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        list = new ListView(this);
+        list.setAdapter(adapter);
+        list.setDividerHeight(1);
+        list.setOnItemClickListener((parent, view, position, id) ->
+                open(adapter.item(position), position));
+        list.setOnItemLongClickListener((parent, view, position, id) -> {
+            manage(adapter.item(position));
+            return true;
+        });
+        root.addView(list, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        LinearLayout actions = row();
-        Button folders = AndroidUi.button(this, "Folders"); folders.setOnClickListener(v -> manageAppFolders());
-        Button choose = AndroidUi.button(this, "Choose phone folder"); choose.setOnClickListener(v -> chooseRoot());
-        Button any = AndroidUi.button(this, "Open any file"); any.setOnClickListener(v -> openAnyFile());
-        actions.addView(folders, third()); actions.addView(choose, third()); actions.addView(any, third()); root.addView(actions);
-        root.addView(AndroidUi.small(this, "Tap to play. Long-press to rename, move or manage. LibVLC attempts every selected local format."));
+        Button more = AndroidUi.toolbarButton(this, "More");
+        more.setOnClickListener(v -> showLibraryMenu());
+        root.addView(more, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 48)));
         setContentView(root);
+    }
+
+    private void showLibraryMenu() {
+        String[] actions = recordingsMode
+                ? new String[]{"Manage app folders", "Choose phone folder",
+                        "Open any phone file", "About library"}
+                : new String[]{"Choose phone folder", "Open any phone file",
+                        "App recordings", "About library"};
+        new AlertDialog.Builder(this).setTitle("More")
+                .setItems(actions, (dialog, which) -> {
+                    if (recordingsMode) {
+                        if (which == 0) manageAppFolders();
+                        else if (which == 1) chooseRoot();
+                        else if (which == 2) openAnyFile();
+                        else showLibraryAbout();
+                    } else {
+                        if (which == 0) chooseRoot();
+                        else if (which == 1) openAnyFile();
+                        else if (which == 2) {
+                            appFolderFilter = null;
+                            showRecordings();
+                        } else showLibraryAbout();
+                    }
+                }).setNegativeButton("Back", null).show();
+    }
+
+    private void showLibraryAbout() {
+        new AlertDialog.Builder(this).setTitle("Library")
+                .setMessage("Tap an item to open it. Long-press an item for rename, move, or delete actions. Folder management and phone-file import stay in More so navigation remains clear.")
+                .setPositiveButton("Back", null).show();
     }
 
     private void showRecordings() {
@@ -390,10 +441,59 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     private final class LibraryAdapter extends BaseAdapter {
-        private final ArrayList<LibraryItem> items=new ArrayList<>();
-        void replace(List<LibraryItem> values){items.clear();items.addAll(values);notifyDataSetChanged();}
-        LibraryItem item(int position){return items.get(position);}int position(LibraryItem item){return items.indexOf(item);}List<LibraryItem> items(){return new ArrayList<>(items);}
-        @Override public int getCount(){return items.size();}@Override public Object getItem(int p){return items.get(p);}@Override public long getItemId(int p){return p;}
-        @Override public View getView(int position,View convert,ViewGroup parent){LinearLayout row=convert instanceof LinearLayout?(LinearLayout)convert:new LinearLayout(AudioLibraryActivity.this);row.removeAllViews();row.setOrientation(LinearLayout.VERTICAL);row.setPadding(AndroidUi.dp(AudioLibraryActivity.this,12),AndroidUi.dp(AudioLibraryActivity.this,8),AndroidUi.dp(AudioLibraryActivity.this,12),AndroidUi.dp(AudioLibraryActivity.this,8));LibraryItem item=items.get(position);TextView title=AndroidUi.text(AudioLibraryActivity.this,(item.directory?"Folder · ":"")+item.title,16,true,AndroidUi.INK);TextView detail=AndroidUi.small(AudioLibraryActivity.this,item.detail);row.addView(title);row.addView(detail);row.setBackgroundColor(Color.WHITE);return row;}
+        private final ArrayList<LibraryItem> items = new ArrayList<>();
+
+        void replace(List<LibraryItem> values) {
+            items.clear();
+            items.addAll(values);
+            notifyDataSetChanged();
+        }
+        LibraryItem item(int position) { return items.get(position); }
+        int position(LibraryItem item) { return items.indexOf(item); }
+        List<LibraryItem> items() { return new ArrayList<>(items); }
+        @Override public int getCount() { return items.size(); }
+        @Override public Object getItem(int position) { return items.get(position); }
+        @Override public long getItemId(int position) { return position; }
+
+        @Override public View getView(int position, View convert, ViewGroup parent) {
+            RowHolder holder;
+            if (convert instanceof LinearLayout && convert.getTag() instanceof RowHolder) {
+                holder = (RowHolder) convert.getTag();
+            } else {
+                LinearLayout row = new LinearLayout(AudioLibraryActivity.this);
+                row.setOrientation(LinearLayout.VERTICAL);
+                row.setPadding(AndroidUi.dp(AudioLibraryActivity.this, 12),
+                        AndroidUi.dp(AudioLibraryActivity.this, 8),
+                        AndroidUi.dp(AudioLibraryActivity.this, 12),
+                        AndroidUi.dp(AudioLibraryActivity.this, 8));
+                row.setBackgroundColor(Color.WHITE);
+                TextView title = AndroidUi.text(AudioLibraryActivity.this,
+                        "", 16, true, AndroidUi.INK);
+                AndroidUi.stableLine(AudioLibraryActivity.this, title, 30);
+                TextView detail = AndroidUi.small(AudioLibraryActivity.this, "");
+                AndroidUi.stableLine(AudioLibraryActivity.this, detail, 26);
+                row.addView(title);
+                row.addView(detail);
+                holder = new RowHolder(row, title, detail);
+                row.setTag(holder);
+                convert = row;
+            }
+            LibraryItem item = items.get(position);
+            holder.title.setText((item.directory ? "Folder · " : "") + item.title);
+            holder.detail.setText(item.detail);
+            return convert;
+        }
     }
+
+    private static final class RowHolder {
+        final LinearLayout row;
+        final TextView title;
+        final TextView detail;
+        RowHolder(LinearLayout row, TextView title, TextView detail) {
+            this.row = row;
+            this.title = title;
+            this.detail = detail;
+        }
+    }
+
 }
