@@ -571,6 +571,8 @@ public final class RecordingService extends Service {
                 .append(" progress_permille=").append(value.uploadProgressPermille).append('\n');
         out.append("sessions=").append(value.sessions.size())
                 .append(" current_session=").append(value.currentSessionId).append('\n');
+        out.append("library_filename_layout=")
+                .append(FileNameParts.LAYOUT_ID).append('\n');
         ReliableUploader uploaderValue = uploader;
         out.append("uploader=").append(uploaderValue == null
                 ? "unavailable" : limit(uploaderValue.debugSummary(), 1000)).append('\n');

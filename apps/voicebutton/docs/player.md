@@ -29,3 +29,8 @@ Swiping the Voice Button task away is an explicit application close. PlayerServi
 The checkpoint stores original and active source URIs, queue, queue index, logical source timestamp, studio mode and studio speed, and whether playback was active. Opening Player again restores the exact logical timestamp and resumes if playback had been active when the task was closed. Missing studio-cache media falls back to the original source at the same logical timestamp.
 
 Library rows show the complete filename without marquee or ellipsis. The beginning uses the primary filename style, the continuation wraps at a smaller size, and the complete extension remains visible. App recordings use the actual local audio filename rather than a shortened display title.
+
+
+## Version 0.20 cache-proof filename release
+
+Version 0.20 intentionally advances the package version after devices were still running 0.18. The support summary includes `library_filename_layout=multiline_full`. Library filenames remain unrestricted multiline text with no ellipsis or marquee, and app recordings use the actual local audio filename including its extension.

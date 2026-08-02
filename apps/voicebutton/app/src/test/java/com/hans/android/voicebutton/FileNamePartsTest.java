@@ -18,4 +18,8 @@ public class FileNamePartsTest {
         assertEquals("short.wav", parts.head);
         assertEquals("", parts.tail);
     }
+    @Test public void layoutIdentifierIsExplicitForSupportReports() {
+        assertEquals("multiline_full", FileNameParts.LAYOUT_ID);
+    }
+
 }

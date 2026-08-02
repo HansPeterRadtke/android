@@ -1,6 +1,7 @@
 package com.hans.android.voicebutton;
 
 final class FileNameParts {
+    static final String LAYOUT_ID = "multiline_full";
     final String head;
     final String tail;
 
