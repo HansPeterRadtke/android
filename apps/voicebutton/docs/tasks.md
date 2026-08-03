@@ -25,3 +25,5 @@ Version 0.17 rebuilds recorder, player, and library screens from the infra GUI q
 
 
 Version 0.18 moves recording-service recovery and every service command to a named single-thread executor, moves LibVLC construction and all playback operations to a dedicated audio-priority HandlerThread, opens Storage Access Framework content through a retained file descriptor, removes synchronous diagnostics and store construction from activities, makes application diagnostics initialization asynchronous, reduces player and recorder UI polling, caches recursive storage-byte scans, rate-limits buffering callbacks, enables debug StrictMode, and adds a main-loop stall watchdog.
+
+Version 0.21 rolls back the task-scoped PlayerService and checkpoint layer to the last reported stable 0.18 activity-owned LibVLC architecture, keeps complete multiline filenames and extensions, installs a durable uncaught-exception stack recorder, and standardizes publication to exactly one Explorer artifact named `voicebutton-debug.apk`.

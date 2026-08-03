@@ -6,6 +6,7 @@ import android.os.StrictMode;
 public final class VoiceButtonApplication extends Application {
     @Override public void onCreate() {
         super.onCreate();
+        CrashRecorder.install(this);
         if (BuildConfig.DEBUG) {
             StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder()
                     .detectDiskReads().detectDiskWrites().detectNetwork()

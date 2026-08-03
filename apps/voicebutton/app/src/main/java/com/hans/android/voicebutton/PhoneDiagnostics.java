@@ -100,6 +100,7 @@ public final class PhoneDiagnostics {
                                 "android_release", Build.VERSION.RELEASE,
                                 "sdk_int", Build.VERSION.SDK_INT,
                                 "app_version", appVersion));
+                CrashRecorder.reportPending(context, created);
                 return created;
             }
             created.shutdown();
