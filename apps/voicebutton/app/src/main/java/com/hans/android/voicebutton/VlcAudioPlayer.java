@@ -54,6 +54,8 @@ final class VlcAudioPlayer {
     private boolean muted;
     private boolean focusHeld;
     private int lastBufferPercent = -100;
+    private long pendingStartMs = -1L;
+    private boolean pendingShouldPlay;
 
     VlcAudioPlayer(Context context, Listener listener) {
         this.app = context.getApplicationContext();
@@ -80,17 +82,24 @@ final class VlcAudioPlayer {
 
     void open(Uri uri, boolean autoplay, float speed, int volume,
               boolean muted, boolean loop) {
+        openAt(uri, 0L, autoplay, speed, volume, muted, loop);
+    }
+
+    void openAt(Uri uri, long startMs, boolean shouldPlay, float speed,
+                int volume, boolean muted, boolean loop) {
         sourceUri = uri;
         desiredRate = speed;
         desiredVolume = Math.max(0, Math.min(100, volume));
         this.muted = muted;
         this.loop = loop;
+        pendingStartMs = Math.max(0L, startMs);
+        pendingShouldPlay = shouldPlay;
         playing = false;
-        cachedTimeMs = 0L;
+        cachedTimeMs = pendingStartMs;
         cachedLengthMs = 0L;
         engineState = "queued";
         notifyState("opening");
-        post(() -> openOnEngine(uri, autoplay));
+        post(() -> openOnEngine(uri, shouldPlay || pendingStartMs > 0L));
     }
 
     void playPause() { if (playing) pause(); else play(); }
@@ -234,6 +243,21 @@ final class VlcAudioPlayer {
                 engineState = "playing";
                 player.setRate(desiredRate);
                 player.setVolume(muted ? 0 : desiredVolume);
+                if (pendingStartMs >= 0L) {
+                    long start = pendingStartMs;
+                    boolean keepPlaying = pendingShouldPlay;
+                    pendingStartMs = -1L;
+                    pendingShouldPlay = false;
+                    player.setTime(start);
+                    cachedTimeMs = start;
+                    if (!keepPlaying) {
+                        player.pause();
+                        playing = false;
+                        engineState = "paused";
+                        notifyState("paused");
+                        break;
+                    }
+                }
                 cachedRate = player.getRate();
                 cachedAudioTracks = player.getAudioTracksCount();
                 seekable = player.isSeekable();

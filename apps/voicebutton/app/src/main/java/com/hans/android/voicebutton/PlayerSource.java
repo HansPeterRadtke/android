@@ -3,6 +3,8 @@ package com.hans.android.voicebutton;
 import android.content.Intent;
 import android.net.Uri;
 
+import org.json.JSONObject;
+
 import java.io.File;
 
 final class PlayerSource {
@@ -56,4 +58,27 @@ final class PlayerSource {
         return new PlayerSource(Uri.fromFile(file), title, KIND_RECORDING, bytes,
                 sessionId, folderId, null);
     }
+    JSONObject toJson() throws org.json.JSONException {
+        JSONObject value = new JSONObject();
+        value.put("uri", uri.toString());
+        value.put("title", title);
+        value.put("kind", kind);
+        value.put("bytes", bytes);
+        value.put("session_id", sessionId);
+        value.put("folder_id", folderId);
+        value.put("parent_uri", parentUri == null ? "" : parentUri.toString());
+        return value;
+    }
+
+    static PlayerSource fromJson(JSONObject value) {
+        if (value == null) return null;
+        String raw = value.optString("uri", "");
+        if (raw.isEmpty()) return null;
+        String parent = value.optString("parent_uri", "");
+        return new PlayerSource(Uri.parse(raw), value.optString("title", "Audio"),
+                value.optString("kind", KIND_DOCUMENT), value.optLong("bytes", 0L),
+                value.optString("session_id", ""), value.optString("folder_id", ""),
+                parent.isEmpty() ? null : Uri.parse(parent));
+    }
+
 }

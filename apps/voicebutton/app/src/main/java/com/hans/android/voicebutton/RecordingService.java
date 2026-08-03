@@ -571,6 +571,9 @@ public final class RecordingService extends Service {
                 .append(" progress_permille=").append(value.uploadProgressPermille).append('\n');
         out.append("sessions=").append(value.sessions.size())
                 .append(" current_session=").append(value.currentSessionId).append('\n');
+        out.append("library_filename_layout=")
+                .append(FileNameParts.LAYOUT_ID).append('\n');
+        out.append("player_lifecycle=foreground_service_atomic_checkpoint_v2\n");
         ReliableUploader uploaderValue = uploader;
         out.append("uploader=").append(uploaderValue == null
                 ? "unavailable" : limit(uploaderValue.debugSummary(), 1000)).append('\n');
@@ -989,7 +992,8 @@ public final class RecordingService extends Service {
                     if (!store.discardIfEmpty(sessionId)) {
                         ReliableSessionManifest current = store.load(sessionId);
                         if (!current.recordingFinished && !current.paused) {
-                            store.markInterrupted(sessionId,
+                            if (disposition == STOP_PAUSE) store.markPaused(sessionId);
+                            else store.markInterrupted(sessionId,
                                     "App was explicitly closed before the recording was finished");
                         }
                     }
@@ -1878,7 +1882,10 @@ public final class RecordingService extends Service {
                         PhoneDiagnostics.fields());
             }
         }
-        if (recorder.isRecording()) stopDisposition = STOP_INTERRUPT;
+        if (recorder.isRecording()) {
+            stopDisposition = "task_removed".equals(reason)
+                    ? STOP_PAUSE : STOP_INTERRUPT;
+        }
         recorder.stop();
         releaseCaptureWakeLock();
         ReliableUploader currentUploader = uploader;
@@ -1917,17 +1924,19 @@ public final class RecordingService extends Service {
 
     @Override public void onTaskRemoved(Intent rootIntent) {
         diag(PhoneDiagnostics.WARN, "service.task_removed", currentSessionId,
-                "The app task was swiped away; recording and synchronization continue in the foreground service",
+                "The app task was swiped away; recording is being paused and all background work is stopping",
                 PhoneDiagnostics.fields("recording", recorder.isRecording(),
                         "background_work", hasBackgroundWork(),
                         "recovery_pending", recordingRecoveryPending,
                         "alarm_active", failureAlarm.isActive()));
-        if (shouldKeepServiceAlive()) {
-            ensureForeground();
-            acquireCaptureWakeLock();
-            if (uploader != null) uploader.signal();
-            main.removeCallbacks(continuityTicker);
-            main.post(continuityTicker);
+        try {
+            Thread closeThread = new Thread(
+                    () -> shutdownForUserExit("task_removed"),
+                    "voicebutton-recording-task-close");
+            closeThread.setDaemon(false);
+            closeThread.start();
+        } catch (RuntimeException failure) {
+            stopSelf();
         }
         super.onTaskRemoved(rootIntent);
     }
@@ -1961,7 +1970,9 @@ public final class RecordingService extends Service {
         main.removeCallbacks(uploaderRefresh);
         failureAlarm.release();
         unregisterNetworkCallback();
-        if (recorder.isRecording()) stopDisposition = STOP_INTERRUPT;
+        if (recorder.isRecording()) {
+            stopDisposition = exitRequested.get() ? STOP_PAUSE : STOP_INTERRUPT;
+        }
         recorder.stop();
         releaseCaptureWakeLock();
         if (uploader != null) uploader.stop();

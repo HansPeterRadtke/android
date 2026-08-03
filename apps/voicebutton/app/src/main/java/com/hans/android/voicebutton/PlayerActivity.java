@@ -3,15 +3,10 @@ package com.hans.android.voicebutton;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.app.PendingIntent;
-import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
-import android.media.AudioManager;
-import android.media.MediaMetadata;
-import android.media.session.MediaSession;
-import android.media.session.PlaybackState;
+import android.content.ServiceConnection;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -19,7 +14,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
+import android.os.IBinder;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -44,13 +39,14 @@ import com.hans.android.common_ui.AndroidUi;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Locale;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @SuppressLint("SetTextI18n")
-public final class PlayerActivity extends Activity implements VlcAudioPlayer.Listener {
+public final class PlayerActivity extends Activity implements PlayerPlaybackService.Listener {
     static final String EXTRA_QUEUE_URIS = "queue_uris";
     static final String EXTRA_QUEUE_TITLES = "queue_titles";
     static final String EXTRA_QUEUE_BYTES = "queue_bytes";
@@ -68,7 +64,12 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
     private final AtomicInteger studioGeneration = new AtomicInteger();
 
     private PlayerSettings settings;
-    private VlcAudioPlayer player;
+    private final PlayerBridge player = new PlayerBridge();
+    private PlayerPlaybackService playerService;
+    private boolean playerBound;
+    private volatile PlayerPlaybackService.Snapshot playerSnapshot =
+            PlayerPlaybackService.Snapshot.initial();
+    private String lastPlayerError = "";
     private ThorStudioClient studioClient;
     private PlayerSource originalSource;
     private PlayerSource activeSource;
@@ -82,18 +83,29 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
     private long logicalDurationMs;
     private boolean userSeeking;
     private PlayerSource pendingExportSource;
-    private MediaSession mediaSession;
-    private long lastMediaSessionUpdateMs;
-    private boolean noisyReceiverRegistered;
-    private final BroadcastReceiver noisyReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) {
-            if (AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(intent.getAction())
-                    && player != null && player.isPlaying()) {
-                player.pause();
-                Toast.makeText(PlayerActivity.this,
-                        "Playback paused because the audio output disconnected",
-                        Toast.LENGTH_LONG).show();
+    private final ServiceConnection playerConnection = new ServiceConnection() {
+        @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+            PlayerPlaybackService.LocalBinder local =
+                    (PlayerPlaybackService.LocalBinder) binder;
+            playerService = local.service();
+            playerBound = true;
+            player.attach(playerService);
+            playerService.addListener(PlayerActivity.this);
+            if (!player.hasPendingOpen() && !playerService.hasSource()) {
+                ContextCompat.startForegroundService(PlayerActivity.this,
+                        new Intent(PlayerActivity.this,
+                                PlayerPlaybackService.class)
+                                .setAction(PlayerPlaybackService.ACTION_RESTORE));
             }
+        }
+
+        @Override public void onServiceDisconnected(ComponentName name) {
+            if (playerService != null) {
+                playerService.removeListener(PlayerActivity.this);
+            }
+            player.detach();
+            playerService = null;
+            playerBound = false;
         }
     };
 
@@ -136,23 +148,9 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
         settings = new PlayerSettings(this);
         studioClient = new ThorStudioClient(this);
         buildScreen();
-        long playerCreateStarted = SystemClock.elapsedRealtime();
-        player = new VlcAudioPlayer(this, this);
-        playerDiagnostic(PhoneDiagnostics.INFO, "player.engine_created",
-                "LibVLC engine thread was created",
-                PhoneDiagnostics.fields("activity_thread", Thread.currentThread().getName(),
-                        "constructor_ms", Math.max(0L,
-                                SystemClock.elapsedRealtime() - playerCreateStarted)));
-        ContextCompat.registerReceiver(this, noisyReceiver,
-                new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
-                ContextCompat.RECEIVER_NOT_EXPORTED);
-        noisyReceiverRegistered = true;
-        initMediaSession();
         loadQueue(getIntent());
         PlayerSource requested = PlayerSource.fromIntent(getIntent());
         if (requested != null) openSource(requested, settings.autoplay);
-        else openLibrary();
-        main.post(ticker);
         scheduleSleepTimer();
     }
 
@@ -162,6 +160,28 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
         if (requested != null) openSource(requested, settings.autoplay);
     }
 
+    @Override protected void onStart() {
+        super.onStart();
+        main.removeCallbacks(ticker);
+        main.post(ticker);
+        if (!playerBound) {
+            bindService(new Intent(this, PlayerPlaybackService.class),
+                    playerConnection, Context.BIND_AUTO_CREATE);
+        }
+    }
+
+    @Override protected void onStop() {
+        main.removeCallbacks(ticker);
+        if (playerBound) {
+            if (playerService != null) playerService.removeListener(this);
+            unbindService(playerConnection);
+            player.detach();
+            playerService = null;
+            playerBound = false;
+        }
+        super.onStop();
+    }
+
     @Override protected void onDestroy() {
         main.removeCallbacksAndMessages(null);
         studioGeneration.incrementAndGet();
@@ -169,12 +189,6 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
         if (waveformFuture != null) waveformFuture.cancel(true);
         studioExecutor.shutdownNow(); fileExecutor.shutdownNow();
         if (waveformBitmap != null) waveformBitmap.recycle();
-        if (noisyReceiverRegistered) {
-            try { unregisterReceiver(noisyReceiver); } catch (IllegalArgumentException ignored) {}
-            noisyReceiverRegistered = false;
-        }
-        if (mediaSession != null) { mediaSession.setActive(false); mediaSession.release(); }
-        if (player != null) player.release();
         super.onDestroy();
     }
 
@@ -325,7 +339,6 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
                         "uri_scheme", source.uri.getScheme(),
                         "bytes", source.bytes,
                         "activity_thread", Thread.currentThread().getName()));
-        updateMediaMetadata();
         player.open(source.uri, autoplay, settings.speed, settings.volume, settings.muted, settings.loop);
         loadWaveform(source, generation);
         applySpeed(); updateQueueButtons();
@@ -480,7 +493,7 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
         dialog.setOnShowListener(x->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
             try{
                 float newMin=parse(min),newMax=parse(max),newStep=parse(step);if(newMin<.25f||newMax>8f||newMin>newMax||newStep<.01f||newStep>1f)throw new Exception("Speed range must stay within 0.25× to 8×; step 0.01 to 1.0");
-                settings.speedMin=newMin;settings.speedMax=newMax;settings.speedStep=newStep;settings.speed=settings.normalize(parse(speed));settings.skipBack=PlayerSettings.clamp(parse(back),.1f,3600f);settings.skipForward=PlayerSettings.clamp(parse(forward),.1f,3600f);settings.volume=Math.max(0,Math.min(100,Math.round(parse(volume))));settings.sleepMinutes=Math.max(0,Math.min(1440,Math.round(parse(sleep))));settings.muted=muted.isChecked();settings.loop=loop.isChecked();settings.autoplay=autoplay.isChecked();settings.speedMode=studio.isChecked()?PlayerSettings.MODE_STUDIO:PlayerSettings.MODE_INSTANT;settings.setPresets(presets.getText().toString());settings.save();player.setVolume(settings.volume,settings.muted);player.setLoop(settings.loop);scheduleSleepTimer();applySpeed();dialog.dismiss();
+                settings.speedMin=newMin;settings.speedMax=newMax;settings.speedStep=newStep;settings.speed=settings.normalize(parse(speed));settings.skipBack=PlayerSettings.clamp(parse(back),.1f,3600f);settings.skipForward=PlayerSettings.clamp(parse(forward),.1f,3600f);settings.volume=Math.max(0,Math.min(100,Math.round(parse(volume))));settings.sleepMinutes=Math.max(0,Math.min(1440,Math.round(parse(sleep))));settings.muted=muted.isChecked();settings.loop=loop.isChecked();settings.autoplay=autoplay.isChecked();settings.speedMode=studio.isChecked()?PlayerSettings.MODE_STUDIO:PlayerSettings.MODE_INSTANT;settings.setPresets(presets.getText().toString());settings.save();player.setVolume(settings.volume,settings.muted);player.setLoop(settings.loop);player.updateSkipValues(settings.skipBack,settings.skipForward);scheduleSleepTimer();applySpeed();dialog.dismiss();
             }catch(Exception failure){Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show();}
         }));dialog.show();
     }
@@ -588,59 +601,6 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
         });
     }
 
-    private void initMediaSession() {
-        mediaSession = new MediaSession(this, "VoiceButtonPlayer");
-        mediaSession.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS
-                | MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS);
-        Intent playerIntent = new Intent(this, PlayerActivity.class)
-                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        mediaSession.setSessionActivity(PendingIntent.getActivity(this, 91, playerIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
-        mediaSession.setCallback(new MediaSession.Callback() {
-            @Override public void onPlay() { main.post(() -> player.play()); }
-            @Override public void onPause() { main.post(() -> player.pause()); }
-            @Override public void onStop() { main.post(() -> player.stop()); }
-            @Override public void onSeekTo(long pos) { main.post(() -> player.seek(
-                    PlayerTimeline.physicalTime(pos, studioActive, studioSpeed))); }
-            @Override public void onSkipToNext() { main.post(() -> changeQueue(1)); }
-            @Override public void onSkipToPrevious() { main.post(() -> changeQueue(-1)); }
-            @Override public void onFastForward() { main.post(() -> player.skip(settings.skipForward)); }
-            @Override public void onRewind() { main.post(() -> player.skip(-settings.skipBack)); }
-        });
-        mediaSession.setActive(true);
-        updateMediaSessionState("ready");
-    }
-
-    private void updateMediaMetadata() {
-        if (mediaSession == null || originalSource == null) return;
-        mediaSession.setMetadata(new MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, originalSource.title)
-                .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, originalSource.title)
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, "Voice Button")
-                .putLong(MediaMetadata.METADATA_KEY_DURATION, logicalDuration())
-                .build());
-    }
-
-    private void updateMediaSessionState(String state) {
-        if (mediaSession == null) return;
-        int playbackState = player != null && player.isPlaying()
-                ? PlaybackState.STATE_PLAYING
-                : (state != null && state.startsWith("buffering")) || "opening".equals(state)
-                ? PlaybackState.STATE_BUFFERING
-                : "stopped".equals(state) || "ended".equals(state)
-                ? PlaybackState.STATE_STOPPED : PlaybackState.STATE_PAUSED;
-        long actions = PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE
-                | PlaybackState.ACTION_PLAY_PAUSE | PlaybackState.ACTION_STOP
-                | PlaybackState.ACTION_SEEK_TO | PlaybackState.ACTION_FAST_FORWARD
-                | PlaybackState.ACTION_REWIND | PlaybackState.ACTION_SKIP_TO_NEXT
-                | PlaybackState.ACTION_SKIP_TO_PREVIOUS;
-        mediaSession.setPlaybackState(new PlaybackState.Builder()
-                .setActions(actions)
-                .setState(playbackState, logicalPosition(), settings == null ? 1f : settings.speed,
-                        SystemClock.elapsedRealtime())
-                .build());
-    }
-
     private void openLibrary() { startActivity(new Intent(this, AudioLibraryActivity.class)); }
     private void home() { Intent intent=new Intent(this,MainActivity.class);intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP|Intent.FLAG_ACTIVITY_SINGLE_TOP);startActivity(intent); }
 
@@ -649,25 +609,129 @@ public final class PlayerActivity extends Activity implements VlcAudioPlayer.Lis
         long[] raw=intent.getLongArrayExtra(EXTRA_QUEUE_BYTES);queueBytes=new ArrayList<>();if(raw!=null)for(long value:raw)queueBytes.add(value);queueIndex=intent.getIntExtra(EXTRA_QUEUE_INDEX,-1);updateQueueButtons();
     }
     private static ArrayList<String> list(ArrayList<String> input){return input==null?new ArrayList<>():input;}
-    private void changeQueue(int delta){int target=queueIndex+delta;if(target<0||target>=queueUris.size())return;queueIndex=target;PlayerSource source=new PlayerSource(Uri.parse(queueUris.get(target)),queueTitles.get(target),queueKinds.get(target),target<queueBytes.size()?queueBytes.get(target):0L,target<queueSessions.size()?queueSessions.get(target):"",target<queueFolders.size()?queueFolders.get(target):"",null);openSource(source,settings.autoplay||player.isPlaying());}
-    private void updateQueueButtons(){if(previousButton!=null){previousButton.setEnabled(queueIndex>0);nextButton.setEnabled(queueIndex>=0&&queueIndex+1<queueUris.size());}}
+    private void changeQueue(int delta){if(delta<0)player.previous();else player.next();}
+    private void updateQueueButtons(){if(previousButton!=null){previousButton.setEnabled(playerSnapshot.queueIndex>0);nextButton.setEnabled(playerSnapshot.queueIndex>=0&&playerSnapshot.queueIndex+1<playerSnapshot.queueSize);}}
 
-    @Override public void onState(String state){stateText.setText(state);playButton.setText(player.isPlaying()?"Pause":"Play");updateMediaSessionState(state);if("ended".equals(state)&&settings.autoplay)changeQueue(1);}
-    @Override public void onPosition(long timeMs,long lengthMs){logicalDurationMs=PlayerTimeline.logicalLength(lengthMs,studioActive,studioSpeed);updateMediaMetadata();updatePosition();}
-    @Override public void onError(String detail){
-        stateText.setText(detail);
-        playerDiagnostic(PhoneDiagnostics.ERROR, "player.error", detail,
-                PhoneDiagnostics.fields("source", originalSource == null ? "" : originalSource.title,
-                        "uri_scheme", originalSource == null ? "" : originalSource.uri.getScheme(),
-                        "engine", player == null ? "unavailable" : player.technicalSummary()));
-        Toast.makeText(this,detail,Toast.LENGTH_LONG).show();
+    @Override public void onPlayerSnapshot(PlayerPlaybackService.Snapshot value) {
+        runOnUiThread(() -> applyPlayerSnapshot(value));
     }
 
-    private void updatePosition(){if(player==null)return;long logical=logicalPosition(),length=logicalDuration();timeText.setText(formatTime(logical)+" / "+formatTime(length));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));playButton.setText(player.isPlaying()?"Pause":"Play");long now=SystemClock.elapsedRealtime();if(now-lastMediaSessionUpdateMs>=1000L){lastMediaSessionUpdateMs=now;updateMediaSessionState(player.isPlaying()?"playing":"paused");}}
-    private long logicalPosition(){return PlayerTimeline.logicalTime(player==null?0L:player.time(),studioActive,studioSpeed);}
-    private long logicalDuration(){long value=PlayerTimeline.logicalLength(player==null?0L:player.length(),studioActive,studioSpeed);return value>0?value:logicalDurationMs;}
+    private void applyPlayerSnapshot(PlayerPlaybackService.Snapshot value) {
+        if (value == null) return;
+        PlayerSource previous = originalSource;
+        playerSnapshot = value;
+        originalSource = value.originalSource;
+        activeSource = value.activeSource;
+        studioActive = value.studioActive;
+        studioSpeed = value.studioSpeed;
+        logicalDurationMs = value.logicalLengthMs();
+        if (originalSource != null) {
+            titleText.setText(originalSource.title);
+            if (previous == null || !previous.uri.equals(originalSource.uri)) {
+                int generation = ++sourceGeneration;
+                if (waveformFuture != null) waveformFuture.cancel(true);
+                if (waveformBitmap != null) {
+                    waveformBitmap.recycle();
+                    waveformBitmap = null;
+                }
+                waveformBitmapBytes = 0L;
+                waveformView.setImageDrawable(null);
+                loadWaveform(originalSource, generation);
+            }
+        }
+        String visibleState = value.error.isEmpty() ? value.state : value.error;
+        stateText.setText(visibleState);
+        playButton.setText(value.playing ? "Pause" : "Play");
+        previousButton.setEnabled(value.queueIndex > 0);
+        nextButton.setEnabled(value.queueIndex >= 0
+                && value.queueIndex + 1 < value.queueSize);
+        if (!value.error.isEmpty() && !value.error.equals(lastPlayerError)) {
+            lastPlayerError = value.error;
+            playerDiagnostic(PhoneDiagnostics.ERROR, "player.error", value.error,
+                    PhoneDiagnostics.fields("source",
+                            originalSource == null ? "" : originalSource.title,
+                            "engine", value.engineSummary));
+            Toast.makeText(this, value.error, Toast.LENGTH_LONG).show();
+        }
+        updatePosition();
+    }
+
+    private void updatePosition(){long logical=logicalPosition(),length=logicalDuration();timeText.setText(formatTime(logical)+" / "+formatTime(length));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));playButton.setText(player.isPlaying()?"Pause":"Play");}
+    private long logicalPosition(){return playerSnapshot.logicalTimeMs();}
+    private long logicalDuration(){long value=playerSnapshot.logicalLengthMs();return value>0?value:logicalDurationMs;}
     private void updateLabels(){speedText.setText(formatSpeed(settings.speed));backSkipButton.setText("−"+formatSeconds(settings.skipBack));forwardSkipButton.setText("+"+formatSeconds(settings.skipForward));}
     private void scheduleSleepTimer(){main.removeCallbacks(sleepStop);if(settings.sleepMinutes>0)main.postDelayed(sleepStop,settings.sleepMinutes*60_000L);}
+
+    private List<PlayerSource> queueSources() {
+        ArrayList<PlayerSource> result = new ArrayList<>();
+        for (int i = 0; i < queueUris.size(); i++) {
+            result.add(new PlayerSource(Uri.parse(queueUris.get(i)),
+                    i < queueTitles.size() ? queueTitles.get(i) : "Audio",
+                    i < queueKinds.size() ? queueKinds.get(i)
+                            : PlayerSource.KIND_DOCUMENT,
+                    i < queueBytes.size() ? queueBytes.get(i) : 0L,
+                    i < queueSessions.size() ? queueSessions.get(i) : "",
+                    i < queueFolders.size() ? queueFolders.get(i) : "", null));
+        }
+        return result;
+    }
+
+    private final class PlayerBridge {
+        private PlayerPlaybackService service;
+        private boolean pendingOpen;
+        private boolean pendingAutoplay;
+
+        void attach(PlayerPlaybackService value) {
+            service = value;
+            if (pendingOpen) {
+                boolean autoplay = pendingAutoplay;
+                pendingOpen = false;
+                open(activeSource == null ? null : activeSource.uri,
+                        autoplay, settings.speed, settings.volume,
+                        settings.muted, settings.loop);
+            }
+        }
+
+        void detach() { service = null; }
+        boolean hasPendingOpen() { return pendingOpen; }
+
+        void open(Uri uri, boolean autoplay, float speed, int volume,
+                  boolean muted, boolean loop) {
+            if (originalSource == null || activeSource == null) return;
+            if (service == null) {
+                pendingOpen = true;
+                pendingAutoplay = autoplay;
+                return;
+            }
+            ContextCompat.startForegroundService(PlayerActivity.this,
+                    new Intent(PlayerActivity.this,
+                            PlayerPlaybackService.class)
+                            .setAction(PlayerPlaybackService.ACTION_ACTIVATE));
+            service.open(originalSource, activeSource, queueSources(), queueIndex,
+                    0L, autoplay, studioActive, studioSpeed, speed,
+                    volume, muted, loop, settings.skipBack,
+                    settings.skipForward, settings.autoplay);
+        }
+
+        void playPause(){if(service!=null)service.playPause();}
+        void play(){if(service!=null)service.play();}
+        void pause(){if(service!=null)service.pause();}
+        void stop(){if(service!=null)service.stopPlayback();}
+        void seek(long value){if(service!=null)service.seekPhysical(value);}
+        void skip(float value){if(service!=null)service.skip(value);}
+        void setSpeed(float value){if(service!=null)service.setSpeed(value);}
+        void setVolume(int value,boolean muted){if(service!=null)service.setVolume(value,muted);}
+        void setLoop(boolean value){if(service!=null)service.setLoop(value);}
+        void updateSkipValues(float back,float forward){if(service!=null)service.updateSkipValues(back,forward);}
+        void previous(){if(service!=null)service.previous();}
+        void next(){if(service!=null)service.next();}
+        boolean isPlaying(){return playerSnapshot.playing;}
+        boolean isSeekable(){return playerSnapshot.seekable;}
+        long time(){return playerSnapshot.physicalTimeMs;}
+        long length(){return playerSnapshot.physicalLengthMs;}
+        float rate(){return playerSnapshot.rate;}
+        String technicalSummary(){return playerSnapshot.engineSummary;}
+    }
 
     private void playerDiagnostic(String level, String event, String message,
                                   org.json.JSONObject fields) {
