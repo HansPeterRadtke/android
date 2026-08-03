@@ -30,3 +30,6 @@ Version 0.21 rolls back the task-scoped PlayerService and checkpoint layer to th
 
 
 Version 0.22 adds a task-scoped foreground playback service with platform MediaSession notification controls, five-second AtomicFile checkpoints, exact logical timestamp restoration, Home/app-switch continuation, task-swipe shutdown, and safe recording-service pause and worker shutdown. Explorer publication remains exactly one overwritten file named `voicebutton-debug.apk`.
+
+
+Version 0.23 fixes the file/player crash caused by querying the native `LibVLC.version()` symbol before the asynchronous LibVLC engine had loaded. Technical summaries now report `loading` until native initialization completes and convert any native-symbol failure to `unavailable` instead of crashing the main thread.

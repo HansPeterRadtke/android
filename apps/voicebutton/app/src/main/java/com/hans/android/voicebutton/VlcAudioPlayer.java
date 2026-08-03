@@ -137,7 +137,9 @@ final class VlcAudioPlayer {
     }
 
     String technicalSummary() {
-        return "LibVLC " + LibVLC.version() + " · engine " + engineState
+        String version = LibVlcVersionGuard.safeVersion(
+                libVLC != null, LibVLC::version);
+        return "LibVLC " + version + " · engine " + engineState
                 + " · thread " + engineThread.getName()
                 + " · rate " + String.format(Locale.US, "%.2f", cachedRate)
                 + "× · audio tracks " + cachedAudioTracks
