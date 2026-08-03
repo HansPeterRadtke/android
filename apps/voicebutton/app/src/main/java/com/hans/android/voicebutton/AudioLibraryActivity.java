@@ -7,6 +7,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.Typeface;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.RelativeSizeSpan;
+import android.text.style.StyleSpan;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.Gravity;
@@ -468,32 +473,37 @@ public final class AudioLibraryActivity extends Activity {
                         AndroidUi.dp(AudioLibraryActivity.this, 12),
                         AndroidUi.dp(AudioLibraryActivity.this, 9));
                 row.setBackgroundColor(Color.WHITE);
-                TextView head = AndroidUi.text(AudioLibraryActivity.this,
-                        "", 16, true, AndroidUi.INK);
-                head.setSingleLine(false);
-                head.setHorizontallyScrolling(false);
-                head.setEllipsize(null);
-                TextView tail = AndroidUi.text(AudioLibraryActivity.this,
-                        "", 13, false, AndroidUi.INK);
-                tail.setSingleLine(false);
-                tail.setHorizontallyScrolling(false);
-                tail.setEllipsize(null);
+                TextView name = AndroidUi.text(AudioLibraryActivity.this,
+                        "", 16, false, AndroidUi.INK);
+                name.setSingleLine(false);
+                name.setHorizontallyScrolling(false);
+                name.setEllipsize(null);
+                name.setLineSpacing(0f, 1.08f);
                 TextView detail = AndroidUi.small(AudioLibraryActivity.this, "");
                 detail.setSingleLine(false);
+                detail.setHorizontallyScrolling(false);
                 detail.setEllipsize(null);
-                row.addView(head);
-                row.addView(tail);
+                row.addView(name);
                 row.addView(detail);
-                holder = new RowHolder(row, head, tail, detail);
+                holder = new RowHolder(row, name, detail);
                 row.setTag(holder);
                 convert = row;
             }
             LibraryItem item = items.get(position);
             String completeName = (item.directory ? "Folder · " : "") + item.title;
             FileNameParts parts = FileNameParts.split(completeName, 44);
-            holder.head.setText(parts.head);
-            holder.tail.setText(parts.tail);
-            holder.tail.setVisibility(parts.tail.isEmpty() ? View.GONE : View.VISIBLE);
+            SpannableStringBuilder styledName = new SpannableStringBuilder(
+                    parts.complete());
+            int headEnd = parts.head.length();
+            if (headEnd > 0) {
+                styledName.setSpan(new StyleSpan(Typeface.BOLD), 0, headEnd,
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+            if (headEnd < styledName.length()) {
+                styledName.setSpan(new RelativeSizeSpan(0.84f), headEnd,
+                        styledName.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+            holder.name.setText(styledName);
             holder.detail.setText(item.detail);
             return convert;
         }
@@ -501,13 +511,11 @@ public final class AudioLibraryActivity extends Activity {
 
     private static final class RowHolder {
         final LinearLayout row;
-        final TextView head;
-        final TextView tail;
+        final TextView name;
         final TextView detail;
-        RowHolder(LinearLayout row, TextView head, TextView tail, TextView detail) {
+        RowHolder(LinearLayout row, TextView name, TextView detail) {
             this.row = row;
-            this.head = head;
-            this.tail = tail;
+            this.name = name;
             this.detail = detail;
         }
     }

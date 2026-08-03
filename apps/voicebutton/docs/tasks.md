@@ -33,3 +33,6 @@ Version 0.22 adds a task-scoped foreground playback service with platform MediaS
 
 
 Version 0.23 fixes the file/player crash caused by querying the native `LibVLC.version()` symbol before the asynchronous LibVLC engine had loaded. Technical summaries now report `loading` until native initialization completes and convert any native-symbol failure to `unavailable` instead of crashing the main thread.
+
+
+Version 0.24 removes the artificial forty-four-character line break from library filenames. Each complete filename is now rendered by one unrestricted TextView and wraps naturally against the actual screen width, with no ellipsis, marquee, max-line cap, or hyphenation; the extension remains part of the visible text. Media notification actions now use dedicated monochrome Previous, Rewind, Play, Pause, Forward, Next, and Close vector icons instead of reusing the colored microphone logo.

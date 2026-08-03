@@ -529,18 +529,21 @@ public final class PlayerPlaybackService extends Service
                 .setCategory(Notification.CATEGORY_TRANSPORT)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setPriority(Notification.PRIORITY_LOW)
-                .addAction(notificationAction("Previous",
-                        ACTION_PREVIOUS, 701))
-                .addAction(notificationAction("Rewind",
-                        ACTION_REWIND, 702))
-                .addAction(notificationAction(playing ? "Pause" : "Play",
+                .addAction(notificationAction(R.drawable.ic_player_previous,
+                        "Previous", ACTION_PREVIOUS, 701))
+                .addAction(notificationAction(R.drawable.ic_player_rewind,
+                        "Rewind", ACTION_REWIND, 702))
+                .addAction(notificationAction(playing
+                                ? R.drawable.ic_player_pause
+                                : R.drawable.ic_player_play,
+                        playing ? "Pause" : "Play",
                         playing ? ACTION_PAUSE : ACTION_PLAY, 703))
-                .addAction(notificationAction("Forward",
-                        ACTION_FORWARD, 704))
-                .addAction(notificationAction("Next",
-                        ACTION_NEXT, 705))
-                .addAction(notificationAction("Close",
-                        ACTION_CLOSE, 706));
+                .addAction(notificationAction(R.drawable.ic_player_forward,
+                        "Forward", ACTION_FORWARD, 704))
+                .addAction(notificationAction(R.drawable.ic_player_next,
+                        "Next", ACTION_NEXT, 705))
+                .addAction(notificationAction(R.drawable.ic_player_close,
+                        "Close", ACTION_CLOSE, 706));
         if (mediaSession != null) {
             builder.setStyle(new Notification.MediaStyle()
                     .setMediaSession(mediaSession.getSessionToken())
@@ -549,11 +552,12 @@ public final class PlayerPlaybackService extends Service
         return builder.build();
     }
 
-    private Notification.Action notificationAction(String title,
+    private Notification.Action notificationAction(int icon,
+                                                   String title,
                                                    String action,
                                                    int requestCode) {
-        return new Notification.Action.Builder(R.drawable.ic_voice_button,
-                title, serviceIntent(action, requestCode)).build();
+        return new Notification.Action.Builder(icon, title,
+                serviceIntent(action, requestCode)).build();
     }
 
     private PendingIntent serviceIntent(String action, int requestCode) {
