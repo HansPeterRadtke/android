@@ -241,7 +241,6 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
         seek = new SeekBar(this);
         seek.setMax(1000);
-        seek.setEnabled(false);
         seek.setContentDescription("Playback position");
         seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar bar, int value,
@@ -268,21 +267,10 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
         LinearLayout transport = row();
         backSkipButton = AndroidUi.secondaryButton(this, "−10s");
-        backSkipButton.setEnabled(false);
         backSkipButton.setOnClickListener(v -> player.skip(-settings.skipBack));
-        playButton = AndroidUi.primaryButton(this, "Loading…");
-        playButton.setEnabled(false);
-        playButton.setOnClickListener(v -> {
-            PlayerControlState current = PlayerControlState.from(playerSnapshot);
-            if (!current.playEnabled) return;
-            playButton.setEnabled(false);
-            playButton.setText(playerSnapshot.playing ? "Pausing…" : "Starting…");
-            stateText.setText(playerSnapshot.playing
-                    ? "Pausing playback…" : "Starting playback…");
-            player.playPause();
-        });
+        playButton = AndroidUi.primaryButton(this, "Play");
+        playButton.setOnClickListener(v -> player.playPause());
         forwardSkipButton = AndroidUi.secondaryButton(this, "+10s");
-        forwardSkipButton.setEnabled(false);
         forwardSkipButton.setOnClickListener(v -> player.skip(settings.skipForward));
         transport.addView(backSkipButton, weighted());
         LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(
@@ -295,13 +283,10 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
         LinearLayout queue = row();
         previousButton = AndroidUi.toolbarButton(this, "Previous");
-        previousButton.setEnabled(false);
         previousButton.setOnClickListener(v -> changeQueue(-1));
         speedText = AndroidUi.secondaryButton(this, "1.00×");
-        speedText.setEnabled(false);
         speedText.setOnClickListener(v -> showSpeedPresets());
         nextButton = AndroidUi.toolbarButton(this, "Next");
-        nextButton.setEnabled(false);
         nextButton.setOnClickListener(v -> changeQueue(1));
         queue.addView(previousButton, weighted());
         queue.addView(speedText, weighted());
@@ -349,11 +334,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         waveformBitmapBytes = 0L;
         waveformView.setImageDrawable(null);
         titleText.setText(source.title);
-        stateText.setText("Loading playback engine…");
-        playButton.setText("Loading…"); playButton.setEnabled(false);
-        seek.setEnabled(false); backSkipButton.setEnabled(false);
-        forwardSkipButton.setEnabled(false); speedText.setEnabled(false);
-        previousButton.setEnabled(false); nextButton.setEnabled(false);
+        stateText.setText("Opening " + source.kind);
         playerDiagnostic(PhoneDiagnostics.INFO, "player.open", source.title,
                 PhoneDiagnostics.fields("kind", source.kind,
                         "uri_scheme", source.uri.getScheme(),
@@ -383,9 +364,8 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                     waveformBitmap = bitmap;
                     waveformBitmapBytes = bitmap.getAllocationByteCount();
                     waveformView.setImageBitmap(bitmap);
-                    PlayerControlState controls = PlayerControlState.from(
-                            playerSnapshot);
-                    stateText.setText(controls.status);
+                    stateText.setText(playerSnapshot.error.isEmpty()
+                            ? playerSnapshot.state : playerSnapshot.error);
                 });
             } catch (Exception failure) {
                 runOnUiThread(() -> {
@@ -661,16 +641,11 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                 loadWaveform(originalSource, generation);
             }
         }
-        PlayerControlState controls = PlayerControlState.from(value);
-        stateText.setText(controls.status);
-        playButton.setText(controls.playLabel);
-        playButton.setEnabled(controls.playEnabled);
-        seek.setEnabled(controls.seekEnabled);
-        backSkipButton.setEnabled(controls.skipEnabled);
-        forwardSkipButton.setEnabled(controls.skipEnabled);
-        speedText.setEnabled(controls.speedEnabled);
-        previousButton.setEnabled(controls.skipEnabled && value.queueIndex > 0);
-        nextButton.setEnabled(controls.skipEnabled && value.queueIndex >= 0
+        String visibleState = value.error.isEmpty() ? value.state : value.error;
+        stateText.setText(visibleState);
+        playButton.setText(value.playing ? "Pause" : "Play");
+        previousButton.setEnabled(value.queueIndex > 0);
+        nextButton.setEnabled(value.queueIndex >= 0
                 && value.queueIndex + 1 < value.queueSize);
         if (!value.error.isEmpty() && !value.error.equals(lastPlayerError)) {
             lastPlayerError = value.error;
@@ -683,7 +658,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         updatePosition();
     }
 
-    private void updatePosition(){long logical=logicalPosition(),length=logicalDuration();timeText.setText(formatTime(logical)+" / "+formatTime(length));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));}
+    private void updatePosition(){long logical=logicalPosition(),length=logicalDuration();timeText.setText(formatTime(logical)+" / "+formatTime(length));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));playButton.setText(player.isPlaying()?"Pause":"Play");}
     private long logicalPosition(){return playerSnapshot.logicalTimeMs();}
     private long logicalDuration(){long value=playerSnapshot.logicalLengthMs();return value>0?value:logicalDurationMs;}
     private void updateLabels(){speedText.setText(formatSpeed(settings.speed));backSkipButton.setText("−"+formatSeconds(settings.skipBack));forwardSkipButton.setText("+"+formatSeconds(settings.skipForward));}

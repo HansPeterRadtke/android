@@ -42,3 +42,6 @@ Version 0.25 adds single-query phone-folder enumeration, immediate cached librar
 
 
 Version 0.26 fixes playback termination and permanent Starting state. MP3 previews/finals are published by atomic rename so an open player file is never truncated underneath LibVLC. Decode errors remain terminal instead of being overwritten by a later Stopped event. Replay after Ended/Stopped seeks to zero, EndReached publishes the exact final position, and opening/starting has a fifteen-second failure timeout. Old app-recording caches are invalidated and missing cached recording paths are rejected.
+
+
+Version 0.27 removes the regressed player readiness/start wrapper and restores the direct 0.24 playback control path. Atomic MP3 publication, stale recording-cache rejection, terminal decode errors, and replay-from-zero remain. Folder metadata is repaired from the actual on-disk folder/session manifests so existing folders cannot disappear when `folders.json` is incomplete.

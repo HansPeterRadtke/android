@@ -71,6 +71,7 @@ public final class ReliableSessionStore {
         ensureDirectory(root);
         ensureDirectory(foldersRoot);
         ensureDefaultFolder();
+        repairFolderIndexFromDisk();
         conversationId = loadOrCreateConversationId();
         if (recover) {
             migrateLegacySessions();
@@ -1023,6 +1024,62 @@ public final class ReliableSessionStore {
             durableJson(folderIndex, index);
         }
         ensureDirectory(new File(new File(foldersRoot, "default"), "sessions"));
+    }
+
+    private void repairFolderIndexFromDisk() throws IOException {
+        JSONObject index = readFolderIndex();
+        JSONArray array = index.optJSONArray("folders");
+        if (array == null) {
+            array = new JSONArray();
+            try { index.put("folders", array); }
+            catch (Exception failure) { throw new IOException(failure); }
+        }
+        java.util.Set<String> known = new java.util.HashSet<>();
+        for (int i = 0; i < array.length(); i++) {
+            JSONObject item = array.optJSONObject(i);
+            if (item != null) known.add(item.optString("folder_id", ""));
+        }
+        boolean changed = false;
+        File[] folders = foldersRoot.listFiles(File::isDirectory);
+        if (folders != null) for (File folder : folders) {
+            String folderId = folder.getName();
+            if (!SAFE_ID.matcher(folderId).matches() || known.contains(folderId)) continue;
+            String folderName = "default".equals(folderId) ? "Default" : folderId;
+            long createdAt = folder.lastModified();
+            File sessions = new File(folder, "sessions");
+            File[] sessionDirs = sessions.listFiles(File::isDirectory);
+            if (sessionDirs != null) for (File sessionDir : sessionDirs) {
+                File metadata = new File(sessionDir, "manifest.json");
+                if (!metadata.isFile()) continue;
+                try {
+                    ReliableSessionManifest manifest = ReliableSessionManifest.fromJson(
+                            new JSONObject(readText(metadata)));
+                    if (manifest.folderName != null && !manifest.folderName.trim().isEmpty()) {
+                        folderName = manifest.folderName.trim();
+                    }
+                    if (manifest.createdAt > 0L) createdAt = manifest.createdAt;
+                    break;
+                } catch (Exception ignored) {}
+            }
+            JSONObject value = new JSONObject();
+            try {
+                value.put("folder_id", folderId);
+                value.put("name", folderName);
+                value.put("remote_name", folderName);
+                value.put("created_at_ms", createdAt);
+                value.put("updated_at_ms", System.currentTimeMillis());
+                array.put(value);
+                known.add(folderId);
+                changed = true;
+            } catch (Exception failure) {
+                throw new IOException("Could not rebuild folder metadata", failure);
+            }
+        }
+        if (changed) {
+            try { index.put("revision", index.optLong("revision", 0L) + 1L); }
+            catch (Exception failure) { throw new IOException(failure); }
+            durableJson(folderIndex, index);
+        }
     }
 
     private JSONObject readFolderIndex() throws IOException {
