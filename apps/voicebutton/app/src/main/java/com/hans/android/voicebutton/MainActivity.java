@@ -83,6 +83,7 @@ public final class MainActivity extends Activity {
     private String selectedFolderName = "Default";
     private boolean updatingFolders;
     private boolean inputsLoaded;
+    private boolean foldersRefreshedAfterReady;
     private RecordingService service;
     private boolean bound;
     private RecordingService.Snapshot snapshot = RecordingService.Snapshot.initial();
@@ -106,6 +107,12 @@ public final class MainActivity extends Activity {
     private final RecordingService.StatusListener statusListener = value -> {
         pendingSnapshot = value;
         uiHandler.post(() -> {
+            if (!foldersRefreshedAfterReady
+                    && value != null
+                    && !"STARTING".equals(value.state)) {
+                foldersRefreshedAfterReady = true;
+                refreshFolders();
+            }
             if (renderScheduled) return;
             renderScheduled = true;
             uiHandler.postDelayed(renderPending, 250L);
@@ -155,7 +162,9 @@ public final class MainActivity extends Activity {
         diag(PhoneDiagnostics.INFO, "ui.main.start", null,
                 "MainActivity onStart", PhoneDiagnostics.fields());
         if (!inputsLoaded) refreshInputs();
-        bindService(new Intent(this, RecordingService.class), connection, Context.BIND_AUTO_CREATE);
+        refreshFolders();
+        bindService(new Intent(this, RecordingService.class), connection,
+                Context.BIND_AUTO_CREATE);
     }
 
     @Override protected void onStop() {
@@ -279,17 +288,30 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshFolders() {
-        RecordingService value = service;
-        if (value == null || !folderRefreshRunning.compareAndSet(false, true)) return;
+        if (!folderRefreshRunning.compareAndSet(false, true)) return;
         uiWorker.execute(() -> {
+            long started = android.os.SystemClock.elapsedRealtime();
             List<ReliableSessionStore.Folder> loaded = new ArrayList<>();
-            try { loaded.addAll(value.listFolders()); }
-            catch (Exception ignored) {}
-            if (loaded.isEmpty()) loaded.add(new ReliableSessionStore.Folder(
-                    "default", "Default", 0L));
+            String failureDetail = "";
+            try {
+                ReliableSessionStore browser =
+                        ReliableSessionStore.openForBrowsing(this);
+                loaded.addAll(browser.listFolders());
+            } catch (Exception failure) {
+                failureDetail = PhoneDiagnostics.exactFailure(
+                        "Reading local recording folders", failure);
+            }
+            if (loaded.isEmpty()) {
+                loaded.add(new ReliableSessionStore.Folder(
+                        "default", "Default", 0L));
+            }
+            final String exactFailure = failureDetail;
+            final long duration = Math.max(0L,
+                    android.os.SystemClock.elapsedRealtime() - started);
             runOnUiThread(() -> {
                 folderRefreshRunning.set(false);
-                folders.clear(); folders.addAll(loaded);
+                folders.clear();
+                folders.addAll(loaded);
                 boolean selectedExists = false;
                 for (ReliableSessionStore.Folder folder : folders) {
                     if (folder.id.equals(selectedFolderId)) {
@@ -298,12 +320,25 @@ public final class MainActivity extends Activity {
                         break;
                     }
                 }
-                if (!selectedExists) {
+                if (!selectedExists && !folders.isEmpty()) {
                     selectedFolderId = folders.get(0).id;
                     selectedFolderName = folders.get(0).name;
                     saveMainSelectionState();
                 }
                 updateSetupButtons();
+                org.json.JSONArray names = new org.json.JSONArray();
+                for (ReliableSessionStore.Folder folder : folders) {
+                    names.put(folder.id + ":" + folder.name);
+                }
+                diag(exactFailure.isEmpty() ? PhoneDiagnostics.INFO
+                                : PhoneDiagnostics.ERROR,
+                        "folder.local_refresh", snapshot.currentSessionId,
+                        exactFailure.isEmpty()
+                                ? "Local recording folders were refreshed"
+                                : exactFailure,
+                        PhoneDiagnostics.fields("folder_count", folders.size(),
+                                "folders", names,
+                                "duration_ms", duration));
             });
         });
     }

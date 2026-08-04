@@ -21,6 +21,8 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Locale;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -1040,36 +1042,19 @@ public final class ReliableSessionStore {
             if (item != null) known.add(item.optString("folder_id", ""));
         }
         boolean changed = false;
-        File[] folders = foldersRoot.listFiles(File::isDirectory);
-        if (folders != null) for (File folder : folders) {
-            String folderId = folder.getName();
-            if (!SAFE_ID.matcher(folderId).matches() || known.contains(folderId)) continue;
-            String folderName = "default".equals(folderId) ? "Default" : folderId;
-            long createdAt = folder.lastModified();
-            File sessions = new File(folder, "sessions");
-            File[] sessionDirs = sessions.listFiles(File::isDirectory);
-            if (sessionDirs != null) for (File sessionDir : sessionDirs) {
-                File metadata = new File(sessionDir, "manifest.json");
-                if (!metadata.isFile()) continue;
-                try {
-                    ReliableSessionManifest manifest = ReliableSessionManifest.fromJson(
-                            new JSONObject(readText(metadata)));
-                    if (manifest.folderName != null && !manifest.folderName.trim().isEmpty()) {
-                        folderName = manifest.folderName.trim();
-                    }
-                    if (manifest.createdAt > 0L) createdAt = manifest.createdAt;
-                    break;
-                } catch (Exception ignored) {}
-            }
+        for (Folder discovered : discoverFoldersFromDisk(foldersRoot)) {
+            if (known.contains(discovered.id)) continue;
             JSONObject value = new JSONObject();
             try {
-                value.put("folder_id", folderId);
-                value.put("name", folderName);
-                value.put("remote_name", folderName);
-                value.put("created_at_ms", createdAt);
+                value.put("folder_id", discovered.id);
+                value.put("name", discovered.name);
+                value.put("remote_name", discovered.name);
+                value.put("created_at_ms", discovered.createdAtMs);
                 value.put("updated_at_ms", System.currentTimeMillis());
                 array.put(value);
-                known.add(folderId);
+                known.add(discovered.id);
+                ensureDirectory(new File(new File(foldersRoot,
+                        discovered.id), "sessions"));
                 changed = true;
             } catch (Exception failure) {
                 throw new IOException("Could not rebuild folder metadata", failure);
@@ -1079,7 +1064,54 @@ public final class ReliableSessionStore {
             try { index.put("revision", index.optLong("revision", 0L) + 1L); }
             catch (Exception failure) { throw new IOException(failure); }
             durableJson(folderIndex, index);
+            fsyncDirectory(foldersRoot);
         }
+    }
+
+    static List<Folder> discoverFoldersFromDisk(File foldersRoot) {
+        Map<String, Folder> discovered = new LinkedHashMap<>();
+        File[] physicalFolders = foldersRoot == null ? null
+                : foldersRoot.listFiles(File::isDirectory);
+        if (physicalFolders == null) return new ArrayList<>();
+        for (File physicalFolder : physicalFolders) {
+            String physicalId = physicalFolder.getName();
+            if (!SAFE_ID.matcher(physicalId).matches()) continue;
+            String physicalName = "default".equals(physicalId)
+                    ? "Default" : physicalId;
+            long physicalCreated = physicalFolder.lastModified();
+            discovered.putIfAbsent(physicalId,
+                    new Folder(physicalId, physicalName, physicalCreated));
+            File sessions = new File(physicalFolder, "sessions");
+            File[] sessionDirs = sessions.listFiles(File::isDirectory);
+            if (sessionDirs == null) continue;
+            for (File sessionDir : sessionDirs) {
+                File metadata = new File(sessionDir, "manifest.json");
+                if (!metadata.isFile()) continue;
+                try {
+                    ReliableSessionManifest manifest =
+                            ReliableSessionManifest.fromJson(
+                                    new JSONObject(readText(metadata)));
+                    String manifestId = manifest.folderId == null
+                            ? "" : manifest.folderId.trim();
+                    if (!SAFE_ID.matcher(manifestId).matches()) continue;
+                    String manifestName = manifest.folderName == null
+                            || manifest.folderName.trim().isEmpty()
+                            ? ("default".equals(manifestId)
+                            ? "Default" : manifestId)
+                            : manifest.folderName.trim();
+                    long createdAt = manifest.createdAt > 0L
+                            ? manifest.createdAt : physicalCreated;
+                    Folder existing = discovered.get(manifestId);
+                    if (existing == null || existing.name.equals(existing.id)
+                            || ("default".equals(existing.id)
+                            && "Default".equals(existing.name))) {
+                        discovered.put(manifestId, new Folder(manifestId,
+                                manifestName, createdAt));
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+        return new ArrayList<>(discovered.values());
     }
 
     private JSONObject readFolderIndex() throws IOException {

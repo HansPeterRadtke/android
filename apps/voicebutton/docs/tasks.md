@@ -45,3 +45,6 @@ Version 0.26 fixes playback termination and permanent Starting state. MP3 previe
 
 
 Version 0.27 removes the regressed player readiness/start wrapper and restores the direct 0.24 playback control path. Atomic MP3 publication, stale recording-cache rejection, terminal decode errors, and replay-from-zero remain. Folder metadata is repaired from the actual on-disk folder/session manifests so existing folders cannot disappear when `folders.json` is incomplete.
+
+
+Version 0.28 fixes Default-only folder selection. MainActivity no longer asks the still-initializing RecordingService for folders; it opens the lightweight browse store directly and refreshes again when service initialization completes. Folder repair now discovers folder IDs and names from every session manifest, including manifests physically stored under a different folder directory.
