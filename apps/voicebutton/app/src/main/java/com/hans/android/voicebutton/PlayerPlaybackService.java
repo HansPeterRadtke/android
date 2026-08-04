@@ -690,7 +690,13 @@ public final class PlayerPlaybackService extends Service
             mediaSession.release();
         }
         checkpointExecutor.shutdown();
-        if (foreground) stopForeground(STOP_FOREGROUND_REMOVE);
+        if (foreground) {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+            foreground = false;
+        }
+        NotificationManager manager =
+                (NotificationManager)getSystemService(NOTIFICATION_SERVICE);
+        if (manager != null) manager.cancel(NOTIFICATION_ID);
         super.onDestroy();
     }
 }

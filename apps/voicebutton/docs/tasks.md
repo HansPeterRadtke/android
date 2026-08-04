@@ -48,3 +48,6 @@ Version 0.27 removes the regressed player readiness/start wrapper and restores t
 
 
 Version 0.28 fixes Default-only folder selection. MainActivity no longer asks the still-initializing RecordingService for folders; it opens the lightweight browse store directly and refreshes again when service initialization completes. Folder repair now discovers folder IDs and names from every session manifest, including manifests physically stored under a different folder directory.
+
+
+Version 0.29 makes PlayerPlaybackService task-scoped at the Android manifest level. Swiping the Voice Button task away now forces Android to destroy the player service, stop foreground execution, and explicitly cancel the player notification. Home and normal app switching still leave the task present and keep playback active.

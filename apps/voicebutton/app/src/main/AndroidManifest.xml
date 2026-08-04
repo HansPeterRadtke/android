@@ -43,7 +43,7 @@
         <service
             android:name=".PlayerPlaybackService"
             android:exported="false"
-            android:stopWithTask="false"
+            android:stopWithTask="true"
             android:foregroundServiceType="mediaPlayback" />
         <service
             android:name=".RecordingService"
