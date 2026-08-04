@@ -39,3 +39,6 @@ Version 0.24 removes the artificial forty-four-character line break from library
 
 
 Version 0.25 adds single-query phone-folder enumeration, immediate cached library rows, exact library/main-screen state restoration, stale-query cancellation, lightweight recording browsing, unique timestamp-plus-session recording filenames with legacy migration, signed final filename synchronization to Jetson, engine-readiness transport gating, and fixed-size pressed/disabled button feedback.
+
+
+Version 0.26 fixes playback termination and permanent Starting state. MP3 previews/finals are published by atomic rename so an open player file is never truncated underneath LibVLC. Decode errors remain terminal instead of being overwritten by a later Stopped event. Replay after Ended/Stopped seeks to zero, EndReached publishes the exact final position, and opening/starting has a fifteen-second failure timeout. Old app-recording caches are invalidated and missing cached recording paths are rejected.

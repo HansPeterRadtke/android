@@ -35,7 +35,7 @@ final class PlayerControlState {
             return new PlayerControlState(false, false, false, false,
                     "Play", "Choose audio from Library");
         }
-        String state = rawState == null ? "idle" : rawState.toLowerCase();
+        String state = rawState == null ? "idle" : rawState.toLowerCase(java.util.Locale.ROOT);
         String exactError = error == null ? "" : error;
         if (!exactError.isEmpty() || "error".equals(state)) {
             return new PlayerControlState(false, false, false, false,

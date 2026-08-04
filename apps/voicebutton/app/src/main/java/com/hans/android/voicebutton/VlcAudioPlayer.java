@@ -54,6 +54,7 @@ final class VlcAudioPlayer {
     private boolean muted;
     private boolean focusHeld;
     private int lastBufferPercent = -100;
+    private boolean terminalError;
     private long pendingStartMs = -1L;
     private boolean pendingShouldPlay;
 
@@ -94,6 +95,8 @@ final class VlcAudioPlayer {
         this.loop = loop;
         pendingStartMs = Math.max(0L, startMs);
         pendingShouldPlay = shouldPlay;
+        terminalError = false;
+        lastBufferPercent = -100;
         playing = false;
         cachedTimeMs = pendingStartMs;
         cachedLengthMs = 0L;
@@ -241,6 +244,7 @@ final class VlcAudioPlayer {
         if (released) return;
         switch (event.type) {
             case MediaPlayer.Event.Playing:
+                terminalError = false;
                 playing = true;
                 engineState = "playing";
                 player.setRate(desiredRate);
@@ -272,8 +276,10 @@ final class VlcAudioPlayer {
                 break;
             case MediaPlayer.Event.Stopped:
                 playing = false;
-                engineState = "stopped";
-                notifyState("stopped");
+                if (!terminalError) {
+                    engineState = "stopped";
+                    notifyState("stopped");
+                }
                 break;
             case MediaPlayer.Event.Opening:
                 engineState = "opening";
@@ -295,6 +301,8 @@ final class VlcAudioPlayer {
                 break;
             case MediaPlayer.Event.EndReached:
                 playing = false;
+                if (cachedLengthMs > 0L) cachedTimeMs = cachedLengthMs;
+                notifyPosition(cachedTimeMs, cachedLengthMs);
                 if (loop) {
                     player.setTime(0L);
                     playOnEngine();
@@ -305,6 +313,7 @@ final class VlcAudioPlayer {
                 }
                 break;
             case MediaPlayer.Event.EncounteredError:
+                terminalError = true;
                 playing = false;
                 abandonAudioFocus();
                 engineState = "decode-error";

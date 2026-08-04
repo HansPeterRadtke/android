@@ -146,6 +146,7 @@ public final class PlayerPlaybackService extends Service
     private boolean autoplay;
     private boolean foreground;
     private boolean closing;
+    private int startAttemptGeneration;
     private volatile Snapshot snapshot = Snapshot.initial();
 
     private final Runnable checkpointTicker = new Runnable() {
@@ -265,6 +266,7 @@ public final class PlayerPlaybackService extends Service
                 physical, 0L, playbackRate, originalSource, activeSource,
                 studioActive, studioSpeed, queueIndex, queue.size(),
                 player.technicalSummary());
+        scheduleStartTimeout("opening audio");
         restartCheckpointTicker();
         saveCheckpointAsync(shouldPlay);
         publish();
@@ -308,6 +310,10 @@ public final class PlayerPlaybackService extends Service
         PlayerControlState controls = PlayerControlState.from(currentSnapshot());
         if (activeSource == null || !controls.playEnabled) return;
         promoteImmediately();
+        if (PlayerTerminalPolicy.restartFromBeginning(snapshot.state,
+                player.time(), player.length())) {
+            player.seek(0L);
+        }
         snapshot = new Snapshot("starting playback", "", false,
                 player.isSeekable(), player.time(), player.length(),
                 player.rate(), originalSource, activeSource,
@@ -315,6 +321,7 @@ public final class PlayerPlaybackService extends Service
                 player.technicalSummary());
         publish(); updateMediaSession(); updateNotification();
         player.play();
+        scheduleStartTimeout("starting playback");
         saveCheckpointAsync(true);
     }
 
@@ -366,6 +373,8 @@ public final class PlayerPlaybackService extends Service
     }
 
     @Override public void onState(String state) {
+        if (PlayerTerminalPolicy.ignoreStateAfterError(snapshot.error, state)) return;
+        if (!PlayerTerminalPolicy.startIsPending(state)) cancelStartTimeout();
         snapshot = new Snapshot(state, "", player.isPlaying(),
                 player.isSeekable(), player.time(), player.length(),
                 player.rate(), originalSource, activeSource,
@@ -391,6 +400,7 @@ public final class PlayerPlaybackService extends Service
     }
 
     @Override public void onError(String detail) {
+        cancelStartTimeout();
         snapshot = new Snapshot("error", detail, false, false,
                 player.time(), player.length(), player.rate(),
                 originalSource, activeSource, studioActive, studioSpeed,
@@ -405,6 +415,31 @@ public final class PlayerPlaybackService extends Service
                 PhoneDiagnostics.fields("source",
                         originalSource == null ? "" : originalSource.title,
                         "engine", player.technicalSummary()));
+    }
+
+    private void scheduleStartTimeout(String operation) {
+        int generation = ++startAttemptGeneration;
+        main.postDelayed(() -> {
+            if (generation != startAttemptGeneration || closing) return;
+            Snapshot value = snapshot;
+            if (!PlayerTerminalPolicy.startIsPending(value.state)) return;
+            String detail = "Playback did not finish " + operation
+                    + " within 15 seconds";
+            PhoneDiagnostics diagnostics = PhoneDiagnostics.get();
+            if (diagnostics != null) diagnostics.log(PhoneDiagnostics.ERROR,
+                    "player.start_timeout", null, detail,
+                    PhoneDiagnostics.fields("state", value.state,
+                            "source", originalSource == null ? ""
+                                    : originalSource.title,
+                            "time_ms", value.physicalTimeMs,
+                            "length_ms", value.physicalLengthMs,
+                            "engine", value.engineSummary));
+            onError(detail);
+        }, 15000L);
+    }
+
+    private void cancelStartTimeout() {
+        startAttemptGeneration++;
     }
 
     private void restoreCheckpointAsync() {

@@ -1,5 +1,7 @@
 package com.hans.android.audio.reliable;
 
+import android.system.Os;
+
 import com.naman14.androidlame.AndroidLame;
 import com.naman14.androidlame.LameBuilder;
 
@@ -143,9 +145,26 @@ public final class Mp3Converter {
             out.flush();
             fileOut.getFD().sync();
         }
-        if (frames <= 0L) { temp.delete(); throw new IOException("Final MP3 has no audio frames"); }
-        if (target.exists() && !target.delete()) { temp.delete(); throw new IOException("Could not replace final MP3"); }
-        if (!temp.renameTo(target)) { temp.delete(); throw new IOException("Could not publish final MP3"); }
+        if (frames <= 0L) {
+            temp.delete();
+            throw new IOException("Final MP3 has no audio frames");
+        }
+        try {
+            if (isAndroidRuntime()) {
+                Os.rename(temp.getAbsolutePath(), target.getAbsolutePath());
+            } else {
+                if (target.exists() && !target.delete()) {
+                    throw new IOException("Could not replace test MP3 target");
+                }
+                if (!temp.renameTo(target)) {
+                    throw new IOException("Could not publish test MP3 target");
+                }
+            }
+            fsyncDirectory(target.getParentFile());
+        } catch (Throwable failure) {
+            temp.delete();
+            throw new IOException("Could not atomically publish final MP3", failure);
+        }
         return target;
     }
 
@@ -174,4 +193,19 @@ public final class Mp3Converter {
             skipped += count;
         }
     }
+    private static void fsyncDirectory(File directory) {
+        if (directory == null || !directory.isDirectory()) return;
+        try (java.nio.channels.FileChannel channel =
+                     java.nio.channels.FileChannel.open(directory.toPath(),
+                             java.nio.file.StandardOpenOption.READ)) {
+            channel.force(true);
+        } catch (Exception ignored) {}
+    }
+
+    private static boolean isAndroidRuntime() {
+        String vm = System.getProperty("java.vm.name", "");
+        return vm.toLowerCase(java.util.Locale.US).contains("dalvik")
+                || vm.toLowerCase(java.util.Locale.US).contains("art");
+    }
+
 }

@@ -551,6 +551,7 @@ public final class AudioLibraryActivity extends Activity {
     private void saveVisibleCache(List<LibraryItem> items) {
         try {
             JSONObject root = new JSONObject();
+            root.put("schema", 2);
             root.put("recordings_mode", recordingsMode);
             root.put("app_folder_id", appFolderFilter == null ? "" : appFolderFilter.id);
             root.put("directory_uri", currentDirectory == null
@@ -565,7 +566,9 @@ public final class AudioLibraryActivity extends Activity {
 
     private void restoreCachedItems() {
         try {
+            if (recordingsMode) return;
             JSONObject root = new JSONObject(preferences.getString(CACHE, "{}"));
+            if (root.optInt("schema", 0) != 2) return;
             if (root.optBoolean("recordings_mode", true) != recordingsMode) return;
             String expectedFolder = appFolderFilter == null ? "" : appFolderFilter.id;
             if (!expectedFolder.equals(root.optString("app_folder_id", ""))) return;
@@ -657,6 +660,10 @@ public final class AudioLibraryActivity extends Activity {
             DocumentFile document = uri.isEmpty() ? null
                     : DocumentFile.fromSingleUri(context, Uri.parse(uri));
             PlayerSource source = PlayerSource.fromJson(value.optJSONObject("source"));
+            if (source != null && PlayerSource.KIND_RECORDING.equals(source.kind)
+                    && "file".equalsIgnoreCase(source.uri.getScheme())
+                    && (source.uri.getPath() == null
+                    || !new File(source.uri.getPath()).isFile())) return null;
             String folderId = value.optString("app_folder_id", "");
             ReliableSessionStore.Folder folder = folderId.isEmpty() ? null
                     : new ReliableSessionStore.Folder(folderId,
