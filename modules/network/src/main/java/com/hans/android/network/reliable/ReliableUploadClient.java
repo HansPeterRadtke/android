@@ -99,7 +99,7 @@ public final class ReliableUploadClient {
     private final AtomicReference<HttpURLConnection> activeConnection = new AtomicReference<>();
 
     public ReliableUploadClient(String baseUrl) {
-        this(baseUrl, "VoiceButton/0.24 Android");
+        this(baseUrl, "VoiceButton/0.25 Android");
     }
 
     public ReliableUploadClient(String baseUrl, String userAgent) {
@@ -135,6 +135,12 @@ public final class ReliableUploadClient {
         payload.put("display_name", manifest.displayName == null
                 || manifest.displayName.trim().isEmpty()
                 ? manifest.sessionId : manifest.displayName.trim());
+        payload.put("final_mp3_name", manifest.finalMp3Name == null
+                || manifest.finalMp3Name.trim().isEmpty()
+                ? com.hans.android.audio.reliable.RecordingFileNames.mp3Name(
+                        manifest.createdAt, manifest.sessionId,
+                        manifest.displayName)
+                : manifest.finalMp3Name.trim());
         JSONObject response = postJson("/audio/v2/metadata?folder=" + encode(manifest.folderId)
                 + "&sid=" + encode(manifest.sessionId), payload);
         if (!response.optBoolean("ok", false)) {

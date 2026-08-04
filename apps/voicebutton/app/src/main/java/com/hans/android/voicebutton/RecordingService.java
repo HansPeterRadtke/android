@@ -1116,7 +1116,7 @@ public final class RecordingService extends Service {
                         compressed.add(file);
                     }
                     if (compressed.isEmpty()) return;
-                    File preview = new File(store.sessionDirectory(sessionId), "recording.mp3");
+                    File preview = store.finalMp3File(sessionId);
                     mp3.concatenateMp3Segments(compressed, preview);
                     store.markPreviewReady(sessionId, preview);
                     ReliableSessionManifest updated = store.load(sessionId);
@@ -1202,7 +1202,7 @@ public final class RecordingService extends Service {
                 if (manifest.segments.isEmpty()) throw new IOException("No audio was captured");
                 List<File> compressed = new ArrayList<>();
                 for (ReliableSessionManifest.Segment segment : manifest.orderedSegments()) compressed.add(store.mp3File(sessionId, segment));
-                File finalMp3 = new File(store.sessionDirectory(sessionId), "recording.mp3");
+                File finalMp3 = store.finalMp3File(sessionId);
                 mp3.concatenateMp3Segments(compressed, finalMp3);
                 store.markConversionFinished(sessionId, finalMp3);
                 diag(PhoneDiagnostics.INFO, "recording.finalization_complete", sessionId,

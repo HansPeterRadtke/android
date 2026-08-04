@@ -21,6 +21,7 @@ import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.AbsListView;
 import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -31,30 +32,50 @@ import com.hans.android.audio.reliable.ReliableSessionManifest;
 import com.hans.android.audio.reliable.ReliableSessionStore;
 import com.hans.android.common_ui.AndroidUi;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @SuppressLint("SetTextI18n")
 public final class AudioLibraryActivity extends Activity {
     private static final int REQUEST_ROOT = 7301;
     private static final int REQUEST_FILE = 7302;
     private static final int REQUEST_MOVE = 7303;
-    private static final String PREFS = "voicebutton_library";
-    private static final String ROOT_URI = "root_uri";
+    private static final String PREFS = "voicebutton_gui_state";
+    private static final String ROOT_URI = "library_root_uri";
+    private static final String MODE = "library_recordings_mode";
+    private static final String APP_FOLDER_ID = "library_app_folder_id";
+    private static final String APP_FOLDER_NAME = "library_app_folder_name";
+    private static final String DIRECTORY_STACK = "library_directory_stack";
+    private static final String DIRECTORY_NAMES = "library_directory_names";
+    private static final String CURRENT_DIRECTORY = "library_current_directory";
+    private static final String CURRENT_DIRECTORY_NAME = "library_current_directory_name";
+    private static final String CACHE = "library_visible_cache";
+    private static final String SCROLL_FIRST = "library_scroll_first";
+    private static final String SCROLL_TOP = "library_scroll_top";
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final LibraryAdapter adapter = new LibraryAdapter();
+    private final AtomicInteger loadGeneration = new AtomicInteger();
     private final ArrayList<Uri> directoryStack = new ArrayList<>();
+    private final ArrayList<String> directoryNameStack = new ArrayList<>();
 
     private ReliableSessionStore store;
     private SharedPreferences preferences;
     private boolean recordingsMode = true;
     private ReliableSessionStore.Folder appFolderFilter;
     private DocumentFile currentDirectory;
+    private String currentDirectoryName = "Phone files";
+    private int restoreScrollFirst;
+    private int restoreScrollTop;
+    private boolean firstResume = true;
     private DocumentFile pendingMove;
     private TextView pathText;
     private TextView stateText;
@@ -66,12 +87,25 @@ public final class AudioLibraryActivity extends Activity {
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         preferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        recordingsMode = preferences.getBoolean(MODE, true);
+        String folderId = preferences.getString(APP_FOLDER_ID, "");
+        if (folderId != null && !folderId.isEmpty()) {
+            appFolderFilter = new ReliableSessionStore.Folder(folderId,
+                    preferences.getString(APP_FOLDER_NAME, "App folder"), 0L);
+        }
+        restoreScrollFirst = preferences.getInt(SCROLL_FIRST, 0);
+        restoreScrollTop = preferences.getInt(SCROLL_TOP, 0);
         buildScreen();
-        showRecordings();
+        restoreCachedItems();
+        if (recordingsMode) showRecordings(); else restorePhoneLocation();
     }
 
     @Override protected void onResume() {
         super.onResume();
+        if (firstResume) {
+            firstResume = false;
+            return;
+        }
         if (recordingsMode) showRecordings(); else refreshFiles();
     }
 
@@ -135,6 +169,15 @@ public final class AudioLibraryActivity extends Activity {
             manage(adapter.item(position));
             return true;
         });
+        list.setOnScrollListener(new AbsListView.OnScrollListener() {
+            @Override public void onScrollStateChanged(AbsListView view, int state) {
+                saveLibraryState();
+            }
+            @Override public void onScroll(AbsListView view, int first,
+                                           int visible, int total) {
+                if (visible > 0) saveLibraryState();
+            }
+        });
         root.addView(list, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
@@ -176,15 +219,17 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     private void showRecordings() {
-        recordingsMode = true; currentDirectory = null; directoryStack.clear(); updateModeButtons();
+        recordingsMode = true; currentDirectory = null; directoryStack.clear();
+        directoryNameStack.clear(); updateModeButtons(); saveLibraryState();
         upButton.setEnabled(appFolderFilter != null);
         pathText.setText(appFolderFilter == null ? "App recording folders" : appFolderFilter.name);
         stateText.setText(appFolderFilter == null ? "Loading folders…" : "Loading recordings…");
         ReliableSessionStore.Folder filter = appFolderFilter;
+        int generation = loadGeneration.incrementAndGet();
         worker.execute(() -> {
             ArrayList<LibraryItem> items = new ArrayList<>();
             try {
-                if (store == null) store = new ReliableSessionStore(this);
+                if (store == null) store = ReliableSessionStore.openForBrowsing(this);
                 List<ReliableSessionManifest> manifests = store.list();
                 if (filter == null) {
                     for (ReliableSessionStore.Folder folder : store.listFolders()) {
@@ -205,13 +250,20 @@ public final class AudioLibraryActivity extends Activity {
                     }
                 }
                 runOnUiThread(() -> {
+                    if (generation != loadGeneration.get()) return;
                     adapter.replace(items);
+                    restoreListPosition();
+                    saveVisibleCache(items);
+                    saveLibraryState();
                     stateText.setText(items.isEmpty()
                             ? (filter == null ? "No app folders" : "No recordings in this folder")
                             : items.size() + (filter == null ? " folders" : " recordings"));
                 });
             } catch (Exception failure) {
-                runOnUiThread(() -> stateText.setText("Could not load recordings: " + failure.getMessage()));
+                runOnUiThread(() -> {
+                    if (generation == loadGeneration.get()) stateText.setText(
+                            "Could not load recordings: " + failure.getMessage());
+                });
             }
         });
     }
@@ -220,36 +272,83 @@ public final class AudioLibraryActivity extends Activity {
         recordingsMode = false; updateModeButtons();
         String raw = preferences.getString(ROOT_URI, "");
         if (raw == null || raw.isEmpty()) {
-            currentDirectory = null; directoryStack.clear(); adapter.replace(new ArrayList<>());
-            pathText.setText("No phone folder selected"); stateText.setText("Choose a phone folder or open any file"); upButton.setEnabled(false);
+            currentDirectory = null; directoryStack.clear();
+            directoryNameStack.clear(); adapter.replace(new ArrayList<>());
+            pathText.setText("No phone folder selected");
+            stateText.setText("Choose a phone folder or open any file");
+            upButton.setEnabled(false); saveLibraryState();
             return;
         }
-        DocumentFile root = DocumentFile.fromTreeUri(this, Uri.parse(raw));
-        if (root == null || !root.exists()) {
-            preferences.edit().remove(ROOT_URI).apply();
-            currentDirectory = null; stateText.setText("The saved folder is no longer available"); return;
+        Uri rootUri = Uri.parse(raw);
+        currentDirectory = DocumentFile.fromTreeUri(this, rootUri);
+        currentDirectoryName = "Phone files";
+        directoryStack.clear(); directoryStack.add(rootUri);
+        directoryNameStack.clear(); directoryNameStack.add(currentDirectoryName);
+        saveLibraryState(); refreshFiles();
+    }
+
+    private void restorePhoneLocation() {
+        recordingsMode = false; updateModeButtons();
+        directoryStack.clear(); directoryNameStack.clear();
+        try {
+            JSONArray uris = new JSONArray(preferences.getString(
+                    DIRECTORY_STACK, "[]"));
+            JSONArray names = new JSONArray(preferences.getString(
+                    DIRECTORY_NAMES, "[]"));
+            for (int i = 0; i < uris.length(); i++) {
+                directoryStack.add(Uri.parse(uris.getString(i)));
+                directoryNameStack.add(i < names.length()
+                        ? names.optString(i, "Phone files") : "Phone files");
+            }
+        } catch (Exception ignored) {}
+        String current = preferences.getString(CURRENT_DIRECTORY, "");
+        if (current == null || current.isEmpty()) {
+            showPhoneRoot(); return;
         }
-        directoryStack.clear(); directoryStack.add(root.getUri()); currentDirectory = root; refreshFiles();
+        Uri uri = Uri.parse(current);
+        currentDirectory = DocumentFile.fromSingleUri(this, uri);
+        if (currentDirectory == null) currentDirectory =
+                DocumentFile.fromTreeUri(this, uri);
+        currentDirectoryName = preferences.getString(
+                CURRENT_DIRECTORY_NAME, "Phone files");
+        if (directoryStack.isEmpty()) {
+            directoryStack.add(uri); directoryNameStack.add(currentDirectoryName);
+        }
+        refreshFiles();
     }
 
     private void refreshFiles() {
         if (recordingsMode || currentDirectory == null) return;
-        DocumentFile directory = currentDirectory;
-        pathText.setText(directory.getName() == null ? "Phone files" : directory.getName());
-        upButton.setEnabled(directoryStack.size() > 1); stateText.setText("Reading folder…");
+        Uri directoryUri = currentDirectory.getUri();
+        pathText.setText(currentDirectoryName);
+        upButton.setEnabled(directoryStack.size() > 1);
+        stateText.setText(adapter.getCount() > 0
+                ? "Refreshing folder…" : "Reading folder…");
+        saveLibraryState();
+        int generation = loadGeneration.incrementAndGet();
         worker.execute(() -> {
             ArrayList<LibraryItem> items = new ArrayList<>();
             try {
-                for (DocumentFile file : directory.listFiles()) {
-                    items.add(LibraryItem.document(file, directory.getUri()));
+                for (FastDocumentDirectory.Entry entry
+                        : FastDocumentDirectory.list(this, directoryUri)) {
+                    items.add(LibraryItem.document(this, entry, directoryUri));
                 }
                 items.sort((left, right) -> {
-                    if (left.directory != right.directory) return left.directory ? -1 : 1;
+                    if (left.directory != right.directory)
+                        return left.directory ? -1 : 1;
                     return left.title.compareToIgnoreCase(right.title);
                 });
-                runOnUiThread(() -> { adapter.replace(items); stateText.setText(items.size() + " items"); });
+                runOnUiThread(() -> {
+                    if (generation != loadGeneration.get()) return;
+                    adapter.replace(items); restoreListPosition();
+                    saveVisibleCache(items); saveLibraryState();
+                    stateText.setText(items.size() + " items");
+                });
             } catch (Exception failure) {
-                runOnUiThread(() -> stateText.setText("Could not read folder: " + failure.getMessage()));
+                runOnUiThread(() -> {
+                    if (generation == loadGeneration.get()) stateText.setText(
+                            "Could not read folder: " + failure.getMessage());
+                });
             }
         });
     }
@@ -262,8 +361,11 @@ public final class AudioLibraryActivity extends Activity {
         }
         if (item.directory) {
             currentDirectory = item.document;
+            currentDirectoryName = item.title;
             directoryStack.add(item.document.getUri());
-            refreshFiles();
+            directoryNameStack.add(item.title);
+            restoreScrollFirst = 0; restoreScrollTop = 0;
+            saveLibraryState(); refreshFiles();
             return;
         }
         if (!item.playable) {
@@ -406,16 +508,94 @@ public final class AudioLibraryActivity extends Activity {
         }
         if(directoryStack.size()<=1)return;
         directoryStack.remove(directoryStack.size()-1);
+        if (!directoryNameStack.isEmpty())
+            directoryNameStack.remove(directoryNameStack.size()-1);
         Uri uri=directoryStack.get(directoryStack.size()-1);
         currentDirectory=DocumentFile.fromSingleUri(this,uri);
         if(currentDirectory==null)currentDirectory=DocumentFile.fromTreeUri(this,uri);
-        refreshFiles();
+        currentDirectoryName = directoryNameStack.isEmpty()
+                ? "Phone files" : directoryNameStack.get(directoryNameStack.size()-1);
+        restoreScrollFirst = 0; restoreScrollTop = 0;
+        saveLibraryState(); refreshFiles();
     }
     private void navigateBack(){if(!recordingsMode&&directoryStack.size()>1)up();else finish();}
     private void home(){Intent intent=new Intent(this,MainActivity.class);intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP|Intent.FLAG_ACTIVITY_SINGLE_TOP);startActivity(intent);}
     private void updateModeButtons(){recordingsModeButton.setText(recordingsMode?"App recordings ✓":"App recordings");filesModeButton.setText(recordingsMode?"Phone files":"Phone files ✓");}
     private EditText nameInput(String value){EditText input=new EditText(this);input.setSingleLine(true);input.setText(value);input.selectAll();return input;}
     private void error(Exception failure){runOnUiThread(()->Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show());}
+
+    private void saveLibraryState() {
+        if (preferences == null || list == null) return;
+        JSONArray uris = new JSONArray(); JSONArray names = new JSONArray();
+        for (Uri uri : directoryStack) uris.put(uri.toString());
+        for (String name : directoryNameStack) names.put(name);
+        View first = list.getChildAt(0);
+        int firstPosition = list.getFirstVisiblePosition();
+        int top = first == null ? 0 : first.getTop();
+        restoreScrollFirst = firstPosition;
+        restoreScrollTop = top;
+        SharedPreferences.Editor editor = preferences.edit()
+                .putBoolean(MODE, recordingsMode)
+                .putString(APP_FOLDER_ID, appFolderFilter == null ? "" : appFolderFilter.id)
+                .putString(APP_FOLDER_NAME, appFolderFilter == null ? "" : appFolderFilter.name)
+                .putString(DIRECTORY_STACK, uris.toString())
+                .putString(DIRECTORY_NAMES, names.toString())
+                .putString(CURRENT_DIRECTORY, currentDirectory == null
+                        ? "" : currentDirectory.getUri().toString())
+                .putString(CURRENT_DIRECTORY_NAME, currentDirectoryName)
+                .putInt(SCROLL_FIRST, firstPosition)
+                .putInt(SCROLL_TOP, top);
+        editor.apply();
+    }
+
+    private void saveVisibleCache(List<LibraryItem> items) {
+        try {
+            JSONObject root = new JSONObject();
+            root.put("recordings_mode", recordingsMode);
+            root.put("app_folder_id", appFolderFilter == null ? "" : appFolderFilter.id);
+            root.put("directory_uri", currentDirectory == null
+                    ? "" : currentDirectory.getUri().toString());
+            JSONArray array = new JSONArray();
+            int limit = Math.min(items.size(), 1000);
+            for (int i = 0; i < limit; i++) array.put(items.get(i).toJson());
+            root.put("items", array);
+            preferences.edit().putString(CACHE, root.toString()).apply();
+        } catch (Exception ignored) {}
+    }
+
+    private void restoreCachedItems() {
+        try {
+            JSONObject root = new JSONObject(preferences.getString(CACHE, "{}"));
+            if (root.optBoolean("recordings_mode", true) != recordingsMode) return;
+            String expectedFolder = appFolderFilter == null ? "" : appFolderFilter.id;
+            if (!expectedFolder.equals(root.optString("app_folder_id", ""))) return;
+            if (!recordingsMode) {
+                String expectedDirectory = preferences.getString(
+                        CURRENT_DIRECTORY, "");
+                if (!String.valueOf(expectedDirectory).equals(
+                        root.optString("directory_uri", ""))) return;
+            }
+            ArrayList<LibraryItem> items = new ArrayList<>();
+            JSONArray array = root.optJSONArray("items");
+            if (array != null) for (int i = 0; i < array.length(); i++) {
+                LibraryItem item = LibraryItem.fromJson(this,
+                        array.optJSONObject(i));
+                if (item != null) items.add(item);
+            }
+            if (!items.isEmpty()) {
+                adapter.replace(items);
+                stateText.setText(items.size() + " cached items · refreshing…");
+                restoreListPosition();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void restoreListPosition() {
+        if (list == null) return;
+        int first = restoreScrollFirst;
+        int top = restoreScrollTop;
+        list.post(() -> list.setSelectionFromTop(first, top));
+    }
     private LinearLayout row(){LinearLayout row=new LinearLayout(this);row.setOrientation(LinearLayout.HORIZONTAL);return row;}
     private LinearLayout.LayoutParams half(){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,AndroidUi.dp(this,50),1f);p.setMargins(2,2,2,2);return p;}
     private LinearLayout.LayoutParams third(){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,AndroidUi.dp(this,52),1f);p.setMargins(2,2,2,2);return p;}
@@ -443,8 +623,49 @@ public final class AudioLibraryActivity extends Activity {
         }
         static LibraryItem document(DocumentFile file,Uri parent){
             String name=file.getName()==null?"Unnamed":file.getName();boolean directory=file.isDirectory();
-            PlayerSource source=directory?null:new PlayerSource(file.getUri(),name,PlayerSource.KIND_DOCUMENT,file.length(),"","",parent);
-            return new LibraryItem(name,directory?"Folder":(file.getType()==null?"File":file.getType())+" · "+RecordingUi.formatBytes(file.length()),directory,!directory,file,null,null,source);
+            long bytes=directory?0L:file.length(); String type=file.getType();
+            PlayerSource source=directory?null:new PlayerSource(file.getUri(),name,PlayerSource.KIND_DOCUMENT,bytes,"","",parent);
+            return new LibraryItem(name,directory?"Folder":(type==null?"File":type)+" · "+RecordingUi.formatBytes(bytes),directory,!directory,file,null,null,source);
+        }
+        static LibraryItem document(Context context, FastDocumentDirectory.Entry entry,
+                                    Uri parent) {
+            DocumentFile file = DocumentFile.fromSingleUri(context, entry.uri);
+            PlayerSource source = entry.directory ? null : new PlayerSource(
+                    entry.uri, entry.name, PlayerSource.KIND_DOCUMENT,
+                    entry.bytes, "", "", parent);
+            String detail = entry.directory ? "Folder"
+                    : (entry.mimeType.isEmpty() ? "File" : entry.mimeType)
+                    + " · " + RecordingUi.formatBytes(entry.bytes);
+            return new LibraryItem(entry.name, detail, entry.directory,
+                    !entry.directory, file, null, null, source);
+        }
+        JSONObject toJson() throws Exception {
+            JSONObject value = new JSONObject();
+            value.put("title", title); value.put("detail", detail);
+            value.put("directory", directory); value.put("playable", playable);
+            if (document != null) value.put("document_uri", document.getUri().toString());
+            if (source != null) value.put("source", source.toJson());
+            if (appFolder != null) {
+                value.put("app_folder_id", appFolder.id);
+                value.put("app_folder_name", appFolder.name);
+            }
+            return value;
+        }
+        static LibraryItem fromJson(Context context, JSONObject value) {
+            if (value == null) return null;
+            String uri = value.optString("document_uri", "");
+            DocumentFile document = uri.isEmpty() ? null
+                    : DocumentFile.fromSingleUri(context, Uri.parse(uri));
+            PlayerSource source = PlayerSource.fromJson(value.optJSONObject("source"));
+            String folderId = value.optString("app_folder_id", "");
+            ReliableSessionStore.Folder folder = folderId.isEmpty() ? null
+                    : new ReliableSessionStore.Folder(folderId,
+                    value.optString("app_folder_name", "App folder"), 0L);
+            return new LibraryItem(value.optString("title", "Unnamed"),
+                    value.optString("detail", ""),
+                    value.optBoolean("directory", false),
+                    value.optBoolean("playable", false), document,
+                    null, folder, source);
         }
     }
 

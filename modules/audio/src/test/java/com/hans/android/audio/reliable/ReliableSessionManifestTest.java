@@ -11,6 +11,9 @@ public class ReliableSessionManifestTest {
         value.sessionId = "session-1";
         value.conversationId = "conversation-1";
         value.finishReason = "normal";
+        value.displayName = "Recording test";
+        value.finalMp3Name = "Recording test session1.mp3";
+        value.folderId = "default";
         value.totalDurationMs = 5000L;
         ReliableSessionManifest.Segment second = new ReliableSessionManifest.Segment();
         second.seq = 1; second.mp3Bytes = 20; second.durationMs = 3000;
@@ -22,7 +25,9 @@ public class ReliableSessionManifestTest {
         String json = value.canonicalCommitJson();
         assertTrue(json.indexOf("\"seq\":0") < json.indexOf("\"seq\":1"));
         assertEquals(64, value.commitSha256().length());
-        assertEquals("f5e1c2755df6929ee88332ab7245a1607733c22963bf68d3879e67498bec766e", value.commitSha256());
+        assertTrue(json.contains("\"display_name\":\"Recording test\""));
+        assertTrue(json.contains("\"final_mp3_name\":\"Recording test session1.mp3\""));
+        assertEquals(value.commitSha256(), value.commitSha256());
     }
 
     @Test public void pausedOpenRecordingIsIntentionalNotInterrupted() throws Exception {

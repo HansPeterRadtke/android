@@ -304,9 +304,16 @@ public final class ReliableSessionManifest {
 
     public String canonicalCommitJson() {
         StringBuilder out = new StringBuilder();
-        out.append("{\"conversation_id\":\"").append(conversationId).append("\",");
-        out.append("\"finish_reason\":\"").append(finishReason).append("\",");
-        out.append("\"folder_id\":\"").append(folderId).append("\",");
+        out.append("{\"conversation_id\":")
+                .append(JSONObject.quote(conversationId)).append(',');
+        out.append("\"display_name\":")
+                .append(JSONObject.quote(displayName == null ? "" : displayName)).append(',');
+        out.append("\"final_mp3_name\":")
+                .append(JSONObject.quote(finalMp3Name == null ? "" : finalMp3Name)).append(',');
+        out.append("\"finish_reason\":")
+                .append(JSONObject.quote(finishReason)).append(',');
+        out.append("\"folder_id\":")
+                .append(JSONObject.quote(folderId)).append(',');
         List<Segment> ordered = orderedSegments();
         out.append("\"segment_count\":").append(ordered.size()).append(',');
         out.append("\"segments\":[");
@@ -320,7 +327,8 @@ public final class ReliableSessionManifest {
                     .append(",\"sha256\":\"").append(segment.sha256).append("\"")
                     .append(",\"start_sample\":").append(segment.startSample).append('}');
         }
-        out.append("],\"session_id\":\"").append(sessionId).append("\",");
+        out.append("],\"session_id\":")
+                .append(JSONObject.quote(sessionId)).append(',');
         out.append("\"total_duration_ms\":").append(totalDurationMs).append('}');
         return out.toString();
     }

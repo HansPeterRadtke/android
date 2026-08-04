@@ -36,3 +36,6 @@ Version 0.23 fixes the file/player crash caused by querying the native `LibVLC.v
 
 
 Version 0.24 removes the artificial forty-four-character line break from library filenames. Each complete filename is now rendered by one unrestricted TextView and wraps naturally against the actual screen width, with no ellipsis, marquee, max-line cap, or hyphenation; the extension remains part of the visible text. Media notification actions now use dedicated monochrome Previous, Rewind, Play, Pause, Forward, Next, and Close vector icons instead of reusing the colored microphone logo.
+
+
+Version 0.25 adds single-query phone-folder enumeration, immediate cached library rows, exact library/main-screen state restoration, stale-query cancellation, lightweight recording browsing, unique timestamp-plus-session recording filenames with legacy migration, signed final filename synchronization to Jetson, engine-readiness transport gating, and fixed-size pressed/disabled button feedback.

@@ -10,6 +10,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.graphics.Color;
@@ -54,6 +55,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class MainActivity extends Activity {
     private static final int PERMISSION_REQUEST = 1001;
     private static final int DEBUG_EXPORT_REQUEST = 1002;
+    private static final String GUI_PREFS = "voicebutton_gui_state";
+    private static final String PREF_FOLDER_ID = "main_folder_id";
+    private static final String PREF_FOLDER_NAME = "main_folder_name";
+    private static final String PREF_DEVICE_ID = "main_device_id";
 
     private final List<AudioInputOption> inputs = new ArrayList<>();
     private final List<ReliableSessionStore.Folder> folders = new ArrayList<>();
@@ -83,6 +88,7 @@ public final class MainActivity extends Activity {
     private RecordingService.Snapshot snapshot = RecordingService.Snapshot.initial();
     private String promptedSessionId = "";
     private PhoneDiagnostics diagnostics;
+    private SharedPreferences guiPreferences;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService uiWorker = Executors.newSingleThreadExecutor();
     private final AtomicBoolean inputRefreshRunning = new AtomicBoolean(false);
@@ -128,6 +134,11 @@ public final class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        guiPreferences = getSharedPreferences(GUI_PREFS, Context.MODE_PRIVATE);
+        selectedFolderId = guiPreferences.getString(PREF_FOLDER_ID, "default");
+        selectedFolderName = guiPreferences.getString(PREF_FOLDER_NAME, "Default");
+        selectedDeviceId = guiPreferences.getInt(PREF_DEVICE_ID,
+                AudioInputOption.DEFAULT_DEVICE_ID);
         diagnostics = PhoneDiagnostics.get();
         if (diagnostics == null) {
             PhoneDiagnostics.initializeAsync(this, BuildConfig.VOICE_BASE_URL,
@@ -290,6 +301,7 @@ public final class MainActivity extends Activity {
                 if (!selectedExists) {
                     selectedFolderId = folders.get(0).id;
                     selectedFolderName = folders.get(0).name;
+                    saveMainSelectionState();
                 }
                 updateSetupButtons();
             });
@@ -314,6 +326,7 @@ public final class MainActivity extends Activity {
                         ReliableSessionStore.Folder folder = folders.get(which);
                         selectedFolderId = folder.id;
                         selectedFolderName = folder.name;
+                        saveMainSelectionState();
                         updateSetupButtons();
                         diag(PhoneDiagnostics.INFO, "folder.selected", snapshot.currentSessionId,
                                 "A recording folder was selected",
@@ -347,6 +360,7 @@ public final class MainActivity extends Activity {
                             runOnUiThread(() -> {
                                 selectedFolderId = created.id;
                                 selectedFolderName = created.name;
+                                saveMainSelectionState();
                                 dialog.dismiss(); refreshFolders(); updateSetupButtons();
                             });
                         } catch (Exception failure) {
@@ -386,6 +400,7 @@ public final class MainActivity extends Activity {
         inputs.clear(); inputs.addAll(loaded);
         if (inputs.isEmpty()) {
             selectedDeviceId = AudioInputOption.DEFAULT_DEVICE_ID;
+            saveMainSelectionState();
             inputButton.setText("Microphone: none available");
             inputButton.setEnabled(true);
             render(snapshot);
@@ -396,6 +411,7 @@ public final class MainActivity extends Activity {
             if (inputs.get(i).getDeviceId() == preserve) { selected = i; break; }
         }
         selectedDeviceId = inputs.get(selected).getDeviceId();
+        saveMainSelectionState();
         inputButton.setEnabled(true);
         updateSetupButtons();
         render(snapshot);
@@ -416,6 +432,7 @@ public final class MainActivity extends Activity {
                     if (which == inputs.size()) { refreshInputs(); return; }
                     AudioInputOption selected = inputs.get(which);
                     selectedDeviceId = selected.getDeviceId();
+                    saveMainSelectionState();
                     updateSetupButtons();
                     diag(PhoneDiagnostics.INFO, "microphone.selected", snapshot.currentSessionId,
                             "A microphone was selected",
@@ -423,6 +440,15 @@ public final class MainActivity extends Activity {
                                     "device_type", selected.getDeviceType(),
                                     "label", selected.getLabel()));
                 }).setNegativeButton("Back", null).show();
+    }
+
+    private void saveMainSelectionState() {
+        if (guiPreferences == null) return;
+        guiPreferences.edit()
+                .putString(PREF_FOLDER_ID, selectedFolderId)
+                .putString(PREF_FOLDER_NAME, selectedFolderName)
+                .putInt(PREF_DEVICE_ID, selectedDeviceId)
+                .apply();
     }
 
     private void updateSetupButtons() {
@@ -663,6 +689,7 @@ public final class MainActivity extends Activity {
         if (open != null) {
             selectedFolderId = open.folderId;
             selectedFolderName = open.folderName;
+            saveMainSelectionState();
         }
         String structureKey = MainScreenText.structureKey(snapshot.state,
                 snapshot.recording, snapshot.paused,

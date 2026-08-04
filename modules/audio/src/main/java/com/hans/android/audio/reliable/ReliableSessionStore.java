@@ -16,10 +16,8 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.List;
@@ -63,15 +61,26 @@ public final class ReliableSessionStore {
     private final String conversationId;
 
     public ReliableSessionStore(Context context) throws IOException {
+        this(context, true);
+    }
+
+    private ReliableSessionStore(Context context, boolean recover) throws IOException {
         root = new File(context.getNoBackupFilesDir(), "reliable_audio_sessions");
         foldersRoot = new File(root, "folders");
         folderIndex = new File(root, "folders.json");
         ensureDirectory(root);
         ensureDirectory(foldersRoot);
         ensureDefaultFolder();
-        migrateLegacySessions();
         conversationId = loadOrCreateConversationId();
-        recoverAll();
+        if (recover) {
+            migrateLegacySessions();
+            recoverAll();
+        }
+    }
+
+    public static ReliableSessionStore openForBrowsing(Context context)
+            throws IOException {
+        return new ReliableSessionStore(context, false);
     }
 
     public File getRoot() { return root; }
@@ -177,8 +186,9 @@ public final class ReliableSessionStore {
         manifest.folderName = folderName == null || folderName.isEmpty() ? folder.name : folderName;
         manifest.remoteFolderId = folder.id;
         manifest.remoteFolderName = folder.name;
-        manifest.displayName = "Recording " + new SimpleDateFormat(
-                "yyyy-MM-dd HH-mm-ss", Locale.US).format(new Date(manifest.createdAt));
+        manifest.displayName = RecordingFileNames.defaultDisplayName(manifest.createdAt);
+        manifest.finalMp3Name = RecordingFileNames.defaultMp3Name(
+                manifest.createdAt, manifest.sessionId);
         manifest.selectedInput = selectedInput;
         manifest.selectedDeviceId = selectedDeviceId;
         manifest.state = "RECORDING";
@@ -599,7 +609,11 @@ public final class ReliableSessionStore {
 
     public synchronized File finalMp3File(String sessionId) throws IOException {
         ReliableSessionManifest manifest = load(sessionId);
-        return new File(sessionDir(sessionId), manifest.finalMp3Name.isEmpty() ? "recording.mp3" : manifest.finalMp3Name);
+        String name = RecordingFileNames.isLegacyGenericName(manifest.finalMp3Name)
+                ? RecordingFileNames.mp3Name(manifest.createdAt,
+                        manifest.sessionId, manifest.displayName)
+                : manifest.finalMp3Name;
+        return new File(sessionDir(sessionId), name);
     }
 
     public synchronized Folder renameFolder(String folderId, String requestedName) throws IOException {
@@ -791,6 +805,21 @@ public final class ReliableSessionStore {
         } catch (Exception ignored) {
             manifest.folderId = "default";
             manifest.folderName = "Default";
+        }
+
+        String expectedFinalName = RecordingFileNames.mp3Name(
+                manifest.createdAt, manifest.sessionId, manifest.displayName);
+        File legacyFinal = new File(dir, "recording.mp3");
+        File expectedFinal = new File(dir, expectedFinalName);
+        if (legacyFinal.isFile() && !legacyFinal.equals(expectedFinal)
+                && !expectedFinal.exists()) {
+            if (!legacyFinal.renameTo(expectedFinal)) {
+                throw new IOException("Could not migrate the legacy recording filename");
+            }
+            fsyncDirectory(dir);
+        }
+        if (RecordingFileNames.isLegacyGenericName(manifest.finalMp3Name)) {
+            manifest.finalMp3Name = expectedFinalName;
         }
 
         boolean recoveredOpenSegment = false;

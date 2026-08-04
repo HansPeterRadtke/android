@@ -3,7 +3,10 @@ package com.hans.android.common_ui;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.content.res.ColorStateList;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
+import android.os.Build;
 import android.view.View;
 import android.widget.*;
 
@@ -48,35 +51,44 @@ public final class AndroidUi {
 
     public static Button primaryButton(Context c, String text) {
         Button button = baseButton(c, text);
-        button.setTextColor(Color.WHITE);
+        button.setTextColor(textStates(Color.WHITE, Color.WHITE,
+                Color.rgb(135, 140, 148)));
         button.setTextSize(17);
         button.setTypeface(Typeface.DEFAULT_BOLD);
         button.setMinHeight(dp(c, 56));
-        button.setBackground(round(BLUE, BLUE, dp(c, 14)));
+        button.setBackground(buttonStates(c, BLUE, Color.rgb(22, 75, 174),
+                Color.rgb(224, 227, 232), BLUE, dp(c, 14)));
         return button;
     }
 
     public static Button secondaryButton(Context c, String text) {
         Button button = baseButton(c, text);
-        button.setTextColor(BLUE);
-        button.setBackground(round(Color.WHITE, Color.rgb(201, 211, 224), dp(c, 12)));
+        button.setTextColor(textStates(BLUE, Color.rgb(18, 65, 150),
+                Color.rgb(145, 150, 158)));
+        button.setBackground(buttonStates(c, Color.WHITE, Color.rgb(232, 238, 248),
+                Color.rgb(238, 240, 243), Color.rgb(201, 211, 224), dp(c, 12)));
         return button;
     }
 
     public static Button dangerButton(Context c, String text) {
         Button button = baseButton(c, text);
-        button.setTextColor(RED);
+        button.setTextColor(textStates(RED, Color.rgb(132, 31, 31),
+                Color.rgb(145, 150, 158)));
         button.setTypeface(Typeface.DEFAULT_BOLD);
-        button.setBackground(round(Color.WHITE, RED, dp(c, 12)));
+        button.setBackground(buttonStates(c, Color.WHITE, Color.rgb(250, 230, 230),
+                Color.rgb(238, 240, 243), RED, dp(c, 12)));
         return button;
     }
 
     public static Button toolbarButton(Context c, String text) {
         Button button = baseButton(c, text);
-        button.setTextColor(INK);
+        button.setTextColor(textStates(INK, Color.BLACK,
+                Color.rgb(145, 150, 158)));
         button.setTextSize(13);
         button.setMinHeight(dp(c, 44));
-        button.setBackground(round(Color.TRANSPARENT, Color.rgb(218, 224, 232), dp(c, 12)));
+        button.setBackground(buttonStates(c, Color.TRANSPARENT,
+                Color.rgb(232, 235, 240), Color.rgb(238, 240, 243),
+                Color.rgb(218, 224, 232), dp(c, 12)));
         return button;
     }
 
@@ -88,6 +100,8 @@ public final class AndroidUi {
         button.setMinHeight(dp(c, 48));
         button.setPadding(dp(c, 12), 0, dp(c, 12), 0);
         button.setGravity(android.view.Gravity.CENTER);
+        button.setElevation(0f);
+        if (Build.VERSION.SDK_INT >= 21) button.setStateListAnimator(null);
         return button;
     }
 
@@ -155,4 +169,24 @@ public final class AndroidUi {
         int r = Color.red(color), g = Color.green(color), b = Color.blue(color);
         return Color.rgb((r + 255 * 7) / 8, (g + 255 * 7) / 8, (b + 255 * 7) / 8);
     }
+    private static ColorStateList textStates(int normal, int pressed, int disabled) {
+        return new ColorStateList(new int[][]{
+                new int[]{-android.R.attr.state_enabled},
+                new int[]{android.R.attr.state_pressed},
+                new int[]{}
+        }, new int[]{disabled, pressed, normal});
+    }
+
+    private static StateListDrawable buttonStates(Context c, int normal,
+                                                   int pressed, int disabled,
+                                                   int stroke, int radius) {
+        StateListDrawable states = new StateListDrawable();
+        states.addState(new int[]{-android.R.attr.state_enabled},
+                round(disabled, Color.rgb(210, 214, 220), radius));
+        states.addState(new int[]{android.R.attr.state_pressed},
+                round(pressed, stroke, radius));
+        states.addState(new int[]{}, round(normal, stroke, radius));
+        return states;
+    }
+
 }

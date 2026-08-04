@@ -3,6 +3,7 @@ package com.hans.android.voicebutton;
 import android.content.Context;
 
 import com.hans.android.audio.reliable.ReliableSessionManifest;
+import com.hans.android.audio.reliable.RecordingFileNames;
 import com.hans.android.common_ui.AndroidUi;
 
 import java.io.File;
@@ -46,13 +47,22 @@ final class RecordingUi {
 
     static File recordingFile(Context context, ReliableSessionManifest manifest) {
         if (manifest == null) return null;
-        String name = manifest.finalMp3Name == null || manifest.finalMp3Name.isEmpty()
-                ? "recording.mp3" : manifest.finalMp3Name;
-        File root = new File(context.getNoBackupFilesDir(), "reliable_audio_sessions");
+        String name = RecordingFileNames.isLegacyGenericName(
+                manifest.finalMp3Name)
+                ? RecordingFileNames.mp3Name(manifest.createdAt,
+                        manifest.sessionId, manifest.displayName)
+                : manifest.finalMp3Name;
+        File root = new File(context.getNoBackupFilesDir(),
+                "reliable_audio_sessions");
         File folder = new File(new File(root, "folders"),
-                manifest.folderId == null || manifest.folderId.isEmpty() ? "default" : manifest.folderId);
-        File session = new File(new File(folder, "sessions"), manifest.sessionId);
-        return new File(session, name);
+                manifest.folderId == null || manifest.folderId.isEmpty()
+                        ? "default" : manifest.folderId);
+        File session = new File(new File(folder, "sessions"),
+                manifest.sessionId);
+        File expected = new File(session, name);
+        if (expected.isFile()) return expected;
+        File legacy = new File(session, "recording.mp3");
+        return legacy.isFile() ? legacy : expected;
     }
 
     static File transcriptFile(Context context, ReliableSessionManifest manifest) {
