@@ -305,6 +305,7 @@ public final class RecordingService extends Service {
 
     @Override public void onCreate() {
         super.onCreate();
+        UploadWorkCoordinator.markServiceStarting();
         createNotificationChannel();
         PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
         if (power != null) {
@@ -318,6 +319,7 @@ public final class RecordingService extends Service {
                 "Microphone not ready", "Not recording", Collections.emptyList(),
                 null, null, null, false, false, "", 0);
         publish();
+        ensureForeground();
         try { serviceExecutor.execute(this::initializeService); }
         catch (RuntimeException failure) {
             serviceInitializing = false;
@@ -339,28 +341,32 @@ public final class RecordingService extends Service {
                 "RecordingService background initialization entered",
                 PhoneDiagnostics.fields("thread", Thread.currentThread().getName()));
         try {
+            UploadWorkCoordinator.awaitServiceOwnership();
             store = new ReliableSessionStore(this);
-            recoverPcmJournals();
             normalizeInterruptedSessions();
-            uploader = new ReliableUploader(this, store,
-                    BuildConfig.VOICE_BASE_URL, uploaderListener);
-            uploader.start();
-            registerNetworkCallback();
-            resumePendingConversions();
             List<ReliableSessionManifest> sessions = store.list();
             ReliableSessionManifest open = null;
             ReliableSessionManifest interrupted = null;
             for (ReliableSessionManifest value : sessions) {
                 if (!value.recordingFinished
-                        && (open == null || value.createdAt > open.createdAt)) open = value;
+                        && (open == null || value.createdAt > open.createdAt)) {
+                    open = value;
+                }
                 if (value.isInterrupted()
-                        && (interrupted == null || value.createdAt > interrupted.createdAt)) {
+                        && (interrupted == null
+                        || value.createdAt > interrupted.createdAt)) {
                     interrupted = value;
                 }
             }
             long localBytes = store.localBytes();
             localBytesCached = localBytes;
             lastLocalBytesScanElapsedMs = SystemClock.elapsedRealtime();
+            currentSessionId = open == null ? null : open.sessionId;
+            uploader = new ReliableUploader(this, store,
+                    BuildConfig.VOICE_BASE_URL, uploaderListener);
+            registerNetworkCallback();
+            serviceInitialized = true;
+            serviceInitializing = false;
             diag(PhoneDiagnostics.INFO, "service.recovery_scan",
                     open == null ? null : open.sessionId,
                     "Private recording storage recovery scan completed",
@@ -368,49 +374,61 @@ public final class RecordingService extends Service {
                             "open_session", open == null ? "" : open.sessionId,
                             "open_state", open == null ? "" : open.state,
                             "open_paused", open != null && open.paused,
-                            "open_finished", open != null && open.recordingFinished,
-                            "open_segments", open == null ? 0 : open.segments.size(),
-                            "interrupted_session", interrupted == null ? "" : interrupted.sessionId,
+                            "open_finished", open != null
+                                    && open.recordingFinished,
+                            "open_segments", open == null
+                                    ? 0 : open.segments.size(),
+                            "interrupted_session", interrupted == null
+                                    ? "" : interrupted.sessionId,
                             "local_bytes", localBytes,
                             "initialization_ms", Math.max(0L,
                                     SystemClock.elapsedRealtime() - started),
-                            "thread", Thread.currentThread().getName()));
-            currentSessionId = open == null ? null : open.sessionId;
-            serviceInitialized = true;
-            serviceInitializing = false;
-            if (interrupted != null && interrupted.autoResumeRequested) {
+                            "thread", Thread.currentThread().getName(),
+                            "capture_first_recovery", true));
+            if (RecordingIsolationPolicy.resumeCaptureBeforeDeferredWork(
+                    interrupted != null,
+                    interrupted != null && interrupted.autoResumeRequested)) {
                 try {
-                    AudioInputOption input = resolveInput(interrupted.selectedDeviceId);
+                    AudioInputOption input = resolveInput(
+                            interrupted.selectedDeviceId);
                     store.markResumed(interrupted.sessionId,
                             input.getLabel(), input.getDeviceId());
                     ensureForeground();
                     startCapture(interrupted.sessionId, input);
-                    diag(PhoneDiagnostics.WARN, "recovery.capture_auto_resumed",
+                    diag(PhoneDiagnostics.WARN,
+                            "recovery.capture_auto_resumed",
                             interrupted.sessionId,
-                            "Recording automatically resumed after an unexpected Android process restart",
-                            PhoneDiagnostics.fields("device_id", input.getDeviceId(),
-                                    "folder_id", interrupted.folderId));
+                            "Recording automatically resumed before conversion or upload work after an unexpected Android process restart",
+                            PhoneDiagnostics.fields(
+                                    "device_id", input.getDeviceId(),
+                                    "folder_id", interrupted.folderId,
+                                    "deferred_work_started", false));
                 } catch (Exception resumeFailure) {
                     String exact = PhoneDiagnostics.exactFailure(
-                            "Automatically resuming recording", resumeFailure);
+                            "Automatically resuming recording",
+                            resumeFailure);
                     store.markInterrupted(interrupted.sessionId, exact);
                     startFailureIncident(interrupted.sessionId, exact);
                     scheduleAutomaticRecovery(interrupted.sessionId);
                     refresh("RECOVERING", exact
-                                    + ". Retrying automatically; durable chunks remain safe.",
+                                    + ". Retrying automatically; durable PCM remains safe.",
                             false, "Not recording");
                 }
-            } else if (interrupted != null) {
-                refresh("RECOVERY REQUIRED",
-                        "An interrupted recording needs your decision",
-                        false, "Not recording");
-            } else if (open != null && open.paused) {
-                refresh("PAUSED",
-                        "The current recording is safely paused and available for playback",
-                        false, "Not recording");
             } else {
-                refresh("READY", "Ready to create a durable compressed recording",
-                        false, "Not recording");
+                resumeDeferredWork("service_initialized");
+                if (interrupted != null) {
+                    refresh("RECOVERY REQUIRED",
+                            "An interrupted recording needs your decision",
+                            false, "Not recording");
+                } else if (open != null && open.paused) {
+                    refresh("PAUSED",
+                            "The current recording is safely paused and available for playback",
+                            false, "Not recording");
+                } else {
+                    refresh("READY",
+                            "Ready to create a loss-protected recording",
+                            false, "Not recording");
+                }
             }
         } catch (Exception failure) {
             serviceInitialized = false;
@@ -419,7 +437,8 @@ public final class RecordingService extends Service {
                     "Opening private recording storage", failure);
             diagError("service.create_failed", null,
                     "Opening private recording storage", failure,
-                    PhoneDiagnostics.fields("thread", Thread.currentThread().getName()));
+                    PhoneDiagnostics.fields(
+                            "thread", Thread.currentThread().getName()));
             snapshot = new Snapshot("FAILED", exact, false, false,
                     0L, 0L, -120f, -120f, 0, false,
                     0L, 0L, 0L, 0, 0, 0,
@@ -700,15 +719,91 @@ public final class RecordingService extends Service {
     }
 
     private void signalUploader(String reason) {
+        if (!RecordingIsolationPolicy.mayRunDeferredWork(
+                recorder.isRecording(), exitRequested.get())) return;
         ReliableUploader value = uploader;
-        if (value == null || exitRequested.get()) return;
+        if (value == null) {
+            try {
+                value = new ReliableUploader(this, store,
+                        BuildConfig.VOICE_BASE_URL, uploaderListener);
+                uploader = value;
+            } catch (RuntimeException failure) {
+                diagError("upload.worker_create_failed", null,
+                        "Creating the transfer worker", failure,
+                        PhoneDiagnostics.fields("reason", reason));
+                return;
+            }
+        }
         boolean restarted = value.ensureRunning();
         value.signal();
         if (restarted) {
-            diag(PhoneDiagnostics.WARN, "upload.worker_auto_restarted", null,
-                    "A dead transfer worker was recreated automatically",
+            diag(PhoneDiagnostics.WARN,
+                    "upload.worker_auto_restarted", null,
+                    "A stopped transfer worker was recreated automatically",
                     PhoneDiagnostics.fields("reason", reason,
                             "worker", value.debugSummary()));
+        }
+    }
+
+    private synchronized void suspendDeferredWorkForCapture()
+            throws IOException {
+        ReliableUploader currentUploader = uploader;
+        if (currentUploader != null) {
+            currentUploader.stop();
+            if (!currentUploader.awaitStopped(15_000L)) {
+                throw new IOException(
+                        "The transfer worker could not be drained before microphone capture");
+            }
+        }
+        ExecutorService currentConversion = conversion;
+        currentConversion.shutdownNow();
+        boolean stopped;
+        try {
+            stopped = currentConversion.awaitTermination(
+                    15_000L, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException(
+                    "Interrupted while isolating microphone capture",
+                    interrupted);
+        }
+        if (!stopped) {
+            throw new IOException(
+                    "MP3 maintenance could not be drained before microphone capture");
+        }
+        conversion = Executors.newSingleThreadExecutor();
+        diag(PhoneDiagnostics.INFO,
+                "recording.deferred_work_suspended", currentSessionId,
+                "Conversion and network transfer were fully stopped before microphone capture",
+                PhoneDiagnostics.fields(
+                        "uploader_stopped", currentUploader == null
+                                || !currentUploader.isWorkerAlive(),
+                        "conversion_stopped", true));
+    }
+
+    private void resumeDeferredWork(String reason) {
+        if (!RecordingIsolationPolicy.mayRunDeferredWork(
+                recorder.isRecording(), exitRequested.get())
+                || store == null) {
+            return;
+        }
+        signalUploader(reason);
+        ExecutorService current = conversion;
+        try {
+            current.execute(() -> {
+                synchronized (fileMaintenanceLock) {
+                    if (recorder.isRecording() || exitRequested.get()) return;
+                    recoverPcmJournals();
+                }
+                if (!recorder.isRecording() && !exitRequested.get()) {
+                    resumePendingConversions();
+                    signalUploader("deferred_work_recovered");
+                }
+            });
+        } catch (RuntimeException failure) {
+            diagError("recording.deferred_work_resume_failed", null,
+                    "Resuming conversion and transfer work", failure,
+                    PhoneDiagnostics.fields("reason", reason));
         }
     }
 
@@ -753,7 +848,13 @@ public final class RecordingService extends Service {
                 "New recording metadata was created",
                 PhoneDiagnostics.fields("device_id", input.getDeviceId(),
                         "device_type", input.getDeviceType(), "label", input.getLabel()));
-        startCapture(manifest.sessionId, input);
+        try {
+            startCapture(manifest.sessionId, input);
+        } catch (Exception failure) {
+            try { store.discardIfEmpty(manifest.sessionId); }
+            catch (Exception ignored) {}
+            throw failure;
+        }
     }
 
     private void resumeSession(String sessionId, int deviceId) throws Exception {
@@ -803,10 +904,18 @@ public final class RecordingService extends Service {
                 PhoneDiagnostics.fields("previous_session_id", sessionId,
                         "device_id", input.getDeviceId(), "device_type", input.getDeviceType(),
                         "label", input.getLabel()));
-        startCapture(next.sessionId, input);
+        try {
+            startCapture(next.sessionId, input);
+        } catch (Exception failure) {
+            try { store.discardIfEmpty(next.sessionId); }
+            catch (Exception ignored) {}
+            throw failure;
+        }
     }
 
-    private void startCapture(String sessionId, AudioInputOption input) {
+    private void startCapture(String sessionId, AudioInputOption input)
+            throws IOException {
+        suspendDeferredWorkForCapture();
         ensureForeground();
         acquireCaptureWakeLock();
         currentSessionId = sessionId;
@@ -879,13 +988,13 @@ public final class RecordingService extends Service {
                 return;
             }
             if (stopDisposition == STOP_PAUSE) {
-                refresh("PAUSING", "Pause is already closing the current MP3 segment", false, "Not recording");
+                refresh("PAUSING", "Pause is already closing the current durable PCM journal", false, "Not recording");
                 return;
             }
             throw new IllegalStateException("No recording is currently active to pause");
         }
         stopDisposition = STOP_PAUSE;
-        refresh("PAUSING", "Closing and synchronizing the current MP3 segment", true, snapshot.routedInput);
+        refresh("PAUSING", "Closing and synchronizing the current durable PCM journal", true, snapshot.routedInput);
         recorder.stop();
     }
 
@@ -896,7 +1005,7 @@ public final class RecordingService extends Service {
                         "snapshot_state", snapshot.state));
         if (recorder.isRecording()) {
             stopDisposition = STOP_FINISH;
-            refresh("FINISHING", "Closing the final MP3 segment", true, snapshot.routedInput);
+            refresh("FINISHING", "Closing and synchronizing the final durable PCM journal", true, snapshot.routedInput);
             recorder.stop();
             return;
         }
@@ -954,155 +1063,262 @@ public final class RecordingService extends Service {
         throw new IOException("The selected microphone is no longer available; press Refresh connected inputs and choose again");
     }
 
-    private final JournaledMp3Recorder.Listener recorderListener = new JournaledMp3Recorder.Listener() {
+    private final JournaledMp3Recorder.Listener recorderListener =
+            new JournaledMp3Recorder.Listener() {
         @Override public void onStarted(String routedDevice) {
             cancelAutomaticRecovery(true);
-            diag(PhoneDiagnostics.INFO, "recording.started", currentSessionId,
-                    "AudioRecord entered the recording state",
+            diag(PhoneDiagnostics.INFO, "recording.started",
+                    currentSessionId,
+                    "AudioRecord entered the recording state with isolated direct PCM journaling",
                     PhoneDiagnostics.fields("routed_device", routedDevice,
                             "start_duration_ms", Math.max(0L,
-                                    SystemClock.elapsedRealtime() - recordingStartedAt)));
-            refresh("RECORDING", "Audio is journaled locally and compressed in the background", true, routedDevice);
+                                    SystemClock.elapsedRealtime()
+                                            - recordingStartedAt),
+                            "live_mp3", false,
+                            "upload_during_capture", false));
+            refresh("RECORDING",
+                    "Microphone audio is being written directly to durable local storage; conversion and transfer are suspended",
+                    true, routedDevice);
             main.removeCallbacks(ticker);
             main.post(ticker);
         }
 
-
-        @Override public void onRecorderEvent(String event, int seq, long bytes,
-                                              long durationMs, String detail) {
-            String level = event.endsWith("exception") ? PhoneDiagnostics.ERROR : PhoneDiagnostics.DEBUG;
+        @Override public void onRecorderEvent(String event, int seq,
+                                              long bytes,
+                                              long durationMs,
+                                              String detail) {
+            String level = event.endsWith("exception")
+                    ? PhoneDiagnostics.ERROR : PhoneDiagnostics.DEBUG;
             diag(level, event, currentSessionId, detail,
-                    PhoneDiagnostics.fields("seq", seq, "bytes", bytes,
-                            "duration_ms", durationMs, "detail", detail));
+                    PhoneDiagnostics.fields("seq", seq,
+                            "bytes", bytes,
+                            "duration_ms", durationMs,
+                            "detail", detail));
         }
 
-        @Override public void onAudioLevel(float rmsDbfs, float peakDbfs, long capturedSamples) {
+        @Override public void onAudioLevel(float rmsDbfs,
+                                           float peakDbfs,
+                                           long capturedSamples) {
             liveInputRmsDbfs = rmsDbfs;
             liveInputPeakDbfs = peakDbfs;
             liveInputLevelAtElapsedMs = SystemClock.elapsedRealtime();
         }
 
-        @Override public void onSegmentCommitted(int seq, File mp3File, long durationMs) {
-            backgroundWorkCached = true;
-            diag(PhoneDiagnostics.INFO, "recording.segment_committed", currentSessionId,
-                    "Immutable MP3 segment metadata was committed locally",
-                    PhoneDiagnostics.fields("seq", seq, "bytes", mp3File.length(),
-                            "duration_ms", durationMs, "file_name", mp3File.getName()));
-            signalUploader("queued_work");
-            if (stopDisposition == STOP_PAUSE) {
-                refresh("PAUSING", "The paused MP3 segment is durable; preparing playback", false, "Not recording");
-            } else if (stopDisposition == STOP_FINISH) {
-                refresh("FINISHING", "The final MP3 segment is durable; assembling the recording", false, "Not recording");
-            } else {
-                refresh("RECORDING", "A compressed MP3 segment was synchronized to storage", true, snapshot.routedInput);
+        @Override public void onJournalCommitted(String sessionId,
+                                                  int seq,
+                                                  File pcmJournal,
+                                                  int inputSampleRate,
+                                                  long pcmBytes,
+                                                  long durationMs) {
+            long durableAtMs = System.currentTimeMillis();
+            long createdAtMs = Math.max(0L,
+                    durableAtMs - Math.max(0L, durationMs));
+            try {
+                serviceExecutor.execute(() -> commitPcmJournalWithRetry(
+                        sessionId, seq, pcmJournal, inputSampleRate,
+                        pcmBytes, durationMs, createdAtMs, durableAtMs));
+            } catch (RuntimeException rejected) {
+                String exact = PhoneDiagnostics.exactFailure(
+                        "Queueing durable PCM metadata", rejected);
+                captureFailed = true;
+                recordingRecoveryDetail = exact;
+                startFailureIncident(sessionId, exact);
+                diagError("recording.pcm_metadata_queue_failed",
+                        sessionId, "Queueing durable PCM metadata",
+                        rejected, PhoneDiagnostics.fields("seq", seq,
+                                "pcm_bytes", pcmBytes,
+                                "file_name", pcmJournal.getName()));
             }
         }
 
         @Override public void onStopped(String sessionId) {
-            main.removeCallbacks(ticker);
-            liveInputRmsDbfs = -120f;
-            liveInputPeakDbfs = -120f;
-            liveInputLevelAtElapsedMs = 0L;
-            int disposition = stopDisposition;
-            diag(PhoneDiagnostics.INFO, "recording.thread_stopped", sessionId,
-                    "Recorder thread reported stopped",
-                    PhoneDiagnostics.fields("stop_disposition", disposition,
-                            "capture_failed", captureFailed,
-                            "snapshot_duration_ms", snapshot.durationMs));
-            stopDisposition = STOP_NONE;
-            if (exitRequested.get()) {
-                try {
-                    if (!store.discardIfEmpty(sessionId)) {
-                        ReliableSessionManifest current = store.load(sessionId);
-                        if (!current.recordingFinished && !current.paused) {
-                            if (disposition == STOP_PAUSE) store.markPaused(sessionId);
-                            else store.markInterrupted(sessionId,
-                                    "App was explicitly closed before the recording was finished");
-                        }
-                    }
-                } catch (Exception failure) {
-                    diagError("recording.exit_recovery_failed", sessionId,
-                            "Persisting recording state during app exit", failure,
-                            PhoneDiagnostics.fields("stop_disposition", disposition));
-                }
-                return;
-            }
             try {
-                if (store.discardIfEmpty(sessionId)) {
-                    currentSessionId = null;
-                    String detail = captureFailed
-                            ? "The microphone did not produce durable audio; the empty recording was removed"
-                            : "No audio was captured; no stale recording was kept";
-                    refresh(captureFailed ? "FAILED" : "READY", detail, false, "Not recording");
-                    return;
-                }
-            } catch (Exception failure) {
-                diagError("recording.empty_session_check_failed", sessionId,
-                        "Checking whether the stopped session was empty", failure,
-                        PhoneDiagnostics.fields());
+                serviceExecutor.execute(() ->
+                        handleRecorderStopped(sessionId));
+            } catch (RuntimeException rejected) {
+                String exact = PhoneDiagnostics.exactFailure(
+                        "Queueing recorder shutdown recovery", rejected);
+                captureFailed = true;
+                recordingRecoveryDetail = exact;
+                startFailureIncident(sessionId, exact);
+                diagError("recording.stop_handler_queue_failed",
+                        sessionId,
+                        "Queueing recorder shutdown recovery",
+                        rejected, PhoneDiagnostics.fields());
             }
-            try {
-                ReliableSessionManifest persisted = store.load(sessionId);
-                if (persisted.recordingFinished) {
-                    currentSessionId = null;
-                    if (!persisted.conversionFinished) {
-                        scheduleFinalization(sessionId);
-                        refresh("FINISHING", "Creating the final playable MP3", false, "Not recording");
-                    } else {
-                        refresh("READY", "The recording is finished and playable", false, "Not recording");
-                    }
-                    signalUploader("queued_work");
-                    return;
-                }
-            } catch (Exception failure) {
-                diagError("recording.persisted_state_check_failed", sessionId,
-                        "Checking persisted recording state after capture stopped", failure,
-                        PhoneDiagnostics.fields("stop_disposition", disposition));
-            }
-            if (captureFailed || disposition == STOP_INTERRUPT || disposition == STOP_NONE) {
-                String detail = recordingRecoveryDetail == null || recordingRecoveryDetail.isEmpty()
-                        ? (captureFailed ? "Recording stopped unexpectedly" : "Recording service was interrupted")
-                        : recordingRecoveryDetail;
-                try { store.markInterrupted(sessionId, detail); }
-                catch (Exception ignored) {}
-                currentSessionId = sessionId;
-                schedulePreview(sessionId);
-                startFailureIncident(sessionId, detail);
-                scheduleAutomaticRecovery(sessionId);
-                refresh("RECOVERING", detail
-                        + ". Retrying automatically; press Silence alarm to stop the sound without stopping recovery.",
-                        false, "Not recording");
-            } else if (disposition == STOP_PAUSE) {
-                try { store.markPaused(sessionId); }
-                catch (Exception failure) { store.markError(sessionId, "Could not save paused state"); }
-                currentSessionId = sessionId;
-                schedulePreview(sessionId);
-                refresh("PAUSED", "Recording is paused; preparing a playable MP3 snapshot", false, "Not recording");
-            } else {
-                try { store.markRecordingFinished(sessionId, "normal"); }
-                catch (Exception failure) { store.markError(sessionId, "Could not close recording metadata"); }
-                currentSessionId = null;
-                scheduleFinalization(sessionId);
-                refresh("FINISHING", "Recording closed; creating the final MP3", false, "Not recording");
-            }
-            signalUploader("queued_work");
         }
 
-        @Override public void onFailure(String stage, String exceptionClass, String message) {
+        @Override public void onFailure(String stage,
+                                        String exceptionClass,
+                                        String message) {
             if (exitRequested.get()) return;
             captureFailed = true;
-            String exact = "Recording failed during " + stage + ": " + exceptionClass + ": " + message
-                    + ". Any durable MP3 frames and metadata were preserved.";
+            String exact = "Recording failed during " + stage + ": "
+                    + exceptionClass + ": " + message
+                    + ". Every PCM byte synchronized before the failure remains recoverable.";
             recordingRecoveryDetail = exact;
             startFailureIncident(currentSessionId, exact);
-            if (currentSessionId != null) store.markError(currentSessionId, exact);
-            diag(PhoneDiagnostics.ERROR, "recording.failure", currentSessionId,
-                    exact, PhoneDiagnostics.fields("stage", stage,
+            diag(PhoneDiagnostics.ERROR, "recording.failure",
+                    currentSessionId, exact,
+                    PhoneDiagnostics.fields("stage", stage,
                             "exception_class", exceptionClass,
-                            "exception_message", message));
+                            "exception_message", message,
+                            "alarm_started_before_journal_close", true));
             refresh("FAILED", exact, false, "Not recording");
         }
     };
+
+    private void commitPcmJournalWithRetry(String sessionId, int seq,
+                                           File pcmJournal,
+                                           int inputSampleRate,
+                                           long pcmBytes,
+                                           long durationMs,
+                                           long createdAtMs,
+                                           long durableAtMs) {
+        Exception last = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                store.commitPcmJournal(sessionId, seq, pcmJournal,
+                        inputSampleRate, pcmBytes, durationMs,
+                        createdAtMs, durableAtMs);
+                backgroundWorkCached = true;
+                diag(PhoneDiagnostics.INFO,
+                        "recording.pcm_journal_committed", sessionId,
+                        "Direct PCM journal metadata was committed after microphone capture stopped",
+                        PhoneDiagnostics.fields("seq", seq,
+                                "bytes", pcmJournal.length(),
+                                "duration_ms", durationMs,
+                                "input_sample_rate", inputSampleRate,
+                                "file_name", pcmJournal.getName(),
+                                "attempt", attempt));
+                return;
+            } catch (Exception failure) {
+                last = failure;
+                if (attempt < 3) SystemClock.sleep(100L * attempt);
+            }
+        }
+        captureFailed = true;
+        String exact = PhoneDiagnostics.exactFailure(
+                "Committing direct PCM journal metadata", last)
+                + ". The PCM file itself remains on storage for startup recovery.";
+        recordingRecoveryDetail = exact;
+        startFailureIncident(sessionId, exact);
+        diagError("recording.pcm_metadata_commit_failed", sessionId,
+                "Committing direct PCM journal metadata", last,
+                PhoneDiagnostics.fields("seq", seq,
+                        "pcm_bytes", pcmJournal.length(),
+                        "file_name", pcmJournal.getName(),
+                        "attempts", 3));
+    }
+
+    private void handleRecorderStopped(String sessionId) {
+        main.removeCallbacks(ticker);
+        liveInputRmsDbfs = -120f;
+        liveInputPeakDbfs = -120f;
+        liveInputLevelAtElapsedMs = 0L;
+        int disposition = stopDisposition;
+        diag(PhoneDiagnostics.INFO, "recording.thread_stopped",
+                sessionId, "Direct PCM recorder thread reported stopped",
+                PhoneDiagnostics.fields("stop_disposition", disposition,
+                        "capture_failed", captureFailed,
+                        "snapshot_duration_ms", snapshot.durationMs,
+                        "deferred_work_was_suspended", true));
+        stopDisposition = STOP_NONE;
+        if (exitRequested.get()) {
+            try {
+                if (!store.discardIfEmpty(sessionId)) {
+                    ReliableSessionManifest current = store.load(sessionId);
+                    if (!current.recordingFinished && !current.paused) {
+                        if (disposition == STOP_PAUSE) {
+                            store.markPaused(sessionId);
+                        } else {
+                            store.markInterrupted(sessionId,
+                                    "App was explicitly closed before the recording was finished");
+                        }
+                    }
+                }
+            } catch (Exception failure) {
+                diagError("recording.exit_recovery_failed", sessionId,
+                        "Persisting recording state during app exit",
+                        failure, PhoneDiagnostics.fields(
+                                "stop_disposition", disposition));
+            }
+            return;
+        }
+        try {
+            if (store.discardIfEmpty(sessionId)) {
+                currentSessionId = null;
+                String detail = captureFailed
+                        ? "The microphone did not produce durable audio; the empty recording was removed"
+                        : "No audio was captured; no stale recording was kept";
+                refresh(captureFailed ? "FAILED" : "READY",
+                        detail, false, "Not recording");
+                resumeDeferredWork("empty_recording_removed");
+                return;
+            }
+        } catch (Exception failure) {
+            diagError("recording.empty_session_check_failed", sessionId,
+                    "Checking whether the stopped session was empty",
+                    failure, PhoneDiagnostics.fields());
+        }
+        try {
+            ReliableSessionManifest persisted = store.load(sessionId);
+            if (persisted.recordingFinished) {
+                currentSessionId = null;
+                refresh(persisted.conversionFinished
+                                ? "READY" : "FINISHING",
+                        persisted.conversionFinished
+                                ? "The recording is finished and playable"
+                                : "Creating the final playable MP3 from durable PCM",
+                        false, "Not recording");
+                resumeDeferredWork("finished_recording_stopped");
+                return;
+            }
+        } catch (Exception failure) {
+            diagError("recording.persisted_state_check_failed",
+                    sessionId,
+                    "Checking persisted recording state after capture stopped",
+                    failure, PhoneDiagnostics.fields(
+                            "stop_disposition", disposition));
+        }
+        if (captureFailed || disposition == STOP_INTERRUPT
+                || disposition == STOP_NONE) {
+            String detail = recordingRecoveryDetail == null
+                    || recordingRecoveryDetail.isEmpty()
+                    ? (captureFailed ? "Recording stopped unexpectedly"
+                    : "Recording service was interrupted")
+                    : recordingRecoveryDetail;
+            try { store.markInterrupted(sessionId, detail); }
+            catch (Exception ignored) {}
+            currentSessionId = sessionId;
+            startFailureIncident(sessionId, detail);
+            scheduleAutomaticRecovery(sessionId);
+            refresh("RECOVERING", detail
+                            + ". Retrying automatically; durable PCM remains safe.",
+                    false, "Not recording");
+        } else if (disposition == STOP_PAUSE) {
+            try { store.markPaused(sessionId); }
+            catch (Exception failure) {
+                store.markError(sessionId,
+                        "Could not save paused state");
+            }
+            currentSessionId = sessionId;
+            refresh("PAUSED",
+                    "Recording is paused; creating a playable MP3 from durable PCM",
+                    false, "Not recording");
+        } else {
+            try { store.markRecordingFinished(sessionId, "normal"); }
+            catch (Exception failure) {
+                store.markError(sessionId,
+                        "Could not close recording metadata");
+            }
+            currentSessionId = null;
+            refresh("FINISHING",
+                    "Recording closed; creating the final MP3 from durable PCM",
+                    false, "Not recording");
+        }
+        resumeDeferredWork("recording_stopped");
+    }
 
     private void schedulePreview(String sessionId) {
         if (exitRequested.get()) return;
@@ -1112,6 +1328,7 @@ public final class RecordingService extends Service {
                 diag(PhoneDiagnostics.INFO, "recording.preview_start", sessionId,
                         "Playable MP3 snapshot assembly started", PhoneDiagnostics.fields());
                 try {
+                    recoverPcmJournalsForSession(sessionId);
                     ReliableSessionManifest manifest = store.load(sessionId);
                     for (ReliableSessionManifest.Segment segment : manifest.orderedSegments()) {
                         if (segment.mp3Name.isEmpty() || !store.mp3File(sessionId, segment).isFile()) {
@@ -1205,6 +1422,7 @@ public final class RecordingService extends Service {
             diag(PhoneDiagnostics.INFO, "recording.finalization_start", sessionId,
                     "Final MP3 assembly started", PhoneDiagnostics.fields());
             try {
+                recoverPcmJournalsForSession(sessionId);
                 ReliableSessionManifest manifest = store.load(sessionId);
                 File existingFinal = store.finalMp3File(sessionId);
                 if (manifest.conversionFinished && existingFinal.isFile() && existingFinal.length() > 0L) {
@@ -1255,49 +1473,75 @@ public final class RecordingService extends Service {
 
     private void recoverPcmJournals() {
         for (ReliableSessionManifest manifest : store.list()) {
-            long cursor = 0L;
-            for (ReliableSessionManifest.Segment existing : manifest.orderedSegments()) {
-                if (existing.pcmJournalName.isEmpty()) cursor = Math.max(cursor, existing.endSample);
-                else {
-                    try {
-                        File pcm = store.pcmJournalFile(manifest.sessionId, existing);
-                        if (!pcm.isFile() || pcm.length() < 2L) continue;
-                        if (store.clearVerifiedPcmJournal(manifest.sessionId, existing.seq)) {
-                            cursor = Math.max(cursor, existing.endSample);
-                            diag(PhoneDiagnostics.INFO, "recovery.pcm_journal_already_committed",
-                                    manifest.sessionId,
-                                    "A leftover PCM journal was removed after verifying the already-committed MP3 chunk",
-                                    PhoneDiagnostics.fields("seq", existing.seq,
-                                            "mp3_bytes", existing.mp3Bytes,
-                                            "remote_accepted", existing.remoteAccepted));
-                            continue;
-                        }
-                        File target = new File(store.sessionDirectory(manifest.sessionId),
-                                String.format(java.util.Locale.US, "segment_%06d.mp3", existing.seq));
-                        mp3.encodeRawPcm(pcm, existing.pcmInputSampleRate, target);
-                        long inputSamples = pcm.length() / 2L;
-                        long outputSamples = inputSamples * ReliableSessionManifest.OUTPUT_SAMPLE_RATE
-                                / Math.max(1, existing.pcmInputSampleRate);
-                        long end = cursor + outputSamples;
-                        long duration = outputSamples * 1000L / ReliableSessionManifest.OUTPUT_SAMPLE_RATE;
-                        store.markPcmJournalEncoded(manifest.sessionId, existing.seq, target,
-                                duration, cursor, end);
-                        diag(PhoneDiagnostics.WARN, "recovery.pcm_chunk_rebuilt",
-                                manifest.sessionId, "A crash-surviving PCM journal was rebuilt as an MP3 chunk",
-                                PhoneDiagnostics.fields("seq", existing.seq,
-                                        "input_sample_rate", existing.pcmInputSampleRate,
-                                        "pcm_bytes", pcm.length(), "output_samples", outputSamples));
-                        cursor = end;
-                    } catch (Exception failure) {
-                        store.markError(manifest.sessionId,
-                                PhoneDiagnostics.exactFailure("Recovering durable PCM chunk", failure));
-                        diagError("recovery.pcm_chunk_failed", manifest.sessionId,
-                                "Recovering durable PCM chunk", failure,
-                                PhoneDiagnostics.fields("seq", existing.seq,
-                                        "journal", existing.pcmJournalName));
-                    }
-                }
+            try {
+                recoverPcmJournalsForSession(manifest.sessionId);
+            } catch (Exception failure) {
+                store.markError(manifest.sessionId,
+                        PhoneDiagnostics.exactFailure(
+                                "Recovering durable PCM journals", failure));
+                diagError("recovery.pcm_session_failed",
+                        manifest.sessionId,
+                        "Recovering durable PCM journals", failure,
+                        PhoneDiagnostics.fields());
             }
+        }
+    }
+
+    private void recoverPcmJournalsForSession(String sessionId)
+            throws IOException {
+        ReliableSessionManifest manifest = store.load(sessionId);
+        long cursor = 0L;
+        for (ReliableSessionManifest.Segment existing
+                : manifest.orderedSegments()) {
+            if (existing.pcmJournalName.isEmpty()) {
+                cursor = Math.max(cursor, existing.endSample);
+                continue;
+            }
+            File pcm = store.pcmJournalFile(sessionId, existing);
+            if (!pcm.isFile() || pcm.length() < 2L) {
+                throw new IOException("Durable PCM journal "
+                        + existing.pcmJournalName + " is missing or empty");
+            }
+            if (store.clearVerifiedPcmJournal(sessionId,
+                    existing.seq)) {
+                cursor = Math.max(cursor, existing.endSample);
+                diag(PhoneDiagnostics.INFO,
+                        "recovery.pcm_journal_already_committed",
+                        sessionId,
+                        "A leftover PCM journal was removed after verifying the already-committed MP3 chunk",
+                        PhoneDiagnostics.fields("seq", existing.seq,
+                                "mp3_bytes", existing.mp3Bytes,
+                                "remote_accepted",
+                                existing.remoteAccepted));
+                continue;
+            }
+            File target = new File(store.sessionDirectory(sessionId),
+                    String.format(java.util.Locale.US,
+                            "segment_%06d.mp3", existing.seq));
+            mp3.encodeRawPcm(pcm, existing.pcmInputSampleRate,
+                    target);
+            long inputSamples = pcm.length() / 2L;
+            long outputSamples = inputSamples
+                    * ReliableSessionManifest.OUTPUT_SAMPLE_RATE
+                    / Math.max(1, existing.pcmInputSampleRate);
+            long startSample = Math.max(cursor,
+                    Math.max(0L, existing.startSample));
+            long endSample = startSample + outputSamples;
+            long duration = outputSamples * 1000L
+                    / ReliableSessionManifest.OUTPUT_SAMPLE_RATE;
+            store.markPcmJournalEncoded(sessionId, existing.seq,
+                    target, duration, startSample, endSample);
+            diag(PhoneDiagnostics.INFO,
+                    "recovery.pcm_chunk_encoded", sessionId,
+                    "A durable PCM journal was encoded after microphone capture stopped",
+                    PhoneDiagnostics.fields("seq", existing.seq,
+                            "input_sample_rate",
+                            existing.pcmInputSampleRate,
+                            "pcm_bytes", pcm.length(),
+                            "output_samples", outputSamples,
+                            "start_sample", startSample,
+                            "end_sample", endSample));
+            cursor = endSample;
         }
     }
 
@@ -1706,7 +1950,9 @@ public final class RecordingService extends Service {
         if (connectivityManager == null) return;
         networkCallback = new ConnectivityManager.NetworkCallback() {
             @Override public void onAvailable(Network network) {
-                signalUploader("queued_work");
+                ReliableUploader value = uploader;
+                if (value != null) value.onNetworkChanged();
+                signalUploader("network_available");
                 if (shouldKeepServiceAlive()) {
                     ensureForeground();
                     acquireCaptureWakeLock();
@@ -1716,6 +1962,8 @@ public final class RecordingService extends Service {
                         PhoneDiagnostics.fields());
             }
             @Override public void onLost(Network network) {
+                ReliableUploader value = uploader;
+                if (value != null) value.onNetworkChanged();
                 diag(PhoneDiagnostics.WARN, "network.lost", null,
                         "A network was lost; every unconfirmed chunk remains queued",
                         PhoneDiagnostics.fields());
@@ -1910,6 +2158,16 @@ public final class RecordingService extends Service {
                     ? STOP_PAUSE : STOP_INTERRUPT;
         }
         recorder.stop();
+        // Data safety has priority over making the task disappear instantly.
+        // Keep foreground execution and the wake lock until the journal has
+        // flushed, synchronized, and atomically closed.
+        boolean recorderStopped = recorder.awaitStopped(30_000L);
+        if (!recorderStopped) {
+            diag(PhoneDiagnostics.ERROR,
+                    "recording.exit_journal_close_timeout", currentSessionId,
+                    "Explicit close reached thirty seconds before the PCM journal thread stopped; the open journal remains recoverable",
+                    PhoneDiagnostics.fields("reason", reason));
+        }
         releaseCaptureWakeLock();
         ReliableUploader currentUploader = uploader;
         if (currentUploader != null) currentUploader.stop();
@@ -1917,18 +2175,23 @@ public final class RecordingService extends Service {
         currentConversion.shutdownNow();
         Thread maintenance = maintenanceThread;
         if (maintenance != null) maintenance.interrupt();
+
+        boolean uploaderStopped = currentUploader == null
+                || currentUploader.awaitStopped(5000L);
+        boolean conversionStopped = false;
+        try {
+            conversionStopped = currentConversion.awaitTermination(
+                    5000L, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
         if (foreground) {
             stopForeground(STOP_FOREGROUND_REMOVE);
             foreground = false;
         }
-        NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        NotificationManager manager = (NotificationManager)
+                getSystemService(NOTIFICATION_SERVICE);
         if (manager != null) manager.cancel(NOTIFICATION_ID);
-
-        boolean recorderStopped = recorder.awaitStopped(750L);
-        boolean uploaderStopped = currentUploader == null || currentUploader.awaitStopped(750L);
-        boolean conversionStopped = false;
-        try { conversionStopped = currentConversion.awaitTermination(750L, TimeUnit.MILLISECONDS); }
-        catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
         boolean maintenanceStopped = maintenance == null || !maintenance.isAlive();
         if (maintenance != null && maintenance.isAlive()) {
             try { maintenance.join(250L); }
@@ -1982,6 +2245,7 @@ public final class RecordingService extends Service {
     }
 
     @Override public void onDestroy() {
+        boolean pendingUpload = hasBackgroundWork();
         diag(PhoneDiagnostics.WARN, "service.destroy", currentSessionId,
                 "RecordingService onDestroy entered",
                 PhoneDiagnostics.fields("recording", recorder.isRecording(),
@@ -1997,6 +2261,14 @@ public final class RecordingService extends Service {
             stopDisposition = exitRequested.get() ? STOP_PAUSE : STOP_INTERRUPT;
         }
         recorder.stop();
+        boolean recorderStopped = recorder.awaitStopped(5000L);
+        if (!recorderStopped) {
+            diag(PhoneDiagnostics.ERROR,
+                    "recording.destroy_journal_close_timeout",
+                    currentSessionId,
+                    "Service destruction reached five seconds before the PCM journal thread stopped; startup recovery will use the open journal",
+                    PhoneDiagnostics.fields());
+        }
         releaseCaptureWakeLock();
         if (uploader != null) uploader.stop();
         conversion.shutdownNow();
@@ -2008,6 +2280,8 @@ public final class RecordingService extends Service {
             stopForeground(STOP_FOREGROUND_REMOVE);
             foreground = false;
         }
+        UploadWorkCoordinator.markServiceStopped();
+        if (pendingUpload) UploadWorkScheduler.enqueue(this, "service_destroyed");
         super.onDestroy();
     }
 }

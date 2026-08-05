@@ -70,7 +70,7 @@ public final class ReliableSessionStore {
     private static final Pattern WAV_PATTERN = Pattern.compile("^segment_(\\d{6})(?:\\.open)?\\.wav$");
     private static final Pattern MP3_PATTERN = Pattern.compile("^segment_(\\d{6})\\.mp3$");
     private static final Pattern OPEN_MP3_PATTERN = Pattern.compile("^segment_(\\d{6})\\.open\\.mp3$");
-    private static final Pattern OPEN_PCM_PATTERN = Pattern.compile("^segment_(\\d{6})_(\\d{5})\\.open\\.pcm$");
+    private static final Pattern PCM_PATTERN = Pattern.compile("^segment_(\\d{6})_(\\d{5})(?:\\.open)?\\.pcm$");
     private static final long MIN_FREE_BYTES = 256L * 1024L * 1024L;
 
     private final File root;
@@ -104,6 +104,14 @@ public final class ReliableSessionStore {
 
     public File getRoot() { return root; }
     public String getConversationId() { return conversationId; }
+
+    static boolean isPcmJournalName(String name) {
+        return name != null && PCM_PATTERN.matcher(name).matches();
+    }
+
+    static boolean isOpenPcmJournalName(String name) {
+        return isPcmJournalName(name) && name.contains(".open.");
+    }
 
     public synchronized List<Folder> listFolders() {
         List<Folder> result = new ArrayList<>();
@@ -363,7 +371,7 @@ public final class ReliableSessionStore {
         File directory = sessionDir(sessionId);
         File[] audio = directory.listFiles(file -> {
             String name = file.getName();
-            return name.endsWith(".mp3") || name.endsWith(".wav");
+            return name.endsWith(".mp3") || name.endsWith(".wav") || name.endsWith(".pcm");
         });
         if (audio != null) {
             for (File file : audio) if (file.length() > 0L) return false;
@@ -377,6 +385,73 @@ public final class ReliableSessionStore {
     }
 
     public synchronized File sessionDirectory(String sessionId) throws IOException { return sessionDir(sessionId); }
+
+    public synchronized int nextAvailableSegmentSeq(String sessionId) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        int next = Math.max(0, manifest.nextSeq);
+        File[] files = sessionDir(sessionId).listFiles();
+        if (files != null) for (File file : files) {
+            Matcher matcher = PCM_PATTERN.matcher(file.getName());
+            if (!matcher.matches()) matcher = WAV_PATTERN.matcher(file.getName());
+            if (!matcher.matches()) matcher = MP3_PATTERN.matcher(file.getName());
+            if (!matcher.matches()) matcher = OPEN_MP3_PATTERN.matcher(file.getName());
+            if (matcher.matches()) {
+                next = Math.max(next, Integer.parseInt(matcher.group(1)) + 1);
+            }
+        }
+        return next;
+    }
+
+    public synchronized void commitPcmJournal(String sessionId, int seq,
+                                               File pcmFile,
+                                               int inputSampleRate,
+                                               long pcmBytes,
+                                               long durationMs,
+                                               long createdAtMs,
+                                               long durableAtMs)
+            throws IOException {
+        if (pcmFile == null || !pcmFile.isFile() || pcmFile.length() < 2L) {
+            throw new IOException("PCM journal is missing or empty");
+        }
+        ReliableSessionManifest manifest = load(sessionId);
+        ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+        if (segment == null) {
+            segment = new ReliableSessionManifest.Segment();
+            segment.seq = seq;
+            manifest.segments.add(segment);
+        }
+        int rate = inputSampleRate <= 0 ? 16000 : inputSampleRate;
+        long bytes = Math.max(0L, Math.min(pcmBytes, pcmFile.length()));
+        long inputSamples = bytes / 2L;
+        long outputSamples = inputSamples
+                * ReliableSessionManifest.OUTPUT_SAMPLE_RATE / rate;
+        long startSample = 0L;
+        for (ReliableSessionManifest.Segment existing : manifest.segments) {
+            if (existing.seq < seq) {
+                startSample = Math.max(startSample, existing.endSample);
+            }
+        }
+        segment.pcmJournalName = pcmFile.getName();
+        segment.pcmInputSampleRate = rate;
+        segment.pcmBytes = bytes;
+        segment.durationMs = durationMs > 0L ? durationMs
+                : outputSamples * 1000L
+                / ReliableSessionManifest.OUTPUT_SAMPLE_RATE;
+        segment.startSample = startSample;
+        segment.endSample = startSample + outputSamples;
+        segment.sampleRate = ReliableSessionManifest.OUTPUT_SAMPLE_RATE;
+        segment.createdAtMs = createdAtMs > 0L
+                ? createdAtMs : System.currentTimeMillis();
+        segment.closedAtMs = System.currentTimeMillis();
+        segment.localDurableAtMs = durableAtMs > 0L
+                ? durableAtMs : segment.closedAtMs;
+        manifest.nextSeq = Math.max(manifest.nextSeq, seq + 1);
+        recalculate(manifest);
+        manifest.error = "";
+        manifest.state = manifest.recordingFinished
+                ? "FINALIZING" : "RECORDING";
+        save(manifest);
+    }
 
     public synchronized void commitWavSegment(String sessionId, int seq, File wavFile, long pcmBytes) throws IOException {
         ReliableSessionManifest manifest = load(sessionId);
@@ -979,9 +1054,11 @@ public final class ReliableSessionStore {
         java.util.Set<Integer> pcmSequences = new java.util.HashSet<>();
         File[] files = dir.listFiles();
         if (files != null) for (File file : files) {
-            Matcher pcm = OPEN_PCM_PATTERN.matcher(file.getName());
+            Matcher pcm = PCM_PATTERN.matcher(file.getName());
             if (!pcm.matches()) continue;
-            recoveredOpenSegment = true;
+            if (isOpenPcmJournalName(file.getName())) {
+                recoveredOpenSegment = true;
+            }
             int seq = Integer.parseInt(pcm.group(1));
             int inputRate = Integer.parseInt(pcm.group(2));
             pcmSequences.add(seq);

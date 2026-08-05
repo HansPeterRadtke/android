@@ -1,6 +1,8 @@
 package com.hans.android.audio.reliable;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import android.media.AudioDeviceInfo;
 
@@ -29,6 +31,14 @@ public class JournaledMp3RecorderTest {
     @Test public void highQualityProfileUsesFortyEightKilohertzAndHighBitrate() {
         org.junit.Assert.assertEquals(48000, ReliableSessionManifest.OUTPUT_SAMPLE_RATE);
         org.junit.Assert.assertEquals(192, Mp3Converter.BITRATE_KBPS);
+    }
+
+    @Test public void capturePathHasNoLiveEncoderOrJavaAudioQueue() {
+        assertFalse(JournaledMp3Recorder.encodesWhileCapturing());
+        assertTrue(JournaledMp3Recorder.captureBufferBytes(48000, 4096)
+                >= 48000 * 2 * 30);
+        org.junit.Assert.assertEquals(1000,
+                JournaledMp3Recorder.syncIntervalMs());
     }
 
 }

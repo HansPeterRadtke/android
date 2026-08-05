@@ -3,7 +3,7 @@ package com.hans.android.network.reliable;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 final class UploadStallWatchdog implements AutoCloseable {
-    static final long DEFAULT_TIMEOUT_MS = 12_000L;
+    static final long DEFAULT_TIMEOUT_MS = 2L * 60L * 60L * 1000L;
 
     private final long timeoutNanos;
     private final Runnable timeoutAction;

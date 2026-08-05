@@ -57,3 +57,9 @@ Version 0.30 adds a real logical recording-folder tree with parent relationships
 
 
 Version 0.31 repairs permanent transfer stalls. The uploader no longer treats InterruptedIOException or SocketTimeoutException as a shutdown request, clears unexpected interrupt state before retrying, reports stopped workers as not running, and recreates a dead worker whenever recording work, network availability, or the five-second continuity check signals queued data. This preserves every local chunk and resumes from Jetson durable offsets.
+
+
+Version 0.32 limits changes to recording transmission reliability. Uploads now use adaptive 4 KiB to 1 MiB durable parts, no fixed connection or response deadline, a two-hour no-durable-progress breaker, exact server-offset reconciliation after uncertain outcomes, transient/permanent failure classification, Retry-After support, exponential full-jitter retries, immediate network-change cancellation and resume, and a unique WorkManager safety-net job that survives process death and reboot. The existing foreground uploader preempts the safety-net worker so two uploaders never mutate recording metadata concurrently.
+
+
+Version 0.32 makes microphone capture loss-averse and isolated. While recording, Voice Button stops and drains MP3 conversion and network upload, writes each 50 ms microphone block directly into one append-only PCM journal, synchronizes it every second, and keeps a thirty-second AudioRecord buffer. There is no Java audio queue, live MP3 encoder, per-block manifest rewrite, hashing, or upload on the capture path. Pause, finish, failure, and service destruction keep foreground protection until the journal is synchronized and closed. Open and closed PCM journals are recovered after process death; sticky recovery resumes the microphone before conversion or transfer. After capture stops, PCM is encoded, finalized, and handed to the adaptive resumable WorkManager-backed uploader.

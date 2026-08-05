@@ -17,12 +17,20 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+import java.util.TimeZone;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class ReliableUploadClient {
-    public static final int UPLOAD_PART_BYTES = 4096;
+    public static final int MIN_UPLOAD_PART_BYTES = AdaptiveUploadPolicy.MIN_PART_BYTES;
+    public static final int INITIAL_UPLOAD_PART_BYTES = AdaptiveUploadPolicy.INITIAL_PART_BYTES;
+    public static final int MAX_UPLOAD_PART_BYTES = AdaptiveUploadPolicy.MAX_PART_BYTES;
+    public static final int CONNECT_TIMEOUT_MS = 0;
+    public static final int READ_TIMEOUT_MS = 0;
 
     public interface ProgressListener {
         void onProgress(long durableBytes, long totalBytes,
@@ -89,17 +97,24 @@ public final class ReliableUploadClient {
 
     public static final class ProtocolException extends Exception {
         public final int httpCode;
+        public final long retryAfterMs;
         public ProtocolException(int httpCode, String message) {
-            super(message); this.httpCode = httpCode;
+            this(httpCode, message, 0L);
+        }
+        public ProtocolException(int httpCode, String message, long retryAfterMs) {
+            super(message);
+            this.httpCode = httpCode;
+            this.retryAfterMs = Math.max(0L, retryAfterMs);
         }
     }
 
     private final String baseUrl;
     private final String userAgent;
+    private final AdaptiveUploadPolicy uploadPolicy = new AdaptiveUploadPolicy();
     private final AtomicReference<HttpURLConnection> activeConnection = new AtomicReference<>();
 
     public ReliableUploadClient(String baseUrl) {
-        this(baseUrl, "VoiceButton/0.31 Android");
+        this(baseUrl, "VoiceButton/0.32 Android");
     }
 
     public ReliableUploadClient(String baseUrl, String userAgent) {
@@ -206,7 +221,7 @@ public final class ReliableUploadClient {
         try (RandomAccessFile input = new RandomAccessFile(mp3File, "r")) {
             while (offset < segment.mp3Bytes) {
                 checkInterrupted();
-                int length = nextPartLength(offset, segment.mp3Bytes);
+                int length = uploadPolicy.nextPartLength(offset, segment.mp3Bytes);
                 byte[] part = new byte[length];
                 input.seek(offset);
                 input.readFully(part);
@@ -222,13 +237,21 @@ public final class ReliableUploadClient {
                         + "&created_at_ms=" + segment.createdAtMs
                         + "&closed_at_ms=" + segment.closedAtMs
                         + "&durable_at_ms=" + segment.localDurableAtMs;
-                JSONObject response = postBytes(path, part,
-                        "application/octet-stream");
+                long requestStarted = System.nanoTime();
+                JSONObject response;
+                try {
+                    response = postBytes(path, part, "application/octet-stream");
+                } catch (Exception failure) {
+                    uploadPolicy.onPartFailure();
+                    throw failure;
+                }
                 long next = validateProgress(response, segment.mp3Bytes);
                 if (next < offset + length && !response.optBoolean("complete", false)) {
                     throw new ProtocolException(409,
                             "Server did not durably advance the chunk offset");
                 }
+                uploadPolicy.onPartSuccess(length, Math.max(0L,
+                        (System.nanoTime() - requestStarted) / 1_000_000L));
                 offset = next;
                 notifyProgress(progressListener, offset, segment.mp3Bytes, response);
                 if (response.optBoolean("complete", false)) {
@@ -242,10 +265,14 @@ public final class ReliableUploadClient {
         return ackFromCompleted(completed, segment);
     }
 
-    static int nextPartLength(long offset, long totalBytes) {
+    static int nextPartLength(long offset, long totalBytes, int partBytes) {
         if (offset < 0L || totalBytes < 0L || offset >= totalBytes) return 0;
-        return (int)Math.min((long)UPLOAD_PART_BYTES, totalBytes - offset);
+        int normalized = Math.max(MIN_UPLOAD_PART_BYTES,
+                Math.min(MAX_UPLOAD_PART_BYTES, partBytes));
+        return (int)Math.min((long)normalized, totalBytes - offset);
     }
+
+    public int currentPartBytes() { return uploadPolicy.currentPartBytes(); }
 
     private static long validateProgress(JSONObject response, long totalBytes)
             throws ProtocolException {
@@ -369,8 +396,15 @@ public final class ReliableUploadClient {
     private HttpURLConnection open(String path, String method) throws Exception {
         checkInterrupted();
         HttpURLConnection connection = (HttpURLConnection) new URL(baseUrl + path).openConnection();
-        connection.setConnectTimeout(2500);
-        connection.setReadTimeout(6000);
+        // No fixed connect or response deadline: a very slow but progressing
+        // mobile request remains valid. The uploader's long no-progress watchdog
+        // and network callbacks cancel genuinely stuck or obsolete connections.
+        connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+        // No fixed response deadline: a very slow but progressing mobile upload
+        // remains valid. The uploader's long no-progress watchdog and network
+        // callbacks cancel genuinely stuck or obsolete connections.
+        connection.setReadTimeout(READ_TIMEOUT_MS);
+        connection.setUseCaches(false);
         connection.setRequestMethod(method);
         connection.setRequestProperty("User-Agent", userAgent);
         connection.setRequestProperty("Accept", "application/json, audio/mpeg");
@@ -387,7 +421,8 @@ public final class ReliableUploadClient {
                 String message = text;
                 try { message = new JSONObject(text).optString("error", text); }
                 catch (Exception ignored) {}
-                throw new ProtocolException(code, message);
+                throw new ProtocolException(code, message,
+                        parseRetryAfterMs(connection.getHeaderField("Retry-After")));
             }
             return new JSONObject(text);
         } finally {
@@ -403,6 +438,26 @@ public final class ReliableUploadClient {
                 checkInterrupted(); out.write(buffer, 0, read);
             }
             return out.toByteArray();
+        }
+    }
+
+
+    static long parseRetryAfterMs(String value) {
+        if (value == null || value.trim().isEmpty()) return 0L;
+        String normalized = value.trim();
+        try {
+            return Math.max(0L, Long.parseLong(normalized)) * 1000L;
+        } catch (NumberFormatException ignored) {}
+        try {
+            SimpleDateFormat format = new SimpleDateFormat(
+                    "EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US);
+            format.setLenient(false);
+            format.setTimeZone(TimeZone.getTimeZone("GMT"));
+            Date parsed = format.parse(normalized);
+            return parsed == null ? 0L : Math.max(0L,
+                    parsed.getTime() - System.currentTimeMillis());
+        } catch (Exception ignored) {
+            return 0L;
         }
     }
 

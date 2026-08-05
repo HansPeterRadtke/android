@@ -18,5 +18,6 @@ public final class VoiceButtonApplication extends Application {
         }
         PhoneDiagnostics.initializeAsync(this, BuildConfig.VOICE_BASE_URL,
                 BuildConfig.VERSION_NAME);
+        UploadWorkScheduler.initialize(this);
     }
 }

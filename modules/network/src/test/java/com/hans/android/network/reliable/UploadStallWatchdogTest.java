@@ -23,4 +23,8 @@ public class UploadStallWatchdogTest {
             assertFalse(fired.get());
         }
     }
+
+    @Test public void defaultTimeoutAllowsExtremelySlowRequests() {
+        assertTrue(UploadStallWatchdog.DEFAULT_TIMEOUT_MS >= 2L * 60L * 60L * 1000L);
+    }
 }
