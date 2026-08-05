@@ -9,7 +9,8 @@ public final class RecordingFileNames {
 
     public static String defaultDisplayName(long createdAtMs) {
         return "Recording " + new SimpleDateFormat(
-                "yyyy-MM-dd HH-mm-ss", Locale.US).format(new Date(createdAtMs));
+                "yyyy-MM-dd HH-mm-ss-SSS", Locale.US)
+                .format(new Date(createdAtMs));
     }
 
     public static String defaultMp3Name(long createdAtMs, String sessionId) {
@@ -34,6 +35,25 @@ public final class RecordingFileNames {
             char character = clean.charAt(i);
             safe.append(character < 32 || character == 127
                     || character == '/' || character == '\\' ? '_' : character);
+        }
+        String value = safe.toString().trim();
+        return value.toLowerCase(Locale.US).endsWith(".mp3")
+                ? value : value + ".mp3";
+    }
+
+    public static String visibleMp3Name(long createdAtMs,
+                                        String displayName) {
+        String clean = displayName == null ? "" : displayName.trim();
+        if (clean.isEmpty() || clean.matches(
+                "[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")) {
+            clean = defaultDisplayName(createdAtMs);
+        }
+        StringBuilder safe = new StringBuilder(clean.length() + 4);
+        for (int i = 0; i < clean.length(); i++) {
+            char character = clean.charAt(i);
+            safe.append(character < 32 || character == 127
+                    || character == '/' || character == '\\'
+                    ? '_' : character);
         }
         String value = safe.toString().trim();
         return value.toLowerCase(Locale.US).endsWith(".mp3")

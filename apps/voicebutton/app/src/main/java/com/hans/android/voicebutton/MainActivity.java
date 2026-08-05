@@ -345,68 +345,117 @@ public final class MainActivity extends Activity {
 
     private void showFolderPicker() {
         if (snapshot.recording || snapshot.openSession != null) {
-            new AlertDialog.Builder(this).setTitle("Folder locked for this recording")
+            new AlertDialog.Builder(this)
+                    .setTitle("Folder locked for this recording")
                     .setMessage("Pause or finish the current recording before changing its folder.")
                     .setPositiveButton("Back", null).show();
             return;
         }
-        String[] labels = new String[folders.size() + 1];
-        for (int i = 0; i < folders.size(); i++) labels[i] = folders.get(i).name;
-        labels[folders.size()] = "Create new folder…";
+        ReliableSessionStore.Folder selected = null;
+        for (ReliableSessionStore.Folder folder : folders) {
+            if (folder.id.equals(selectedFolderId)) {
+                selected = folder;
+                break;
+            }
+        }
+        final ReliableSessionStore.Folder selectedFolder = selected;
+        String[] labels = new String[folders.size() + 2];
+        for (int i = 0; i < folders.size(); i++) {
+            labels[i] = folders.get(i).path;
+        }
+        labels[folders.size()] = "Create root folder…";
+        labels[folders.size() + 1] = selectedFolder == null
+                ? "Create root folder…"
+                : "Create subfolder in " + selectedFolder.path + "…";
         new AlertDialog.Builder(this).setTitle("Recording folder")
                 .setItems(labels, (dialog, which) -> {
-                    if (which == folders.size()) {
-                        showCreateFolderDialog();
-                    } else {
+                    if (which < folders.size()) {
                         ReliableSessionStore.Folder folder = folders.get(which);
                         selectedFolderId = folder.id;
                         selectedFolderName = folder.name;
                         saveMainSelectionState();
                         updateSetupButtons();
-                        diag(PhoneDiagnostics.INFO, "folder.selected", snapshot.currentSessionId,
+                        diag(PhoneDiagnostics.INFO, "folder.selected",
+                                snapshot.currentSessionId,
                                 "A recording folder was selected",
                                 PhoneDiagnostics.fields("folder_id", folder.id,
-                                        "folder_name", folder.name));
+                                        "folder_name", folder.name,
+                                        "folder_path", folder.path,
+                                        "parent_folder_id", folder.parentId));
+                    } else if (which == folders.size()) {
+                        showCreateFolderDialog("", "Recordings");
+                    } else {
+                        showCreateFolderDialog(
+                                selectedFolder == null ? "" : selectedFolder.id,
+                                selectedFolder == null
+                                        ? "Recordings" : selectedFolder.path);
                     }
                 }).setNegativeButton("Back", null).show();
     }
 
-    private void showCreateFolderDialog() {
+    private void showCreateFolderDialog(String parentFolderId,
+                                        String parentPath) {
         EditText input = new EditText(this);
-        input.setSingleLine(true); input.setHint("Folder name");
+        input.setSingleLine(true);
+        input.setHint("Folder name");
         int pad = AndroidUi.dp(this, 20);
         LinearLayout container = new LinearLayout(this);
         container.setPadding(pad, 0, pad, 0);
         container.addView(input, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        String location = parentFolderId == null || parentFolderId.isEmpty()
+                ? "Recordings" : parentPath;
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Create recording folder").setView(container)
-                .setNegativeButton("Back", null).setPositiveButton("Create", null).create();
-        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-                .setOnClickListener(view -> {
-                    String name = input.getText().toString().trim();
-                    if (name.isEmpty()) { input.setError("Enter a folder name"); return; }
-                    RecordingService value = service;
-                    if (value == null) { input.setError("Recording service is not ready"); return; }
-                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
-                    uiWorker.execute(() -> {
-                        try {
-                            ReliableSessionStore.Folder created = value.createFolder(name);
-                            runOnUiThread(() -> {
-                                selectedFolderId = created.id;
-                                selectedFolderName = created.name;
-                                saveMainSelectionState();
-                                dialog.dismiss(); refreshFolders(); updateSetupButtons();
+                .setTitle("Create folder in " + location)
+                .setView(container)
+                .setNegativeButton("Back", null)
+                .setPositiveButton("Create", null).create();
+        dialog.setOnShowListener(ignored ->
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                        .setOnClickListener(view -> {
+                            String name = input.getText().toString().trim();
+                            if (name.isEmpty()) {
+                                input.setError("Enter a folder name");
+                                return;
+                            }
+                            dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                                    .setEnabled(false);
+                            uiWorker.execute(() -> {
+                                try {
+                                    RecordingService value = service;
+                                    ReliableSessionStore.Folder created;
+                                    if (value != null) {
+                                        created = value.createFolder(name,
+                                                parentFolderId);
+                                    } else {
+                                        ReliableSessionStore browser =
+                                                ReliableSessionStore.openForBrowsing(
+                                                        this);
+                                        created = browser.createFolder(name,
+                                                parentFolderId);
+                                    }
+                                    runOnUiThread(() -> {
+                                        selectedFolderId = created.id;
+                                        selectedFolderName = created.name;
+                                        saveMainSelectionState();
+                                        dialog.dismiss();
+                                        refreshFolders();
+                                        updateSetupButtons();
+                                    });
+                                } catch (Exception failure) {
+                                    runOnUiThread(() -> {
+                                        dialog.getButton(
+                                                AlertDialog.BUTTON_POSITIVE)
+                                                .setEnabled(true);
+                                        input.setError(
+                                                PhoneDiagnostics.exactFailure(
+                                                        "Creating folder",
+                                                        failure));
+                                    });
+                                }
                             });
-                        } catch (Exception failure) {
-                            runOnUiThread(() -> {
-                                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
-                                input.setError(PhoneDiagnostics.exactFailure(
-                                        "Creating folder", failure));
-                            });
-                        }
-                    });
-                }));
+                        }));
         dialog.show();
     }
 
@@ -487,7 +536,16 @@ public final class MainActivity extends Activity {
     }
 
     private void updateSetupButtons() {
-        if (folderButton != null) folderButton.setText("Folder: " + selectedFolderName);
+        if (folderButton != null) {
+            String label = selectedFolderName;
+            for (ReliableSessionStore.Folder folder : folders) {
+                if (folder.id.equals(selectedFolderId)) {
+                    label = folder.path;
+                    break;
+                }
+            }
+            folderButton.setText("Folder: " + label);
+        }
         if (inputButton != null) inputButton.setText("Microphone: " + selectedInputLabel());
     }
 

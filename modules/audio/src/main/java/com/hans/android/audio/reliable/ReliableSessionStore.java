@@ -19,7 +19,6 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.Map;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -32,22 +31,39 @@ public final class ReliableSessionStore {
     public static final class Folder {
         public final String id;
         public final String name;
+        public final String parentId;
         public final long createdAtMs;
         public final String remoteName;
+        public final String remoteParentId;
+        public final String path;
 
         public Folder(String id, String name, long createdAtMs) {
-            this(id, name, createdAtMs, name);
+            this(id, name, "", createdAtMs, name, "", name);
         }
 
-        public Folder(String id, String name, long createdAtMs, String remoteName) {
+        public Folder(String id, String name, long createdAtMs,
+                      String remoteName) {
+            this(id, name, "", createdAtMs, remoteName, "", name);
+        }
+
+        public Folder(String id, String name, String parentId,
+                      long createdAtMs, String remoteName,
+                      String remoteParentId, String path) {
             this.id = id;
             this.name = name;
+            this.parentId = parentId == null ? "" : parentId;
             this.createdAtMs = createdAtMs;
             this.remoteName = remoteName == null ? "" : remoteName;
+            this.remoteParentId = remoteParentId == null ? "" : remoteParentId;
+            this.path = path == null || path.isEmpty() ? name : path;
         }
 
-        public boolean needsRemoteSync() { return !name.equals(remoteName); }
-        @Override public String toString() { return name; }
+        public boolean needsRemoteSync() {
+            return !name.equals(remoteName)
+                    || !parentId.equals(remoteParentId);
+        }
+
+        @Override public String toString() { return path; }
     }
 
     private static final Pattern SAFE_ID = Pattern.compile("^[A-Za-z0-9_-]{1,128}$");
@@ -94,42 +110,118 @@ public final class ReliableSessionStore {
         try {
             JSONObject index = readFolderIndex();
             JSONArray array = index.optJSONArray("folders");
+            Map<String, Folder> raw = new LinkedHashMap<>();
             if (array != null) for (int i = 0; i < array.length(); i++) {
                 JSONObject item = array.optJSONObject(i);
-                if (item != null) {
-                    String name = item.optString("name", "Default");
-                    result.add(new Folder(item.optString("folder_id", "default"), name,
-                            item.optLong("created_at_ms", 0L),
-                            item.has("remote_name") ? item.optString("remote_name", "") : name));
-                }
+                if (item == null) continue;
+                String id = item.optString("folder_id", "default");
+                String name = item.optString("name", "Default");
+                String parentId = item.optString("parent_folder_id", "");
+                String remoteName = item.has("remote_name")
+                        ? item.optString("remote_name", "") : name;
+                String remoteParentId = item.has("remote_parent_folder_id")
+                        ? item.optString("remote_parent_folder_id", "")
+                        : parentId;
+                raw.put(id, new Folder(id, name, parentId,
+                        item.optLong("created_at_ms", 0L), remoteName,
+                        remoteParentId, name));
+            }
+            for (Folder value : raw.values()) {
+                result.add(new Folder(value.id, value.name, value.parentId,
+                        value.createdAtMs, value.remoteName,
+                        value.remoteParentId,
+                        buildFolderPath(value.id, raw)));
             }
         } catch (Exception ignored) {}
-        if (result.isEmpty()) result.add(new Folder("default", "Default", 0L));
-        result.sort(Comparator.comparing(folder -> folder.name.toLowerCase(Locale.US)));
+        if (result.isEmpty()) {
+            result.add(new Folder("default", "Default", "", 0L,
+                    "Default", "", "Default"));
+        }
+        result.sort(Comparator.comparing(folder ->
+                folder.path.toLowerCase(Locale.US)));
         return result;
     }
 
-    public synchronized Folder createFolder(String requestedName) throws IOException {
-        String name = requestedName == null ? "" : requestedName.trim().replaceAll("\s+", " ");
-        if (name.isEmpty() || name.length() > 96) throw new IOException("Folder name must contain one to ninety-six characters");
-        String base = name.toLowerCase(Locale.US).replaceAll("[^a-z0-9]+", "-").replaceAll("^-|-$", "");
+    private static String buildFolderPath(String folderId,
+                                          Map<String, Folder> folders) {
+        ArrayList<String> names = new ArrayList<>();
+        java.util.HashSet<String> seen = new java.util.HashSet<>();
+        String current = folderId;
+        while (current != null && !current.isEmpty()) {
+            if (!seen.add(current)) break;
+            Folder value = folders.get(current);
+            if (value == null) break;
+            names.add(0, value.name);
+            current = value.parentId;
+        }
+        return names.isEmpty() ? folderId : android.text.TextUtils.join("/", names);
+    }
+
+    public synchronized List<Folder> childFolders(String parentFolderId) {
+        String parent = parentFolderId == null ? "" : parentFolderId;
+        List<Folder> result = new ArrayList<>();
+        for (Folder folder : listFolders()) {
+            if (parent.equals(folder.parentId)) result.add(folder);
+        }
+        result.sort(Comparator.comparing(folder ->
+                folder.name.toLowerCase(Locale.US)));
+        return result;
+    }
+
+    public synchronized String folderPath(String folderId) throws IOException {
+        return getFolder(folderId).path;
+    }
+
+    public synchronized Folder createFolder(String requestedName)
+            throws IOException {
+        return createFolder(requestedName, "");
+    }
+
+    public synchronized Folder createFolder(String requestedName,
+                                             String parentFolderId)
+            throws IOException {
+        String name = requestedName == null ? ""
+                : requestedName.trim().replaceAll("\s+", " ");
+        if (name.isEmpty() || name.length() > 96) {
+            throw new IOException(
+                    "Folder name must contain one to ninety-six characters");
+        }
+        String parentId = parentFolderId == null ? "" : parentFolderId;
+        Folder parent = null;
+        if (!parentId.isEmpty()) parent = getFolder(parentId);
+        String base = name.toLowerCase(Locale.US)
+                .replaceAll("[^a-z0-9]+", "-")
+                .replaceAll("^-|-$", "");
         if (base.isEmpty()) base = "folder";
-        String id = (base.length() > 48 ? base.substring(0, 48) : base) + "-" + UUID.randomUUID().toString().substring(0, 8);
+        String id = (base.length() > 48 ? base.substring(0, 48) : base)
+                + "-" + UUID.randomUUID().toString().substring(0, 8);
         JSONObject index = readFolderIndex();
         JSONArray array = index.optJSONArray("folders");
         long now = System.currentTimeMillis();
         JSONObject value = new JSONObject();
         try {
-            if (array == null) { array = new JSONArray(); index.put("folders", array); }
-            value.put("folder_id", id); value.put("name", name);
+            if (array == null) {
+                array = new JSONArray();
+                index.put("folders", array);
+            }
+            value.put("folder_id", id);
+            value.put("name", name);
+            value.put("parent_folder_id", parentId);
             value.put("remote_name", "");
-            value.put("created_at_ms", now); value.put("updated_at_ms", now);
-            array.put(value); index.put("revision", index.optLong("revision", 0L) + 1L);
-        } catch (Exception failure) { throw new IOException("Could not serialize folder metadata", failure); }
+            value.put("remote_parent_folder_id", "");
+            value.put("created_at_ms", now);
+            value.put("updated_at_ms", now);
+            array.put(value);
+            index.put("schema_version", 2);
+            index.put("revision", index.optLong("revision", 0L) + 1L);
+        } catch (Exception failure) {
+            throw new IOException("Could not serialize folder metadata", failure);
+        }
         durableJson(folderIndex, index);
         ensureDirectory(new File(new File(foldersRoot, id), "sessions"));
         fsyncDirectory(foldersRoot);
-        return new Folder(id, name, now);
+        String path = parent == null ? name : parent.path + "/" + name;
+        return new Folder(id, name, parentId, now, "", "", path);
     }
 
     public synchronized Folder getFolder(String folderId) throws IOException {
@@ -150,7 +242,17 @@ public final class ReliableSessionStore {
         return false;
     }
 
-    public synchronized void markFolderRemote(String folderId, String remoteName) throws IOException {
+    public synchronized void markFolderRemote(String folderId,
+                                              String remoteName)
+            throws IOException {
+        Folder folder = getFolder(folderId);
+        markFolderRemote(folderId, remoteName, folder.parentId);
+    }
+
+    public synchronized void markFolderRemote(String folderId,
+                                              String remoteName,
+                                              String remoteParentFolderId)
+            throws IOException {
         validateId(folderId);
         JSONObject index = readFolderIndex();
         JSONArray array = index.optJSONArray("folders");
@@ -158,8 +260,13 @@ public final class ReliableSessionStore {
         try {
             if (array != null) for (int i = 0; i < array.length(); i++) {
                 JSONObject item = array.optJSONObject(i);
-                if (item != null && folderId.equals(item.optString("folder_id"))) {
-                    item.put("remote_name", remoteName == null ? "" : remoteName);
+                if (item != null
+                        && folderId.equals(item.optString("folder_id"))) {
+                    item.put("remote_name",
+                            remoteName == null ? "" : remoteName);
+                    item.put("remote_parent_folder_id",
+                            remoteParentFolderId == null
+                                    ? "" : remoteParentFolderId);
                     item.put("updated_at_ms", System.currentTimeMillis());
                     found = true;
                     break;
@@ -168,7 +275,9 @@ public final class ReliableSessionStore {
             if (!found) throw new IOException("Unknown recording folder");
             index.put("revision", index.optLong("revision", 0L) + 1L);
         } catch (org.json.JSONException failure) {
-            throw new IOException("Could not update folder synchronization metadata", failure);
+            throw new IOException(
+                    "Could not update folder synchronization metadata",
+                    failure);
         }
         durableJson(folderIndex, index);
     }
@@ -648,7 +757,48 @@ public final class ReliableSessionStore {
             manifest.folderName = name;
             save(manifest);
         }
-        return new Folder(existing.id, name, existing.createdAtMs);
+        return getFolder(existing.id);
+    }
+
+    public synchronized Folder moveFolder(String folderId,
+                                          String parentFolderId)
+            throws IOException {
+        Folder existing = getFolder(folderId);
+        String parentId = parentFolderId == null ? "" : parentFolderId;
+        if (folderId.equals(parentId)) throw new IOException(
+                "A folder cannot be its own parent");
+        if (!parentId.isEmpty()) getFolder(parentId);
+        String current = parentId;
+        while (!current.isEmpty()) {
+            if (folderId.equals(current)) throw new IOException(
+                    "A folder cannot be moved into its own descendant");
+            current = getFolder(current).parentId;
+        }
+        JSONObject index = readFolderIndex();
+        JSONArray array = index.optJSONArray("folders");
+        boolean found = false;
+        try {
+            if (array != null) for (int i = 0; i < array.length(); i++) {
+                JSONObject item = array.optJSONObject(i);
+                if (item != null && folderId.equals(
+                        item.optString("folder_id"))) {
+                    if (!item.has("remote_parent_folder_id")) {
+                        item.put("remote_parent_folder_id",
+                                item.optString("parent_folder_id", ""));
+                    }
+                    item.put("parent_folder_id", parentId);
+                    item.put("updated_at_ms", System.currentTimeMillis());
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) throw new IOException("Unknown recording folder");
+            index.put("revision", index.optLong("revision", 0L) + 1L);
+        } catch (org.json.JSONException failure) {
+            throw new IOException("Could not move folder metadata", failure);
+        }
+        durableJson(folderIndex, index);
+        return getFolder(existing.id);
     }
 
     public synchronized ReliableSessionManifest renameSession(String sessionId,
@@ -1017,10 +1167,16 @@ public final class ReliableSessionStore {
             JSONObject value = new JSONObject();
             try {
                 long now = System.currentTimeMillis();
-                value.put("folder_id", "default"); value.put("name", "Default");
+                value.put("folder_id", "default");
+                value.put("name", "Default");
+                value.put("parent_folder_id", "");
                 value.put("remote_name", "Default");
-                value.put("created_at_ms", now); value.put("updated_at_ms", now);
-                folders.put(value); index.put("schema_version", 1); index.put("revision", 1);
+                value.put("remote_parent_folder_id", "");
+                value.put("created_at_ms", now);
+                value.put("updated_at_ms", now);
+                folders.put(value);
+                index.put("schema_version", 2);
+                index.put("revision", 1);
                 index.put("folders", folders);
             } catch (Exception failure) { throw new IOException(failure); }
             durableJson(folderIndex, index);
@@ -1037,18 +1193,35 @@ public final class ReliableSessionStore {
             catch (Exception failure) { throw new IOException(failure); }
         }
         java.util.Set<String> known = new java.util.HashSet<>();
+        boolean metadataChanged = index.optInt("schema_version", 1) < 2;
         for (int i = 0; i < array.length(); i++) {
             JSONObject item = array.optJSONObject(i);
-            if (item != null) known.add(item.optString("folder_id", ""));
+            if (item == null) continue;
+            known.add(item.optString("folder_id", ""));
+            try {
+                if (!item.has("parent_folder_id")) {
+                    item.put("parent_folder_id", "");
+                    metadataChanged = true;
+                }
+                if (!item.has("remote_parent_folder_id")) {
+                    item.put("remote_parent_folder_id",
+                            item.optString("parent_folder_id", ""));
+                    metadataChanged = true;
+                }
+            } catch (Exception ignored) {}
         }
-        boolean changed = false;
+        try { index.put("schema_version", 2); }
+        catch (Exception ignored) {}
+        boolean changed = metadataChanged;
         for (Folder discovered : discoverFoldersFromDisk(foldersRoot)) {
             if (known.contains(discovered.id)) continue;
             JSONObject value = new JSONObject();
             try {
                 value.put("folder_id", discovered.id);
                 value.put("name", discovered.name);
+                value.put("parent_folder_id", "");
                 value.put("remote_name", discovered.name);
+                value.put("remote_parent_folder_id", "");
                 value.put("created_at_ms", discovered.createdAtMs);
                 value.put("updated_at_ms", System.currentTimeMillis());
                 array.put(value);

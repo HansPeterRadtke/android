@@ -97,9 +97,12 @@ public final class ReliableUploader {
                         for (ReliableSessionStore.Folder folder : pendingFolders) {
                             if (!running.get()) break;
                             listener.onState("", "Synchronizing folder " + folder.name);
-                            client.createFolder(folder.id, folder.name);
-                            store.markFolderRemote(folder.id, folder.name);
-                            remoteFoldersKnown.add(folder.id + "\u0000" + folder.name);
+                            client.createFolder(folder.id, folder.name,
+                                    folder.parentId);
+                            store.markFolderRemote(folder.id, folder.name,
+                                    folder.parentId);
+                            remoteFoldersKnown.add(folder.id + "\u0000"
+                                    + folder.name + "\u0000" + folder.parentId);
                             listener.onChanged();
                         }
                     }
@@ -156,10 +159,15 @@ public final class ReliableUploader {
         currentSessionId = sessionId;
         currentOperation = "reconcile";
         lastProgressWallMs = System.currentTimeMillis();
-        String folderKey = snapshot.folderId + "\u0000" + snapshot.folderName;
+        ReliableSessionStore.Folder localFolder =
+                store.getFolder(snapshot.folderId);
+        String folderKey = snapshot.folderId + "\u0000"
+                + snapshot.folderName + "\u0000" + localFolder.parentId;
         if (!remoteFoldersKnown.contains(folderKey)) {
-            client.createFolder(snapshot.folderId, snapshot.folderName);
-            store.markFolderRemote(snapshot.folderId, snapshot.folderName);
+            client.createFolder(snapshot.folderId, snapshot.folderName,
+                    localFolder.parentId);
+            store.markFolderRemote(snapshot.folderId, snapshot.folderName,
+                    localFolder.parentId);
             remoteFoldersKnown.add(folderKey);
         }
         ReliableSessionManifest manifest = store.load(sessionId);

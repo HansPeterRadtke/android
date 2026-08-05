@@ -99,7 +99,7 @@ public final class ReliableUploadClient {
     private final AtomicReference<HttpURLConnection> activeConnection = new AtomicReference<>();
 
     public ReliableUploadClient(String baseUrl) {
-        this(baseUrl, "VoiceButton/0.29 Android");
+        this(baseUrl, "VoiceButton/0.30 Android");
     }
 
     public ReliableUploadClient(String baseUrl, String userAgent) {
@@ -111,9 +111,16 @@ public final class ReliableUploadClient {
     }
 
     public void createFolder(String folderId, String name) throws Exception {
+        createFolder(folderId, name, "");
+    }
+
+    public void createFolder(String folderId, String name,
+                             String parentFolderId) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("folder_id", folderId);
         payload.put("name", name);
+        payload.put("parent_folder_id",
+                parentFolderId == null ? "" : parentFolderId);
         postJson("/audio/v2/folders", payload);
     }
 

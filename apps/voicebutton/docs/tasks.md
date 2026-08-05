@@ -51,3 +51,6 @@ Version 0.28 fixes Default-only folder selection. MainActivity no longer asks th
 
 
 Version 0.29 makes PlayerPlaybackService task-scoped at the Android manifest level. Swiping the Voice Button task away now forces Android to destroy the player service, stop foreground execution, and explicitly cancel the player notification. Home and normal app switching still leave the task present and keep playback active.
+
+
+Version 0.30 adds a real logical recording-folder tree with parent relationships, full-path selection, root/subfolder creation, tree navigation, folder reparenting, parent-aware durable synchronization, and user-visible recording names that never expose internal session IDs. Jetson mirrors the same folder tree under `recordings/audio` and `recordings/text`.

@@ -520,15 +520,25 @@ public final class RecordingService extends Service {
                 new ReliableSessionStore.Folder("default", "Default", 0L)) : store.listFolders();
     }
 
-    public ReliableSessionStore.Folder createFolder(String name) throws IOException {
-        if (store == null) throw new IOException("Recording storage is not ready");
-        ReliableSessionStore.Folder folder = store.createFolder(name);
+    public ReliableSessionStore.Folder createFolder(String name)
+            throws IOException {
+        return createFolder(name, "");
+    }
+
+    public ReliableSessionStore.Folder createFolder(String name,
+                                                     String parentFolderId)
+            throws IOException {
+        if (store == null) throw new IOException(
+                "Recording storage is not ready");
+        ReliableSessionStore.Folder folder =
+                store.createFolder(name, parentFolderId);
         new Thread(() -> {
             try {
                 new ReliableUploadClient(BuildConfig.VOICE_BASE_URL,
                         "VoiceButton/" + BuildConfig.VERSION_NAME + " Android")
-                        .createFolder(folder.id, folder.name);
-                store.markFolderRemote(folder.id, folder.name);
+                        .createFolder(folder.id, folder.name, folder.parentId);
+                store.markFolderRemote(folder.id, folder.name,
+                        folder.parentId);
                 if (uploader != null) uploader.signal();
                 diag(PhoneDiagnostics.INFO, "folder.remote_created", null,
                         "Recording folder was created on the server",

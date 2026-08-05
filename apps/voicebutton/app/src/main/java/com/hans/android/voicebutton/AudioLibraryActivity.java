@@ -219,31 +219,43 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     private void showRecordings() {
-        recordingsMode = true; currentDirectory = null; directoryStack.clear();
-        directoryNameStack.clear(); updateModeButtons(); saveLibraryState();
-        upButton.setEnabled(appFolderFilter != null);
-        pathText.setText(appFolderFilter == null ? "App recording folders" : appFolderFilter.name);
-        stateText.setText(appFolderFilter == null ? "Loading folders…" : "Loading recordings…");
-        ReliableSessionStore.Folder filter = appFolderFilter;
+        recordingsMode = true;
+        currentDirectory = null;
+        directoryStack.clear();
+        directoryNameStack.clear();
+        updateModeButtons();
+        saveLibraryState();
+        ReliableSessionStore.Folder requested = appFolderFilter;
         int generation = loadGeneration.incrementAndGet();
         worker.execute(() -> {
             ArrayList<LibraryItem> items = new ArrayList<>();
             try {
-                if (store == null) store = ReliableSessionStore.openForBrowsing(this);
+                if (store == null) {
+                    store = ReliableSessionStore.openForBrowsing(this);
+                }
+                ReliableSessionStore.Folder current = requested;
+                if (current != null) current = store.getFolder(current.id);
+                final ReliableSessionStore.Folder currentFolder = current;
+                appFolderFilter = currentFolder;
                 List<ReliableSessionManifest> manifests = store.list();
-                if (filter == null) {
-                    for (ReliableSessionStore.Folder folder : store.listFolders()) {
-                        int count = 0;
-                        for (ReliableSessionManifest manifest : manifests) {
-                            if (folder.id.equals(manifest.folderId)) count++;
-                        }
-                        items.add(LibraryItem.appFolder(folder, count));
-                    }
-                } else {
-                    manifests.sort(Comparator.comparingLong(
-                            (ReliableSessionManifest value) -> value.createdAt).reversed());
+                String parentId = currentFolder == null ? "" : currentFolder.id;
+                for (ReliableSessionStore.Folder child
+                        : store.childFolders(parentId)) {
+                    int directRecordings = 0;
                     for (ReliableSessionManifest manifest : manifests) {
-                        if (!filter.id.equals(manifest.folderId)) continue;
+                        if (child.id.equals(manifest.folderId)) {
+                            directRecordings++;
+                        }
+                    }
+                    items.add(LibraryItem.appFolder(child,
+                            directRecordings));
+                }
+                if (currentFolder != null) {
+                    manifests.sort(Comparator.comparingLong(
+                            (ReliableSessionManifest value) -> value.createdAt)
+                            .reversed());
+                    for (ReliableSessionManifest manifest : manifests) {
+                        if (!currentFolder.id.equals(manifest.folderId)) continue;
                         File file = RecordingUi.recordingFile(this, manifest);
                         items.add(LibraryItem.recording(manifest, file,
                                 file != null && file.isFile()));
@@ -251,18 +263,29 @@ public final class AudioLibraryActivity extends Activity {
                 }
                 runOnUiThread(() -> {
                     if (generation != loadGeneration.get()) return;
+                    appFolderFilter = currentFolder;
+                    upButton.setEnabled(currentFolder != null);
+                    pathText.setText(currentFolder == null
+                            ? "Recordings" : "Recordings/" + currentFolder.path);
                     adapter.replace(items);
                     restoreListPosition();
                     saveVisibleCache(items);
                     saveLibraryState();
-                    stateText.setText(items.isEmpty()
-                            ? (filter == null ? "No app folders" : "No recordings in this folder")
-                            : items.size() + (filter == null ? " folders" : " recordings"));
+                    int childCount = 0;
+                    int recordingCount = 0;
+                    for (LibraryItem item : items) {
+                        if (item.appFolder != null) childCount++;
+                        else if (item.recording != null) recordingCount++;
+                    }
+                    stateText.setText(childCount + " folders · "
+                            + recordingCount + " recordings");
                 });
             } catch (Exception failure) {
                 runOnUiThread(() -> {
-                    if (generation == loadGeneration.get()) stateText.setText(
-                            "Could not load recordings: " + failure.getMessage());
+                    if (generation == loadGeneration.get()) {
+                        stateText.setText("Could not load recordings: "
+                                + failure.getMessage());
+                    }
                 });
             }
         });
@@ -424,7 +447,10 @@ public final class AudioLibraryActivity extends Activity {
         worker.execute(() -> {
             try {
                 List<ReliableSessionStore.Folder> folders = store.listFolders();
-                String[] names = new String[folders.size()]; for (int i=0;i<names.length;i++) names[i]=folders.get(i).name;
+                String[] names = new String[folders.size()];
+                for (int i = 0; i < names.length; i++) {
+                    names[i] = folders.get(i).path;
+                }
                 runOnUiThread(() -> new AlertDialog.Builder(this).setTitle("Move recording").setItems(names, (d,w) -> worker.execute(() -> {
                     try { store.moveSession(item.recording.sessionId, folders.get(w).id); runOnUiThread(this::showRecordings); }
                     catch (Exception failure) { error(failure); }
@@ -460,29 +486,114 @@ public final class AudioLibraryActivity extends Activity {
 
     private void manageAppFolders() {
         if (store == null) return;
-        new AlertDialog.Builder(this).setTitle("App folders").setItems(new String[]{"Create folder","Rename folder"},(d,w)->{
-            if(w==0)createFolder();else chooseFolderToRename();
-        }).setNegativeButton("Back",null).show();
+        ReliableSessionStore.Folder current = appFolderFilter;
+        String[] actions = current == null
+                ? new String[]{"Create root folder"}
+                : new String[]{"Create subfolder", "Rename this folder",
+                        "Move this folder"};
+        new AlertDialog.Builder(this)
+                .setTitle(current == null ? "Recordings folders"
+                        : current.path)
+                .setItems(actions, (dialog, which) -> {
+                    if (current == null) {
+                        createFolder("");
+                    } else if (which == 0) {
+                        createFolder(current.id);
+                    } else if (which == 1) {
+                        renameFolder(current);
+                    } else {
+                        moveFolder(current);
+                    }
+                }).setNegativeButton("Back", null).show();
     }
 
-    private void createFolder() {
-        EditText input=nameInput("");
-        new AlertDialog.Builder(this).setTitle("Create app folder").setView(input).setNegativeButton("Back",null).setPositiveButton("Create",(d,w)->worker.execute(()->{
-            try{store.createFolder(input.getText().toString());runOnUiThread(this::showRecordings);}catch(Exception failure){error(failure);}
-        })).show();
-    }
-
-    private void chooseFolderToRename() {
-        worker.execute(()->{
-            try{List<ReliableSessionStore.Folder> folders=store.listFolders();String[] names=new String[folders.size()];for(int i=0;i<names.length;i++)names[i]=folders.get(i).name;runOnUiThread(()->new AlertDialog.Builder(this).setTitle("Rename app folder").setItems(names,(d,w)->renameFolder(folders.get(w))).setNegativeButton("Back",null).show());}catch(Exception failure){error(failure);}
-        });
+    private void createFolder(String parentFolderId) {
+        EditText input = nameInput("");
+        String location = parentFolderId == null || parentFolderId.isEmpty()
+                ? "Recordings" : appFolderFilter.path;
+        new AlertDialog.Builder(this)
+                .setTitle("Create folder in " + location)
+                .setView(input)
+                .setNegativeButton("Back", null)
+                .setPositiveButton("Create", (dialog, which) ->
+                        worker.execute(() -> {
+                            try {
+                                ReliableSessionStore.Folder created =
+                                        store.createFolder(
+                                                input.getText().toString(),
+                                                parentFolderId);
+                                runOnUiThread(() -> {
+                                    appFolderFilter = created;
+                                    showRecordings();
+                                });
+                            } catch (Exception failure) {
+                                error(failure);
+                            }
+                        })).show();
     }
 
     private void renameFolder(ReliableSessionStore.Folder folder) {
-        EditText input=nameInput(folder.name);
-        new AlertDialog.Builder(this).setTitle("Rename app folder").setView(input).setNegativeButton("Back",null).setPositiveButton("Rename",(d,w)->worker.execute(()->{
-            try{store.renameFolder(folder.id,input.getText().toString());runOnUiThread(this::showRecordings);}catch(Exception failure){error(failure);}
-        })).show();
+        EditText input = nameInput(folder.name);
+        new AlertDialog.Builder(this)
+                .setTitle("Rename folder")
+                .setView(input)
+                .setNegativeButton("Back", null)
+                .setPositiveButton("Rename", (dialog, which) ->
+                        worker.execute(() -> {
+                            try {
+                                ReliableSessionStore.Folder renamed =
+                                        store.renameFolder(folder.id,
+                                                input.getText().toString());
+                                runOnUiThread(() -> {
+                                    appFolderFilter = renamed;
+                                    showRecordings();
+                                });
+                            } catch (Exception failure) {
+                                error(failure);
+                            }
+                        })).show();
+    }
+
+    private void moveFolder(ReliableSessionStore.Folder folder) {
+        worker.execute(() -> {
+            try {
+                List<ReliableSessionStore.Folder> all = store.listFolders();
+                ArrayList<ReliableSessionStore.Folder> destinations =
+                        new ArrayList<>();
+                ArrayList<String> labels = new ArrayList<>();
+                destinations.add(null);
+                labels.add("Recordings root");
+                String prefix = folder.path + "/";
+                for (ReliableSessionStore.Folder candidate : all) {
+                    if (candidate.id.equals(folder.id)
+                            || candidate.path.startsWith(prefix)) continue;
+                    destinations.add(candidate);
+                    labels.add(candidate.path);
+                }
+                runOnUiThread(() -> new AlertDialog.Builder(this)
+                        .setTitle("Move " + folder.path)
+                        .setItems(labels.toArray(new String[0]),
+                                (dialog, which) -> worker.execute(() -> {
+                                    try {
+                                        ReliableSessionStore.Folder parent =
+                                                destinations.get(which);
+                                        ReliableSessionStore.Folder moved =
+                                                store.moveFolder(folder.id,
+                                                        parent == null ? ""
+                                                                : parent.id);
+                                        runOnUiThread(() -> {
+                                            appFolderFilter = moved;
+                                            showRecordings();
+                                        });
+                                    } catch (Exception failure) {
+                                        error(failure);
+                                    }
+                                }))
+                        .setNegativeButton("Back", null).show());
+            } catch (Exception failure) {
+                error(failure);
+            }
+        });
     }
 
     private void chooseRoot() {
@@ -501,7 +612,13 @@ public final class AudioLibraryActivity extends Activity {
     private void up() {
         if (recordingsMode) {
             if (appFolderFilter != null) {
-                appFolderFilter = null;
+                try {
+                    String parentId = appFolderFilter.parentId;
+                    appFolderFilter = parentId == null || parentId.isEmpty()
+                            ? null : store.getFolder(parentId);
+                } catch (Exception ignored) {
+                    appFolderFilter = null;
+                }
                 showRecordings();
             } else finish();
             return;
@@ -613,12 +730,16 @@ public final class AudioLibraryActivity extends Activity {
             this.document=document;this.recording=recording;this.appFolder=appFolder;this.source=source;
         }
         static LibraryItem appFolder(ReliableSessionStore.Folder folder,int count){
-            return new LibraryItem(folder.name,count+" recordings",true,false,null,null,folder,null);
+            return new LibraryItem(folder.name,
+                    "Folder · " + count + " recordings", true, false,
+                    null, null, folder, null);
         }
         static LibraryItem recording(ReliableSessionManifest manifest,File file,boolean playable){
-            String fileName = playable && file != null ? file.getName()
-                    : RecordingUi.title(manifest) + ".mp3";
-            PlayerSource source=playable?PlayerSource.recording(file,fileName,file.length(),manifest.sessionId,manifest.folderId):null;
+            String fileName = com.hans.android.audio.reliable.RecordingFileNames
+                    .visibleMp3Name(manifest.createdAt, manifest.displayName);
+            PlayerSource source = playable
+                    ? PlayerSource.recording(file, fileName, file.length(),
+                    manifest.sessionId, manifest.folderId) : null;
             String detail = RecordingUi.title(manifest) + " · "
                     + RecordingUi.humanState(manifest) + " · "
                     + RecordingUi.formatBytes(RecordingUi.recordingBytes(manifest));
@@ -651,6 +772,8 @@ public final class AudioLibraryActivity extends Activity {
             if (appFolder != null) {
                 value.put("app_folder_id", appFolder.id);
                 value.put("app_folder_name", appFolder.name);
+                value.put("app_folder_parent_id", appFolder.parentId);
+                value.put("app_folder_path", appFolder.path);
             }
             return value;
         }
@@ -667,7 +790,12 @@ public final class AudioLibraryActivity extends Activity {
             String folderId = value.optString("app_folder_id", "");
             ReliableSessionStore.Folder folder = folderId.isEmpty() ? null
                     : new ReliableSessionStore.Folder(folderId,
-                    value.optString("app_folder_name", "App folder"), 0L);
+                    value.optString("app_folder_name", "App folder"),
+                    value.optString("app_folder_parent_id", ""),
+                    0L, value.optString("app_folder_name", "App folder"),
+                    value.optString("app_folder_parent_id", ""),
+                    value.optString("app_folder_path",
+                            value.optString("app_folder_name", "App folder")));
             return new LibraryItem(value.optString("title", "Unnamed"),
                     value.optString("detail", ""),
                     value.optBoolean("directory", false),

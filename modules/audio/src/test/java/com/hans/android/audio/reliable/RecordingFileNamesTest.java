@@ -27,4 +27,13 @@ public class RecordingFileNamesTest {
         assertTrue(value.contains("03243605"));
     }
 
+    @Test public void visibleNameNeverContainsInternalUuid() {
+        String value = RecordingFileNames.visibleMp3Name(
+                1785830400123L,
+                "03243605-daaa-416a-85e1-3c35f1ff21eb");
+        assertFalse(value.contains("03243605"));
+        assertTrue(value.startsWith("Recording 2026-08-04"));
+        assertTrue(value.endsWith(".mp3"));
+    }
+
 }
