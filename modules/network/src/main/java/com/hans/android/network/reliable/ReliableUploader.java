@@ -47,10 +47,31 @@ public final class ReliableUploader {
         this.client = new ReliableUploadClient(baseUrl); this.listener = listener;
     }
 
-    public synchronized void start() {
-        if (!running.compareAndSet(false, true)) return;
-        thread = new Thread(this::loop, "reliable-chunk-uploader");
-        thread.setDaemon(true); thread.start();
+    public synchronized void start() { ensureRunning(); }
+
+    /**
+     * Ensures that a transfer thread exists. A previous implementation only
+     * inspected the running flag, so a worker killed by a network
+     * InterruptedIOException could remain permanently dead while reporting
+     * running=true.
+     *
+     * @return true when a replacement worker was started.
+     */
+    public synchronized boolean ensureRunning() {
+        Thread value = thread;
+        if (value != null && value.isAlive()) return false;
+        running.set(true);
+        Thread replacement = new Thread(this::loop,
+                "reliable-chunk-uploader");
+        replacement.setDaemon(true);
+        thread = replacement;
+        replacement.start();
+        return true;
+    }
+
+    public synchronized boolean isWorkerAlive() {
+        Thread value = thread;
+        return running.get() && value != null && value.isAlive();
     }
 
     public void signal() { synchronized (wake) { wake.notifyAll(); } }
@@ -123,8 +144,11 @@ public final class ReliableUploader {
                 backoff = 250L;
                 waitForSignal(urgentAudio ? 250L : (found ? 1000L : 1500L));
             } catch (Exception failure) {
-                if (!running.get() || Thread.currentThread().isInterrupted()
-                        || failure instanceof java.io.InterruptedIOException) break;
+                if (shouldStopAfterFailure(running.get(), failure)) break;
+                // SocketTimeoutException and many request cancellations inherit
+                // from InterruptedIOException. They are network failures, not a
+                // request to permanently kill the transfer worker.
+                if (Thread.currentThread().isInterrupted()) Thread.interrupted();
                 lastFailure = failure.getClass().getSimpleName() + ": " + failure.getMessage();
                 currentOperation = "retry_backoff";
                 String exact = humanFailure(failure, backoff);
@@ -138,6 +162,17 @@ public final class ReliableUploader {
             }
         }
         currentOperation = "stopped";
+        synchronized (this) {
+            if (thread == Thread.currentThread()) running.set(false);
+        }
+    }
+
+    static boolean shouldStopAfterFailure(boolean stillRunning,
+                                          Throwable failure) {
+        // stop() always clears running before interrupting/cancelling work.
+        // Every Exception while running, including InterruptedIOException and
+        // SocketTimeoutException, must be retried with durable-offset recovery.
+        return !stillRunning;
     }
 
     private static boolean hasPendingAudio(ReliableSessionManifest manifest) {

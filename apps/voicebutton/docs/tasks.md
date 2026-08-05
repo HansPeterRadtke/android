@@ -54,3 +54,6 @@ Version 0.29 makes PlayerPlaybackService task-scoped at the Android manifest lev
 
 
 Version 0.30 adds a real logical recording-folder tree with parent relationships, full-path selection, root/subfolder creation, tree navigation, folder reparenting, parent-aware durable synchronization, and user-visible recording names that never expose internal session IDs. Jetson mirrors the same folder tree under `recordings/audio` and `recordings/text`.
+
+
+Version 0.31 repairs permanent transfer stalls. The uploader no longer treats InterruptedIOException or SocketTimeoutException as a shutdown request, clears unexpected interrupt state before retrying, reports stopped workers as not running, and recreates a dead worker whenever recording work, network availability, or the five-second continuity check signals queued data. This preserves every local chunk and resumes from Jetson durable offsets.

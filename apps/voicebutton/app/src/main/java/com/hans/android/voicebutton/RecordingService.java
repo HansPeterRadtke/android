@@ -226,7 +226,7 @@ public final class RecordingService extends Service {
             if (keep) {
                 ensureForeground();
                 acquireCaptureWakeLock();
-                if (uploader != null) uploader.signal();
+                signalUploader("queued_work");
                 main.postDelayed(this, CONTINUITY_TICK_MS);
             } else {
                 releaseCaptureWakeLock();
@@ -539,7 +539,7 @@ public final class RecordingService extends Service {
                         .createFolder(folder.id, folder.name, folder.parentId);
                 store.markFolderRemote(folder.id, folder.name,
                         folder.parentId);
-                if (uploader != null) uploader.signal();
+                signalUploader("queued_work");
                 diag(PhoneDiagnostics.INFO, "folder.remote_created", null,
                         "Recording folder was created on the server",
                         PhoneDiagnostics.fields("folder_id", folder.id, "folder_name", folder.name));
@@ -697,6 +697,19 @@ public final class RecordingService extends Service {
             }
         }
         return out.toString();
+    }
+
+    private void signalUploader(String reason) {
+        ReliableUploader value = uploader;
+        if (value == null || exitRequested.get()) return;
+        boolean restarted = value.ensureRunning();
+        value.signal();
+        if (restarted) {
+            diag(PhoneDiagnostics.WARN, "upload.worker_auto_restarted", null,
+                    "A dead transfer worker was recreated automatically",
+                    PhoneDiagnostics.fields("reason", reason,
+                            "worker", value.debugSummary()));
+        }
     }
 
     private synchronized void restartUploader(String reason) throws IOException {
@@ -862,7 +875,7 @@ public final class RecordingService extends Service {
                 schedulePreview(open.sessionId);
                 refresh("PAUSED", "Automatic recovery stopped; recording is paused and ready to resume",
                         false, "Not recording");
-                if (uploader != null) uploader.signal();
+                signalUploader("queued_work");
                 return;
             }
             if (stopDisposition == STOP_PAUSE) {
@@ -898,7 +911,7 @@ public final class RecordingService extends Service {
         if (manifest.recordingFinished && manifest.conversionFinished) {
             currentSessionId = null;
             refresh("READY", "The recording is already finished and playable", false, "Not recording");
-            if (uploader != null) uploader.signal();
+            signalUploader("queued_work");
             return;
         }
         if (!manifest.recordingFinished) {
@@ -908,7 +921,7 @@ public final class RecordingService extends Service {
         currentSessionId = null;
         scheduleFinalization(sessionId);
         refresh("FINISHING", "Creating the final playable MP3", false, "Not recording");
-        if (uploader != null) uploader.signal();
+        signalUploader("queued_work");
     }
 
     private AudioInputOption resolveInput(int deviceId) throws IOException {
@@ -975,7 +988,7 @@ public final class RecordingService extends Service {
                     "Immutable MP3 segment metadata was committed locally",
                     PhoneDiagnostics.fields("seq", seq, "bytes", mp3File.length(),
                             "duration_ms", durationMs, "file_name", mp3File.getName()));
-            if (uploader != null) uploader.signal();
+            signalUploader("queued_work");
             if (stopDisposition == STOP_PAUSE) {
                 refresh("PAUSING", "The paused MP3 segment is durable; preparing playback", false, "Not recording");
             } else if (stopDisposition == STOP_FINISH) {
@@ -1038,7 +1051,7 @@ public final class RecordingService extends Service {
                     } else {
                         refresh("READY", "The recording is finished and playable", false, "Not recording");
                     }
-                    if (uploader != null) uploader.signal();
+                    signalUploader("queued_work");
                     return;
                 }
             } catch (Exception failure) {
@@ -1072,7 +1085,7 @@ public final class RecordingService extends Service {
                 scheduleFinalization(sessionId);
                 refresh("FINISHING", "Recording closed; creating the final MP3", false, "Not recording");
             }
-            if (uploader != null) uploader.signal();
+            signalUploader("queued_work");
         }
 
         @Override public void onFailure(String stage, String exceptionClass, String message) {
@@ -1170,7 +1183,7 @@ public final class RecordingService extends Service {
                 File target = new File(store.sessionDirectory(sessionId), String.format(java.util.Locale.US, "segment_%06d.mp3", seq));
                 mp3.encodeSegment(wav, target);
                 store.markSegmentEncoded(sessionId, seq, target);
-                if (uploader != null) uploader.signal();
+                signalUploader("queued_work");
                 refreshFromWorker("COMPRESSING", "Compressed segment " + (seq + 1) + " is ready for reconciliation");
             } catch (Exception failure) {
                 if (exitRequested.get() || failure instanceof java.io.InterruptedIOException
@@ -1196,7 +1209,7 @@ public final class RecordingService extends Service {
                 File existingFinal = store.finalMp3File(sessionId);
                 if (manifest.conversionFinished && existingFinal.isFile() && existingFinal.length() > 0L) {
                     refreshFromWorker("READY", "The recording is already finished and playable");
-                    if (uploader != null) uploader.signal();
+                    signalUploader("queued_work");
                     return;
                 }
                 for (ReliableSessionManifest.Segment segment : manifest.orderedSegments()) {
@@ -1222,7 +1235,7 @@ public final class RecordingService extends Service {
                                 "bytes", finalMp3.length(),
                                 "segment_count", compressed.size(),
                                 "sha256", ReliableSessionStore.sha256File(finalMp3)));
-                if (uploader != null) uploader.signal();
+                signalUploader("queued_work");
                 refreshFromWorker("READY", "The local MP3 is complete; server reconciliation continues");
             } catch (Exception failure) {
                 if (exitRequested.get() || failure instanceof java.io.InterruptedIOException
@@ -1693,7 +1706,7 @@ public final class RecordingService extends Service {
         if (connectivityManager == null) return;
         networkCallback = new ConnectivityManager.NetworkCallback() {
             @Override public void onAvailable(Network network) {
-                if (uploader != null) uploader.signal();
+                signalUploader("queued_work");
                 if (shouldKeepServiceAlive()) {
                     ensureForeground();
                     acquireCaptureWakeLock();
