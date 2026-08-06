@@ -413,6 +413,16 @@ public final class ReliableSessionStore {
             for (File file : audio) if (file.length() > 0L) return false;
         }
         deleteRecursively(directory);
+        fsyncDirectory(directory.getParentFile());
+        return true;
+    }
+
+    public synchronized boolean deleteSession(String sessionId) throws IOException {
+        File directory = findSessionDir(sessionId);
+        if (directory == null || !directory.exists()) return false;
+        File parent = directory.getParentFile();
+        deleteRecursively(directory);
+        fsyncDirectory(parent);
         return true;
     }
 

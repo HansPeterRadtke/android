@@ -57,11 +57,13 @@ public final class JournaledMp3Recorder {
 
     public synchronized boolean start(Context context, AudioInputOption input,
                                       ReliableSessionStore store,
-                                      String sessionId, Listener listener) {
+                                      String sessionId, int enhancementLevel,
+                                      Listener listener) {
         if (!recording.compareAndSet(false, true)) return false;
+        int safeEnhancementLevel = SpeechEnhancer.clampLevel(enhancementLevel);
         captureThread = new Thread(() -> capture(
                 context.getApplicationContext(), input, store, sessionId,
-                listener), "reliable-audio-direct-journal");
+                safeEnhancementLevel, listener), "reliable-audio-direct-journal");
         captureThread.setPriority(Thread.MAX_PRIORITY);
         captureThread.start();
         return true;
@@ -124,13 +126,13 @@ public final class JournaledMp3Recorder {
 
     private void capture(Context context, AudioInputOption input,
                          ReliableSessionStore store, String sessionId,
-                         Listener listener) {
+                         int enhancementLevel, Listener listener) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
         AudioRouteController route = new AudioRouteController(context);
         AudioRecord recorder = null;
         AutomaticGainControl automaticGainControl = null;
         NoiseSuppressor noiseSuppressor = null;
-        SpeechEnhancer enhancer = new SpeechEnhancer();
+        SpeechEnhancer enhancer = new SpeechEnhancer(enhancementLevel);
         DurablePcmJournal journal = null;
         int seq = -1;
         int inputSampleRate = 0;
@@ -145,7 +147,11 @@ public final class JournaledMp3Recorder {
         boolean failureReported = false;
         try {
             listener.onRecorderEvent("capture.pipeline_start", -1, 0L, 0L,
-                    "direct_pcm_journal=true, queue=false, live_mp3=false"
+                    "direct_pcm_journal=true, queue=false, live_mp3=true"
+                            + ", enhancement=" + SpeechEnhancer.name(enhancementLevel)
+                            + ", software_gain=true"
+                            + ", software_noise_gate=true"
+                            + ", software_high_pass=true"
                             + ", block_ms=" + BLOCK_MS
                             + ", pcm_sync_ms=" + PCM_SYNC_MS
                             + ", live_journal_segment_ms="
@@ -450,8 +456,9 @@ public final class JournaledMp3Recorder {
                     capturedSamples * 2L,
                     inputSampleRate <= 0 ? 0L
                             : capturedSamples * 1000L / inputSampleRate,
-                    "direct_pcm_journal=true, failure="
-                            + failureReported);
+                    "direct_pcm_journal=true, live_mp3=true, enhancement="
+                            + SpeechEnhancer.name(enhancementLevel)
+                            + ", failure=" + failureReported);
             listener.onStopped(sessionId);
         }
     }
@@ -512,18 +519,39 @@ public final class JournaledMp3Recorder {
         failures.append(value);
     }
 
+    public static String enhancementName(int level) { return SpeechEnhancer.name(level); }
+
     private static final class SpeechEnhancer {
-        private static final double TARGET_RMS = 0.16;
-        private static final double SPEECH_RMS_FLOOR = 0.006;
-        private static final double SPEECH_PEAK_FLOOR = 0.025;
-        private static final double MAX_GAIN = 5.0;
-        private static final double MIN_GAIN = 0.75;
+        private static final double[] TARGET_RMS = {0.0, 0.13, 0.18, 0.24};
+        private static final double[] MAX_GAIN = {1.0, 3.0, 6.0, 10.0};
+        private static final double[] NOISE_ATTENUATION = {1.0, 0.70, 0.45, 0.25};
+        private static final double SPEECH_RMS_FLOOR = 0.004;
+        private static final double SPEECH_PEAK_FLOOR = 0.018;
+        private static final double MIN_GAIN = 0.65;
+        private final int level;
         private double highPassPreviousInput;
         private double highPassPreviousOutput;
         private double gain = 1.0;
 
+        SpeechEnhancer(int level) { this.level = clampLevel(level); }
+
+        static int clampLevel(int level) {
+            if (level < 0) return 0;
+            if (level > 3) return 3;
+            return level;
+        }
+
+        static String name(int level) {
+            switch (clampLevel(level)) {
+                case 0: return "off";
+                case 1: return "natural";
+                case 3: return "maximum";
+                default: return "strong";
+            }
+        }
+
         void process(short[] samples, int count) {
-            if (samples == null || count <= 0) return;
+            if (samples == null || count <= 0 || level == 0) return;
             double squareSum = 0.0;
             int peak = 0;
             for (int i = 0; i < count; i++) {
@@ -539,19 +567,19 @@ public final class JournaledMp3Recorder {
             boolean speechLikely = rms >= SPEECH_RMS_FLOOR
                     || peakRatio >= SPEECH_PEAK_FLOOR;
             double target = speechLikely
-                    ? TARGET_RMS / Math.max(SPEECH_RMS_FLOOR, rms)
+                    ? TARGET_RMS[level] / Math.max(SPEECH_RMS_FLOOR, rms)
                     : 1.0;
-            target = Math.max(MIN_GAIN, Math.min(MAX_GAIN, target));
-            double smoothing = target < gain ? 0.35 : 0.08;
+            target = Math.max(MIN_GAIN, Math.min(MAX_GAIN[level], target));
+            double smoothing = target < gain ? 0.45 : 0.14;
             gain += (target - gain) * smoothing;
+            double noiseAttenuation = speechLikely ? 1.0 : NOISE_ATTENUATION[level];
             for (int i = 0; i < count; i++) {
                 double input = samples[i] / 32768.0;
                 double filtered = input - highPassPreviousInput
                         + 0.995 * highPassPreviousOutput;
                 highPassPreviousInput = input;
                 highPassPreviousOutput = filtered;
-                double value = filtered * gain;
-                if (!speechLikely) value *= 0.45;
+                double value = filtered * gain * noiseAttenuation;
                 value = softLimit(value);
                 int pcm = (int)Math.round(value * 32767.0);
                 if (pcm > Short.MAX_VALUE) pcm = Short.MAX_VALUE;
@@ -561,9 +589,10 @@ public final class JournaledMp3Recorder {
         }
 
         private static double softLimit(double value) {
-            if (value > 0.92) return 0.92 + (value - 0.92) / (1.0 + Math.abs(value - 0.92));
-            if (value < -0.92) return -0.92 + (value + 0.92) / (1.0 + Math.abs(value + 0.92));
-            return value;
+            double limited = Math.tanh(value * 1.15) / Math.tanh(1.15);
+            if (limited > 0.98) return 0.98;
+            if (limited < -0.98) return -0.98;
+            return limited;
         }
     }
 

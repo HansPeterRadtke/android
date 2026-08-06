@@ -47,6 +47,7 @@ public final class RecordingService extends Service {
     public static final String ACTION_STOP = "com.hans.android.voicebutton.STOP";
     public static final String ACTION_PAUSE = "com.hans.android.voicebutton.PAUSE";
     public static final String ACTION_FINISH = "com.hans.android.voicebutton.FINISH";
+    public static final String ACTION_CANCEL = "com.hans.android.voicebutton.CANCEL";
     public static final String ACTION_RESUME = "com.hans.android.voicebutton.RESUME";
     public static final String ACTION_FINISH_AND_START = "com.hans.android.voicebutton.FINISH_AND_START";
     public static final String ACTION_RETRY = "com.hans.android.voicebutton.RETRY";
@@ -61,6 +62,8 @@ public final class RecordingService extends Service {
     public static final String EXTRA_SESSION_ID = "session_id";
     public static final String EXTRA_FOLDER_ID = "folder_id";
     public static final String EXTRA_FOLDER_NAME = "folder_name";
+    public static final String EXTRA_ENHANCEMENT_LEVEL = "enhancement_level";
+    public static final int DEFAULT_ENHANCEMENT_LEVEL = 2;
 
     private static final String CHANNEL_ID = "reliable_voice_capture";
     private static final int NOTIFICATION_ID = 4101;
@@ -68,6 +71,7 @@ public final class RecordingService extends Service {
     private static final int STOP_PAUSE = 1;
     private static final int STOP_FINISH = 2;
     private static final int STOP_INTERRUPT = 3;
+    private static final int STOP_CANCEL = 4;
     private static final long WAKE_LOCK_TIMEOUT_MS = 10L * 60L * 1000L;
     private static final long WAKE_LOCK_RENEW_MS = 5L * 60L * 1000L;
     private static final long CONTINUITY_TICK_MS = 5000L;
@@ -271,7 +275,7 @@ public final class RecordingService extends Service {
                             "device_id", input.getDeviceId(),
                             "device_type", input.getDeviceType(),
                             "detail", recordingRecoveryDetail));
-            startCapture(sessionId, input);
+            startCapture(sessionId, input, DEFAULT_ENHANCEMENT_LEVEL);
         } catch (Exception failure) {
             recordingRecoveryDetail = PhoneDiagnostics.exactFailure(
                     "Automatically recovering microphone capture", failure);
@@ -397,7 +401,8 @@ public final class RecordingService extends Service {
                     store.markResumed(interrupted.sessionId,
                             input.getLabel(), input.getDeviceId());
                     ensureForeground();
-                    startCapture(interrupted.sessionId, input);
+                    startCapture(interrupted.sessionId, input,
+                            DEFAULT_ENHANCEMENT_LEVEL);
                     diag(PhoneDiagnostics.WARN,
                             "recovery.capture_auto_resumed",
                             interrupted.sessionId,
@@ -462,6 +467,9 @@ public final class RecordingService extends Service {
                         AudioInputOption.DEFAULT_DEVICE_ID);
         final String sessionId = intent == null ? null
                 : intent.getStringExtra(EXTRA_SESSION_ID);
+        final int enhancementLevel = intent == null ? DEFAULT_ENHANCEMENT_LEVEL
+                : intent.getIntExtra(EXTRA_ENHANCEMENT_LEVEL,
+                        DEFAULT_ENHANCEMENT_LEVEL);
         String requestedFolderId = intent == null ? "default"
                 : intent.getStringExtra(EXTRA_FOLDER_ID);
         String requestedFolderName = intent == null ? "Default"
@@ -478,7 +486,8 @@ public final class RecordingService extends Service {
         if (foregroundLaunch) ensureForeground();
         try {
             serviceExecutor.execute(() -> executeServiceAction(action, deviceId,
-                    sessionId, folderId, folderName, startId, flags));
+                    sessionId, folderId, folderName, enhancementLevel,
+                    startId, flags));
         } catch (RuntimeException failure) {
             refresh("FAILED", PhoneDiagnostics.exactFailure(
                     "Queueing the recording action", failure),
@@ -489,7 +498,8 @@ public final class RecordingService extends Service {
 
     private void executeServiceAction(String action, int deviceId,
                                       String sessionId, String folderId,
-                                      String folderName, int startId, int flags) {
+                                      String folderName, int enhancementLevel,
+                                      int startId, int flags) {
         diag(PhoneDiagnostics.INFO, "service.action_received", sessionId,
                 "RecordingService received an action",
                 PhoneDiagnostics.fields("action", action == null ? "null" : action,
@@ -498,13 +508,18 @@ public final class RecordingService extends Service {
                         "snapshot_state", snapshot.state,
                         "thread", Thread.currentThread().getName()));
         try {
-            if (ACTION_START.equals(action)) startNew(deviceId, folderId, folderName);
-            else if (ACTION_RESUME.equals(action)) resumeSession(sessionId, deviceId);
+            if (ACTION_START.equals(action)) startNew(deviceId, folderId,
+                    folderName, enhancementLevel);
+            else if (ACTION_RESUME.equals(action)) resumeSession(sessionId,
+                    deviceId, enhancementLevel);
             else if (ACTION_FINISH_AND_START.equals(action)) {
-                finishInterruptedAndStart(sessionId, deviceId, folderId, folderName);
+                finishInterruptedAndStart(sessionId, deviceId, folderId,
+                        folderName, enhancementLevel);
             } else if (ACTION_PAUSE.equals(action)) pauseRecording();
             else if (ACTION_FINISH.equals(action) || ACTION_STOP.equals(action)) {
                 finishRecording(sessionId);
+            } else if (ACTION_CANCEL.equals(action)) {
+                cancelRecording(sessionId);
             } else if (ACTION_RETRY.equals(action)) {
                 retrySynchronizationNow("legacy_retry_action");
             } else if (ACTION_PREPARE_PLAYBACK.equals(action)) {
@@ -923,7 +938,8 @@ public final class RecordingService extends Service {
                         "new_worker", replacement.debugSummary()));
     }
 
-    private void startNew(int deviceId, String folderId, String folderName) throws Exception {
+    private void startNew(int deviceId, String folderId, String folderName,
+                          int enhancementLevel) throws Exception {
         diag(PhoneDiagnostics.INFO, "recording.start_requested", null,
                 "A new recording was requested", PhoneDiagnostics.fields("device_id", deviceId));
         if (recorder.isRecording()) throw new IOException("A recording is already active");
@@ -945,7 +961,7 @@ public final class RecordingService extends Service {
                 PhoneDiagnostics.fields("device_id", input.getDeviceId(),
                         "device_type", input.getDeviceType(), "label", input.getLabel()));
         try {
-            startCapture(manifest.sessionId, input);
+            startCapture(manifest.sessionId, input, enhancementLevel);
         } catch (Exception failure) {
             try { store.discardIfEmpty(manifest.sessionId); }
             catch (Exception ignored) {}
@@ -953,7 +969,8 @@ public final class RecordingService extends Service {
         }
     }
 
-    private void resumeSession(String sessionId, int deviceId) throws Exception {
+    private void resumeSession(String sessionId, int deviceId,
+                               int enhancementLevel) throws Exception {
         diag(PhoneDiagnostics.INFO, "recording.resume_requested", sessionId,
                 "Resume was requested", PhoneDiagnostics.fields("device_id", deviceId));
         if (recorder.isRecording()) {
@@ -969,11 +986,12 @@ public final class RecordingService extends Service {
         if (manifest.recordingFinished) throw new IOException("That recording is already closed");
         AudioInputOption input = resolveInput(deviceId);
         store.markResumed(sessionId, input.getLabel(), input.getDeviceId());
-        startCapture(sessionId, input);
+        startCapture(sessionId, input, enhancementLevel);
     }
 
     private void finishInterruptedAndStart(String sessionId, int deviceId,
-                                           String folderId, String folderName) throws Exception {
+                                           String folderId, String folderName,
+                                           int enhancementLevel) throws Exception {
         if (recorder.isRecording()) throw new IOException("A recording is already active");
         long started = SystemClock.elapsedRealtime();
         ReliableSessionManifest old = store.load(sessionId);
@@ -1001,7 +1019,7 @@ public final class RecordingService extends Service {
                         "device_id", input.getDeviceId(), "device_type", input.getDeviceType(),
                         "label", input.getLabel()));
         try {
-            startCapture(next.sessionId, input);
+            startCapture(next.sessionId, input, enhancementLevel);
         } catch (Exception failure) {
             try { store.discardIfEmpty(next.sessionId); }
             catch (Exception ignored) {}
@@ -1009,8 +1027,8 @@ public final class RecordingService extends Service {
         }
     }
 
-    private void startCapture(String sessionId, AudioInputOption input)
-            throws IOException {
+    private void startCapture(String sessionId, AudioInputOption input,
+                              int enhancementLevel) throws IOException {
         ensureForeground();
         acquireCaptureWakeLock();
         currentSessionId = sessionId;
@@ -1029,9 +1047,13 @@ public final class RecordingService extends Service {
                 "Microphone capture thread is starting",
                 PhoneDiagnostics.fields("device_id", input.getDeviceId(),
                         "device_type", input.getDeviceType(), "label", input.getLabel(),
+                        "enhancement_level", enhancementLevel,
+                        "enhancement", JournaledMp3Recorder.enhancementName(
+                                enhancementLevel),
                         "base_duration_ms", recordingBaseDurationMs));
         refresh("PREPARING", "Opening " + input.getLabel(), true, "Opening microphone");
-        if (!recorder.start(this, input, store, sessionId, recorderListener)) {
+        if (!recorder.start(this, input, store, sessionId, enhancementLevel,
+                recorderListener)) {
             boolean removed = false;
             try { removed = store.discardIfEmpty(sessionId); }
             catch (Exception ignored) {}
@@ -1130,6 +1152,42 @@ public final class RecordingService extends Service {
         scheduleFinalization(sessionId);
         refresh("FINISHING", "Creating the final playable MP3", false, "Not recording");
         signalUploader("queued_work");
+    }
+
+
+    private void cancelRecording(String requestedSessionId) throws Exception {
+        cancelAutomaticRecovery(true);
+        diag(PhoneDiagnostics.WARN, "recording.cancel_requested", requestedSessionId,
+                "Cancel recording was requested",
+                PhoneDiagnostics.fields("recording", recorder.isRecording(),
+                        "snapshot_state", snapshot.state));
+        if (recorder.isRecording()) {
+            stopDisposition = STOP_CANCEL;
+            refresh("CANCELLING", "Canceling and deleting this recording",
+                    true, snapshot.routedInput);
+            recorder.stop();
+            return;
+        }
+        String sessionId = requestedSessionId;
+        if (sessionId == null || sessionId.isEmpty()) sessionId = currentSessionId;
+        if (sessionId == null || sessionId.isEmpty()) {
+            ReliableSessionManifest latest = store.latestUnfinished();
+            if (latest != null) sessionId = latest.sessionId;
+        }
+        if (sessionId == null || sessionId.isEmpty()) {
+            refresh("READY", "No active recording was found to cancel",
+                    false, "Not recording");
+            main.post(this::leaveForegroundIfIdle);
+            return;
+        }
+        boolean deleted = store.deleteSession(sessionId);
+        if (sessionId.equals(currentSessionId)) currentSessionId = null;
+        refresh("READY", deleted
+                        ? "Recording canceled and deleted from this phone"
+                        : "Recording was already gone from this phone",
+                false, "Not recording");
+        signalUploader("recording_cancelled");
+        main.post(this::leaveForegroundIfIdle);
     }
 
     private AudioInputOption resolveInput(int deviceId) throws IOException {
@@ -1381,6 +1439,22 @@ public final class RecordingService extends Service {
                     "Checking persisted recording state after capture stopped",
                     failure, PhoneDiagnostics.fields(
                             "stop_disposition", disposition));
+        }
+        if (disposition == STOP_CANCEL) {
+            try {
+                store.deleteSession(sessionId);
+                currentSessionId = null;
+                refresh("READY", "Recording canceled and deleted from this phone",
+                        false, "Not recording");
+                signalUploader("recording_cancelled");
+            } catch (Exception failure) {
+                String exact = PhoneDiagnostics.exactFailure(
+                        "Deleting canceled recording", failure);
+                store.markError(sessionId, exact);
+                refresh("FAILED", exact, false, "Not recording");
+            }
+            resumeDeferredWork("recording_cancelled");
+            return;
         }
         if (captureFailed || disposition == STOP_INTERRUPT
                 || disposition == STOP_NONE) {

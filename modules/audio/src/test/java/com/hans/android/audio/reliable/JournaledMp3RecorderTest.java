@@ -33,12 +33,22 @@ public class JournaledMp3RecorderTest {
         org.junit.Assert.assertEquals(96, Mp3Converter.BITRATE_KBPS);
     }
 
-    @Test public void capturePathHasNoLiveEncoderOrJavaAudioQueue() {
+    @Test public void capturePathRotatesLiveJournalsForBackgroundEncoding() {
         org.junit.Assert.assertTrue(JournaledMp3Recorder.encodesWhileCapturing());
         org.junit.Assert.assertEquals(19200,
                 JournaledMp3Recorder.captureBufferBytes(48000, 4096));
         org.junit.Assert.assertEquals(1000,
                 JournaledMp3Recorder.syncIntervalMs());
+    }
+
+
+    @Test public void enhancementLevelNamesAreStable() {
+        org.junit.Assert.assertEquals("off", JournaledMp3Recorder.enhancementName(-1));
+        org.junit.Assert.assertEquals("off", JournaledMp3Recorder.enhancementName(0));
+        org.junit.Assert.assertEquals("natural", JournaledMp3Recorder.enhancementName(1));
+        org.junit.Assert.assertEquals("strong", JournaledMp3Recorder.enhancementName(2));
+        org.junit.Assert.assertEquals("maximum", JournaledMp3Recorder.enhancementName(3));
+        org.junit.Assert.assertEquals("maximum", JournaledMp3Recorder.enhancementName(99));
     }
 
 }

@@ -536,12 +536,28 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     private void manageRecording(LibraryItem item) {
-        String[] actions = {"Rename recording", "Move to app folder", "Open in player"};
+        String[] actions = {"Open in player", "Rename recording",
+                "Move to app folder", "Delete recording"};
         new AlertDialog.Builder(this).setTitle(item.title).setItems(actions, (d, which) -> {
-            if (which == 0) renameRecording(item);
-            else if (which == 1) moveRecording(item);
-            else open(item, adapter.position(item));
+            if (which == 0) open(item, adapter.position(item));
+            else if (which == 1) renameRecording(item);
+            else if (which == 2) moveRecording(item);
+            else confirmDeleteRecording(item);
         }).setNegativeButton("Back", null).show();
+    }
+
+    private void confirmDeleteRecording(LibraryItem item) {
+        new AlertDialog.Builder(this).setTitle("Delete recording?")
+                .setMessage(item.title + " and its local transcript will be removed from this phone.")
+                .setNegativeButton("Keep", null)
+                .setPositiveButton("Delete", (d, w) -> worker.execute(() -> {
+                    try {
+                        if (!store.deleteSession(item.recording.sessionId)) {
+                            throw new java.io.IOException("Recording was already gone");
+                        }
+                        runOnUiThread(this::showRecordings);
+                    } catch (Exception failure) { error(failure); }
+                })).show();
     }
 
     private void renameRecording(LibraryItem item) {

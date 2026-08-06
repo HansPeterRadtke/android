@@ -59,6 +59,7 @@ public final class MainActivity extends Activity {
     private static final String PREF_FOLDER_ID = "main_folder_id";
     private static final String PREF_FOLDER_NAME = "main_folder_name";
     private static final String PREF_DEVICE_ID = "main_device_id";
+    private static final String PREF_ENHANCEMENT_LEVEL = "main_enhancement_level";
 
     private final List<AudioInputOption> inputs = new ArrayList<>();
     private final List<ReliableSessionStore.Folder> folders = new ArrayList<>();
@@ -74,13 +75,16 @@ public final class MainActivity extends Activity {
     private ProgressBar micLevelBar;
     private Button primaryButton;
     private Button secondaryButton;
+    private Button cancelButton;
     private Button folderButton;
     private Button inputButton;
+    private Button enhancementButton;
     private Button moreButton;
 
     private int selectedDeviceId = AudioInputOption.DEFAULT_DEVICE_ID;
     private String selectedFolderId = "default";
     private String selectedFolderName = "Default";
+    private int selectedEnhancementLevel = RecordingService.DEFAULT_ENHANCEMENT_LEVEL;
     private boolean updatingFolders;
     private boolean inputsLoaded;
     private boolean foldersRefreshedAfterReady;
@@ -145,6 +149,9 @@ public final class MainActivity extends Activity {
         selectedFolderName = guiPreferences.getString(PREF_FOLDER_NAME, "Default");
         selectedDeviceId = guiPreferences.getInt(PREF_DEVICE_ID,
                 AudioInputOption.DEFAULT_DEVICE_ID);
+        selectedEnhancementLevel = clampEnhancementLevel(guiPreferences.getInt(
+                PREF_ENHANCEMENT_LEVEL,
+                RecordingService.DEFAULT_ENHANCEMENT_LEVEL));
         diagnostics = PhoneDiagnostics.get();
         if (diagnostics == null) {
             PhoneDiagnostics.initializeAsync(this, BuildConfig.VOICE_BASE_URL,
@@ -234,13 +241,19 @@ public final class MainActivity extends Activity {
         primaryButton.setOnClickListener(v -> primaryAction());
         secondaryButton = AndroidUi.secondaryButton(this, "Player and files");
         secondaryButton.setOnClickListener(v -> openPlayer());
+        cancelButton = AndroidUi.dangerButton(this, "Cancel recording");
+        cancelButton.setTextSize(13);
+        cancelButton.setMinHeight(AndroidUi.dp(this, 36));
+        cancelButton.setVisibility(View.GONE);
+        cancelButton.setOnClickListener(v -> confirmCancelCurrent());
 
         statusCard.addView(statusTitle);
         statusCard.addView(durationText);
         statusCard.addView(statusDetail);
         statusCard.addView(currentText);
         statusCard.addView(primaryButton, fixedButtonParams(58));
-        statusCard.addView(secondaryButton, fixedButtonParams(50));
+        statusCard.addView(secondaryButton, fixedButtonParams(58));
+        statusCard.addView(cancelButton, fixedButtonParams(42));
         statusCard.addView(routedText);
         statusCard.addView(micLevelText);
         statusCard.addView(micLevelBar, new LinearLayout.LayoutParams(
@@ -263,6 +276,11 @@ public final class MainActivity extends Activity {
         setup.addView(folderButton, weightedButtonParams());
         setup.addView(inputButton, weightedButtonParams());
         content.addView(setup);
+
+        enhancementButton = AndroidUi.secondaryButton(this, "Audio: "
+                + enhancementLabel(selectedEnhancementLevel));
+        enhancementButton.setOnClickListener(v -> showEnhancementPicker());
+        content.addView(enhancementButton, fixedButtonParams(46));
 
         moreButton = AndroidUi.toolbarButton(this, "More");
         moreButton.setOnClickListener(v -> showMoreMenu());
@@ -546,6 +564,8 @@ public final class MainActivity extends Activity {
             folderButton.setText("Folder: " + label);
         }
         if (inputButton != null) inputButton.setText("Microphone: " + selectedInputLabel());
+        if (enhancementButton != null) enhancementButton.setText(
+                "Audio: " + enhancementLabel(selectedEnhancementLevel));
     }
 
     private String selectedInputLabel() {
@@ -606,16 +626,28 @@ public final class MainActivity extends Activity {
         ReliableSessionManifest open = snapshot.openSession;
         if (open == null && !snapshot.recording) return;
         String sessionId = open == null ? snapshot.currentSessionId : open.sessionId;
-        new AlertDialog.Builder(this).setTitle("Finish this recording?")
-                .setMessage("Finish closes this recording permanently. Audio already captured stays safe and synchronization continues in the background.")
-                .setNegativeButton("Back", null)
-                .setPositiveButton("Finish recording", (dialog, which) -> {
-                    diag(PhoneDiagnostics.INFO, "ui.main.finish_pressed", sessionId,
-                            "Finish recording was confirmed",
+        diag(PhoneDiagnostics.INFO, "ui.main.finish_pressed", sessionId,
+                "Finish recording was pressed",
+                PhoneDiagnostics.fields("state", snapshot.state,
+                        "recording", snapshot.recording,
+                        "paused", snapshot.paused));
+        sendAction(RecordingService.ACTION_FINISH, sessionId, false);
+    }
+
+    private void confirmCancelCurrent() {
+        ReliableSessionManifest open = snapshot.openSession;
+        if (open == null && !snapshot.recording) return;
+        String sessionId = open == null ? snapshot.currentSessionId : open.sessionId;
+        new AlertDialog.Builder(this).setTitle("Cancel and delete recording?")
+                .setMessage("Cancel deletes this local recording from the phone. Use Finish if you want to keep it.")
+                .setNegativeButton("Keep recording", null)
+                .setPositiveButton("Delete recording", (dialog, which) -> {
+                    diag(PhoneDiagnostics.WARN, "ui.main.cancel_confirmed", sessionId,
+                            "Cancel recording was confirmed",
                             PhoneDiagnostics.fields("state", snapshot.state,
                                     "recording", snapshot.recording,
                                     "paused", snapshot.paused));
-                    sendAction(RecordingService.ACTION_FINISH, sessionId, false);
+                    sendAction(RecordingService.ACTION_CANCEL, sessionId, false);
                 }).show();
     }
 
@@ -649,6 +681,7 @@ public final class MainActivity extends Activity {
                 "Player and files",
                 "Current status details",
                 "Refresh microphones",
+                "Audio enhancement",
                 "Retry synchronization",
                 "Copy support summary",
                 "Export full diagnostics",
@@ -659,11 +692,49 @@ public final class MainActivity extends Activity {
                     if (which == 0) openPlayer();
                     else if (which == 1) showStatusDetails();
                     else if (which == 2) refreshInputs();
-                    else if (which == 3) retrySynchronization();
-                    else if (which == 4) copySupportSummary();
-                    else if (which == 5) exportFullDiagnostics();
+                    else if (which == 3) showEnhancementPicker();
+                    else if (which == 4) retrySynchronization();
+                    else if (which == 5) copySupportSummary();
+                    else if (which == 6) exportFullDiagnostics();
                     else showAbout();
                 }).setNegativeButton("Back", null).show();
+    }
+
+    private void showEnhancementPicker() {
+        String[] labels = {"Off", "Natural", "Strong", "Maximum"};
+        new AlertDialog.Builder(this).setTitle("Audio enhancement")
+                .setSingleChoiceItems(labels, selectedEnhancementLevel,
+                        (dialog, which) -> {
+                            selectedEnhancementLevel = clampEnhancementLevel(which);
+                            guiPreferences.edit().putInt(PREF_ENHANCEMENT_LEVEL,
+                                    selectedEnhancementLevel).apply();
+                            updateSetupButtons();
+                            diag(PhoneDiagnostics.INFO,
+                                    "ui.audio_enhancement_selected",
+                                    snapshot.currentSessionId,
+                                    "Audio enhancement was selected",
+                                    PhoneDiagnostics.fields("level",
+                                            selectedEnhancementLevel,
+                                            "label", enhancementLabel(
+                                                    selectedEnhancementLevel)));
+                            dialog.dismiss();
+                        })
+                .setNegativeButton("Back", null).show();
+    }
+
+    private static int clampEnhancementLevel(int level) {
+        if (level < 0) return 0;
+        if (level > 3) return 3;
+        return level;
+    }
+
+    private static String enhancementLabel(int level) {
+        switch (clampEnhancementLevel(level)) {
+            case 0: return "Off";
+            case 1: return "Natural";
+            case 3: return "Maximum";
+            default: return "Strong";
+        }
     }
 
     private void retrySynchronization() {
@@ -779,7 +850,9 @@ public final class MainActivity extends Activity {
         Intent intent = new Intent(this, RecordingService.class).setAction(action)
                 .putExtra(RecordingService.EXTRA_DEVICE_ID, selectedDeviceId)
                 .putExtra(RecordingService.EXTRA_FOLDER_ID, selectedFolderId)
-                .putExtra(RecordingService.EXTRA_FOLDER_NAME, selectedFolderName);
+                .putExtra(RecordingService.EXTRA_FOLDER_NAME, selectedFolderName)
+                .putExtra(RecordingService.EXTRA_ENHANCEMENT_LEVEL,
+                        selectedEnhancementLevel);
         if (sessionId != null) intent.putExtra(RecordingService.EXTRA_SESSION_ID, sessionId);
         if (foreground) ContextCompat.startForegroundService(this, intent);
         else startService(intent);
@@ -841,26 +914,21 @@ public final class MainActivity extends Activity {
     }
 
     private void configureSecondaryAction(ReliableSessionManifest open) {
-        if (snapshot.recordingErrorActive && snapshot.recordingErrorAlarmAudible) {
-            secondaryButton.setText("Clear alert");
-            secondaryButton.setTextColor(AndroidUi.RED);
-            secondaryButton.setBackground(AndroidUi.round(Color.WHITE,
-                    AndroidUi.RED, AndroidUi.dp(this, 12)));
-            secondaryButton.setOnClickListener(v -> sendAction(
-                    RecordingService.ACTION_SILENCE_ALARM,
-                    snapshot.currentSessionId, false));
-        } else if (snapshot.recording || open != null) {
+        if (snapshot.recording || open != null) {
             secondaryButton.setText("Finish recording");
             secondaryButton.setTextColor(AndroidUi.RED);
             secondaryButton.setBackground(AndroidUi.round(Color.WHITE,
                     AndroidUi.RED, AndroidUi.dp(this, 12)));
             secondaryButton.setOnClickListener(v -> finishCurrent());
+            cancelButton.setVisibility(View.VISIBLE);
+            cancelButton.setOnClickListener(v -> confirmCancelCurrent());
         } else {
             secondaryButton.setText("Player and files");
             secondaryButton.setTextColor(AndroidUi.BLUE);
             secondaryButton.setBackground(AndroidUi.round(Color.WHITE,
                     Color.rgb(201, 211, 224), AndroidUi.dp(this, 12)));
             secondaryButton.setOnClickListener(v -> openPlayer());
+            cancelButton.setVisibility(View.GONE);
         }
     }
 
