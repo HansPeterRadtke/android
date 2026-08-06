@@ -50,6 +50,8 @@ public final class RecordingService extends Service {
     public static final String ACTION_RESUME = "com.hans.android.voicebutton.RESUME";
     public static final String ACTION_FINISH_AND_START = "com.hans.android.voicebutton.FINISH_AND_START";
     public static final String ACTION_RETRY = "com.hans.android.voicebutton.RETRY";
+    public static final String ACTION_PREPARE_PLAYBACK =
+            "com.hans.android.voicebutton.PREPARE_PLAYBACK";
     public static final String ACTION_RECOVER_AFTER_BOOT =
             "com.hans.android.voicebutton.RECOVER_AFTER_BOOT";
     public static final String ACTION_DELETE_LOCAL = "com.hans.android.voicebutton.DELETE_LOCAL";
@@ -472,7 +474,8 @@ public final class RecordingService extends Service {
         boolean foregroundLaunch = ACTION_START.equals(action)
                 || ACTION_RESUME.equals(action)
                 || ACTION_FINISH_AND_START.equals(action)
-                || ACTION_RECOVER_AFTER_BOOT.equals(action);
+                || ACTION_RECOVER_AFTER_BOOT.equals(action)
+                || ACTION_PREPARE_PLAYBACK.equals(action);
         if (foregroundLaunch) ensureForeground();
         try {
             serviceExecutor.execute(() -> executeServiceAction(action, deviceId,
@@ -505,6 +508,8 @@ public final class RecordingService extends Service {
                 finishRecording(sessionId);
             } else if (ACTION_RETRY.equals(action)) {
                 retrySynchronizationNow("legacy_retry_action");
+            } else if (ACTION_PREPARE_PLAYBACK.equals(action)) {
+                prepareRecordingPlayback(sessionId);
             } else if (ACTION_RECOVER_AFTER_BOOT.equals(action)) {
                 diag(PhoneDiagnostics.INFO, "service.boot_recovery_checked",
                         currentSessionId,
@@ -563,6 +568,52 @@ public final class RecordingService extends Service {
             diagError("upload.manual_retry_queue_failed", null,
                     "Queueing synchronization retry", failure,
                     PhoneDiagnostics.fields("state", snapshot.state));
+        }
+    }
+
+    private void prepareRecordingPlayback(String sessionId)
+            throws IOException {
+        if (store == null) throw new IOException(
+                "Recording storage is not ready");
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            throw new IOException("Recording identity is missing");
+        }
+        ReliableSessionManifest manifest = store.load(sessionId);
+        File finalFile = store.finalMp3File(sessionId);
+        RecordingPlaybackPolicy.Action action = RecordingPlaybackPolicy.decide(
+                manifest, finalFile.isFile() && finalFile.length() > 0L,
+                recorder.isRecording());
+        diag(PhoneDiagnostics.INFO, "player.prepare_requested", sessionId,
+                "A playable local recording was requested",
+                PhoneDiagnostics.fields("policy_action", action.name(),
+                        "recording_finished", manifest.recordingFinished,
+                        "conversion_finished", manifest.conversionFinished,
+                        "segment_count", manifest.segments.size(),
+                        "final_exists", finalFile.isFile(),
+                        "capture_active", recorder.isRecording()));
+        if (action == RecordingPlaybackPolicy.Action.READY) {
+            diag(PhoneDiagnostics.INFO, "player.prepare_ready", sessionId,
+                    "The local recording is already playable",
+                    PhoneDiagnostics.fields("bytes", finalFile.length()));
+            refresh("READY", "The selected recording is ready to play",
+                    false, snapshot.routedInput);
+            return;
+        }
+        if (action == RecordingPlaybackPolicy.Action.BLOCK_CAPTURE) {
+            throw new IOException("Pause or finish microphone capture before preparing another recording for playback");
+        }
+        if (action == RecordingPlaybackPolicy.Action.NO_AUDIO) {
+            throw new IOException("This recording has no durable local audio to play");
+        }
+        ensureForeground();
+        if (action == RecordingPlaybackPolicy.Action.FINALIZE) {
+            refresh("FINISHING", "Preparing the selected recording for playback",
+                    false, snapshot.routedInput);
+            scheduleFinalization(sessionId);
+        } else {
+            refresh("PREPARING", "Creating a safe playable snapshot from durable audio",
+                    false, snapshot.routedInput);
+            schedulePreview(sessionId);
         }
     }
 

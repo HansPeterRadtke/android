@@ -14,6 +14,7 @@ import android.text.style.RelativeSizeSpan;
 import android.text.style.StyleSpan;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -26,6 +27,7 @@ import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.core.content.ContextCompat;
 import androidx.documentfile.provider.DocumentFile;
 
 import com.hans.android.audio.reliable.ReliableSessionManifest;
@@ -62,8 +64,11 @@ public final class AudioLibraryActivity extends Activity {
     private static final String SCROLL_TOP = "library_scroll_top";
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final ExecutorService playbackPreparation =
+            Executors.newSingleThreadExecutor();
     private final LibraryAdapter adapter = new LibraryAdapter();
     private final AtomicInteger loadGeneration = new AtomicInteger();
+    private final AtomicInteger playbackGeneration = new AtomicInteger();
     private final ArrayList<Uri> directoryStack = new ArrayList<>();
     private final ArrayList<String> directoryNameStack = new ArrayList<>();
 
@@ -110,6 +115,8 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        playbackGeneration.incrementAndGet();
+        playbackPreparation.shutdownNow();
         worker.shutdownNow();
         super.onDestroy();
     }
@@ -392,23 +399,126 @@ public final class AudioLibraryActivity extends Activity {
             return;
         }
         if (!item.playable) {
-            Toast.makeText(this, "This recording has no playable local file yet", Toast.LENGTH_LONG).show();
+            if (item.recording != null) {
+                prepareRecordingAndOpen(item);
+            } else {
+                Toast.makeText(this, "This file is not playable",
+                        Toast.LENGTH_LONG).show();
+            }
             return;
         }
+        launchPlayer(item, item.source);
+    }
+
+    private void prepareRecordingAndOpen(LibraryItem item) {
+        ReliableSessionManifest manifest = item.recording;
+        if (manifest == null) return;
+        int generation = playbackGeneration.incrementAndGet();
+        stateText.setText("Preparing " + item.title + " for playback…");
+        Intent service = new Intent(this, RecordingService.class)
+                .setAction(RecordingService.ACTION_PREPARE_PLAYBACK)
+                .putExtra(RecordingService.EXTRA_SESSION_ID,
+                        manifest.sessionId);
+        try {
+            ContextCompat.startForegroundService(this, service);
+        } catch (RuntimeException failure) {
+            stateText.setText("Could not start playback preparation: "
+                    + String.valueOf(failure.getMessage()));
+            return;
+        }
+        playbackPreparation.execute(() -> {
+            ReliableSessionStore browser = null;
+            try {
+                browser = ReliableSessionStore.openForBrowsing(
+                        AudioLibraryActivity.this);
+            } catch (Exception ignored) {}
+            long deadline = SystemClock.elapsedRealtime() + 180_000L;
+            while (generation == playbackGeneration.get()
+                    && !Thread.currentThread().isInterrupted()
+                    && SystemClock.elapsedRealtime() < deadline) {
+                File file = RecordingUi.recordingFile(
+                        AudioLibraryActivity.this, manifest);
+                if (file != null && file.isFile() && file.length() > 0L) {
+                    PlayerSource source = PlayerSource.recording(file,
+                            item.title, file.length(), manifest.sessionId,
+                            manifest.folderId);
+                    runOnUiThread(() -> {
+                        if (generation != playbackGeneration.get()
+                                || isFinishing() || isDestroyed()) return;
+                        stateText.setText("Opening " + item.title);
+                        launchPlayer(item, source);
+                    });
+                    return;
+                }
+                try {
+                    ReliableSessionManifest latest = browser == null
+                            ? null : browser.load(manifest.sessionId);
+                    if (latest != null && "ERROR".equals(latest.state)
+                            && latest.error != null
+                            && !latest.error.trim().isEmpty()) {
+                        String exact = latest.error.trim();
+                        runOnUiThread(() -> {
+                            if (generation != playbackGeneration.get()
+                                    || isFinishing() || isDestroyed()) return;
+                            stateText.setText("Could not prepare playback: "
+                                    + exact);
+                        });
+                        return;
+                    }
+                } catch (Exception ignored) {}
+                try {
+                    Thread.sleep(250L);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            runOnUiThread(() -> {
+                if (generation == playbackGeneration.get()
+                        && !isFinishing() && !isDestroyed()) {
+                    stateText.setText("Playback preparation did not complete; local durable audio remains preserved");
+                }
+            });
+        });
+    }
+
+    private void launchPlayer(LibraryItem selected,
+                              PlayerSource selectedSource) {
+        if (selectedSource == null) return;
         Intent intent = new Intent(this, PlayerActivity.class);
-        item.source.put(intent);
-        ArrayList<String> uris = new ArrayList<>(), titles = new ArrayList<>(), kinds = new ArrayList<>(), sessions = new ArrayList<>(), folders = new ArrayList<>();
+        selectedSource.put(intent);
+        ArrayList<String> uris = new ArrayList<>();
+        ArrayList<String> titles = new ArrayList<>();
+        ArrayList<String> kinds = new ArrayList<>();
+        ArrayList<String> sessions = new ArrayList<>();
+        ArrayList<String> folders = new ArrayList<>();
         ArrayList<Long> byteList = new ArrayList<>();
         int queueIndex = -1;
         for (LibraryItem candidate : adapter.items()) {
-            if (!candidate.directory && candidate.playable && candidate.source != null) {
-                if (candidate == item) queueIndex = uris.size();
-                uris.add(candidate.source.uri.toString()); titles.add(candidate.source.title);
-                kinds.add(candidate.source.kind); sessions.add(candidate.source.sessionId);
-                folders.add(candidate.source.folderId); byteList.add(candidate.source.bytes);
+            PlayerSource source = candidate == selected
+                    ? selectedSource : candidate.source;
+            if (!candidate.directory && source != null
+                    && (candidate == selected || candidate.playable)) {
+                if (candidate == selected) queueIndex = uris.size();
+                uris.add(source.uri.toString());
+                titles.add(source.title);
+                kinds.add(source.kind);
+                sessions.add(source.sessionId);
+                folders.add(source.folderId);
+                byteList.add(source.bytes);
             }
         }
-        long[] bytes = new long[byteList.size()]; for (int i=0;i<bytes.length;i++) bytes[i]=byteList.get(i);
+        if (queueIndex < 0) {
+            queueIndex = 0;
+            uris.add(selectedSource.uri.toString());
+            titles.add(selectedSource.title);
+            kinds.add(selectedSource.kind);
+            sessions.add(selectedSource.sessionId);
+            folders.add(selectedSource.folderId);
+            byteList.add(selectedSource.bytes);
+        }
+        long[] bytes = new long[byteList.size()];
+        for (int i = 0; i < bytes.length; i++) bytes[i] = byteList.get(i);
         intent.putStringArrayListExtra(PlayerActivity.EXTRA_QUEUE_URIS, uris);
         intent.putStringArrayListExtra(PlayerActivity.EXTRA_QUEUE_TITLES, titles);
         intent.putStringArrayListExtra(PlayerActivity.EXTRA_QUEUE_KINDS, kinds);

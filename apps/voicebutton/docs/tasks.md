@@ -66,3 +66,6 @@ Version 0.32 makes microphone capture loss-averse and isolated. While recording,
 
 
 Version 0.34 replaces full-manifest mobile reconciliation with Jetson's compact durable-status protocol. It reconciles all already-durable chunks before uploading, batches local remote-state updates into one durable manifest transaction, requests compact commit acknowledgements, and keeps polling separately until the canonical final transcript is complete.
+
+
+Version 0.35 repairs library playback and result visibility. Tapping a recording with durable source audio but no final MP3 now requests the existing protected service conversion pipeline, waits for atomic publication, and opens PlayerActivity automatically. Conversion is refused while microphone capture is active. The paired Jetson receiver exports only canonical Large-v3 transcripts in the visible text tree; provisional streaming text remains internal.
