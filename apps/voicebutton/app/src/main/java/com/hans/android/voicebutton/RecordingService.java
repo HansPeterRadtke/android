@@ -639,6 +639,8 @@ public final class RecordingService extends Service {
                             "recording", true));
             return;
         }
+        ReliableUploader uploaderValue = uploader;
+        if (uploaderValue != null) uploaderValue.clearQuarantines();
         restartUploader(reason);
         refresh("RECONCILING",
                 "Restarted synchronization and checking Jetson durable offsets",
@@ -702,7 +704,11 @@ public final class RecordingService extends Service {
                 .append(" recording_error=").append(value.recordingErrorActive).append('\n');
         out.append("status=").append(limit(value.explanation, 400)).append('\n');
         out.append("microphone=").append(limit(value.routedInput, 240))
-                .append(" signal=").append(value.inputSignalDetected).append('\n');
+                .append(" signal=").append(value.inputSignalDetected)
+                .append(" level_permille=").append(value.inputLevelPermille)
+                .append(" peak_dbfs=").append(String.format(java.util.Locale.US, "%.1f", value.inputPeakDbfs))
+                .append(" rms_dbfs=").append(String.format(java.util.Locale.US, "%.1f", value.inputRmsDbfs))
+                .append(System.lineSeparator());
         out.append("duration_ms=").append(value.durationMs)
                 .append(" local_bytes=").append(value.localBytes).append('\n');
         out.append("sync_bytes=").append(value.uploadDurableBytes).append('/')

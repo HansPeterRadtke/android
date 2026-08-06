@@ -15,11 +15,16 @@ final class MainScreenText {
                 progressPermille / 10.0f, RecordingUi.formatBytes(pendingBytes));
     }
 
-    static String microphone(boolean recording, boolean signalDetected) {
-        if (!recording) return "Microphone signal: not recording";
+    static String microphone(boolean recording, boolean signalDetected,
+                             int levelPermille, float rmsDbfs,
+                             float peakDbfs) {
+        if (!recording) return "Microphone: not recording";
+        int percent = Math.max(0, Math.min(100, Math.round(levelPermille / 10.0f)));
+        String detail = String.format(java.util.Locale.US,
+                "%d%% · peak %.1f dB · rms %.1f dB", percent, peakDbfs, rmsDbfs);
         return signalDetected
-                ? "Microphone signal: detected"
-                : "Microphone signal: quiet — recording continues";
+                ? "Microphone: " + detail
+                : "Microphone: quiet · " + detail + " · recording continues";
     }
 
     static String localProtection(String folderName, boolean open) {

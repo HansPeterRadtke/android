@@ -715,8 +715,27 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                     settings.skipForward, settings.autoplay);
         }
 
-        void playPause(){if(service!=null)service.playPause();}
-        void play(){if(service!=null)service.play();}
+        void playPause(){
+            if (shouldOpenForPlay()) {
+                open(activeSource.uri, true, settings.speed, settings.volume,
+                        settings.muted, settings.loop);
+                return;
+            }
+            if(service!=null)service.playPause();
+        }
+        void play(){
+            if (shouldOpenForPlay()) {
+                open(activeSource.uri, true, settings.speed, settings.volume,
+                        settings.muted, settings.loop);
+                return;
+            }
+            if(service!=null)service.play();
+        }
+        private boolean shouldOpenForPlay(){
+            return originalSource != null && activeSource != null
+                    && (service == null || !service.hasSource()
+                    || !playerSnapshot.error.isEmpty());
+        }
         void pause(){if(service!=null)service.pause();}
         void stop(){if(service!=null)service.stopPlayback();}
         void seek(long value){if(service!=null)service.seekPhysical(value);}

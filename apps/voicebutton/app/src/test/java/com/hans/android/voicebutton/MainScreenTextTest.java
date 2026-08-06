@@ -17,7 +17,11 @@ public class MainScreenTextTest {
     }
 
     @Test public void quietSignalIsExplicitlyStillRecording() {
-        assertTrue(MainScreenText.microphone(true, false).contains("recording continues"));
+        String text = MainScreenText.microphone(true, false,
+                123, -36.5f, -18.0f);
+        assertTrue(text.contains("recording continues"));
+        assertTrue(text.contains("12%"));
+        assertTrue(text.contains("peak -18.0 dB"));
     }
     @Test public void overviewStateDoesNotExposeUploaderDebugNoise() {
         String value = MainScreenText.stateSummary("SYNCHRONIZING", false, false,

@@ -900,7 +900,9 @@ public final class MainActivity extends Activity {
         String microphone = snapshot.recording ? snapshot.routedInput : selectedInputLabel();
         setTextIfChanged(routedText, "Microphone: " + microphone);
         setTextIfChanged(micLevelText, MainScreenText.microphone(
-                snapshot.recording, snapshot.inputSignalDetected));
+                snapshot.recording, snapshot.inputSignalDetected,
+                snapshot.inputLevelPermille, snapshot.inputRmsDbfs,
+                snapshot.inputPeakDbfs));
         int level = snapshot.recording ? snapshot.inputLevelPermille : 0;
         if (Math.abs(micLevelBar.getProgress() - level) >= 8) micLevelBar.setProgress(level);
         micLevelBar.setContentDescription(micLevelText.getText());

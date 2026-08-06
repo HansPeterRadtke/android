@@ -12,6 +12,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -130,6 +131,15 @@ public final class ReliableUploader {
 
     public void signal() { synchronized (wake) { wake.notifyAll(); } }
 
+    public void clearQuarantines() {
+        quarantinedSessionIds.clear();
+        if (!lastFailureRetryable) {
+            lastFailureRetryable = true;
+            lastFailure = "";
+        }
+        signal();
+    }
+
     public void onNetworkChanged() {
         client.cancelActiveRequest();
         ensureRunning();
@@ -170,7 +180,15 @@ public final class ReliableUploader {
                 + ", last_progress_wall_ms=" + lastProgressWallMs
                 + ", watchdog_trips=" + watchdogTrips
                 + ", last_failure_retryable=" + lastFailureRetryable
-                + ", last_failure=" + lastFailure;
+                + ", last_failure=" + visibleLastFailure();
+    }
+
+    private String visibleLastFailure() {
+        if (!lastFailure.isEmpty()) return lastFailure;
+        if (!lastFailureRetryable && !quarantinedSessionIds.isEmpty()) {
+            return "older recordings are quarantined until retry";
+        }
+        return "";
     }
 
     private void loop() {
@@ -212,6 +230,7 @@ public final class ReliableUploader {
                         }
                     }
                     List<ReliableSessionManifest> sessions = store.list();
+                    orderForUpload(sessions);
                     for (ReliableSessionManifest manifest : sessions) {
                         if (!running.get()) break;
                         if (completedOnly && !manifest.recordingFinished) continue;
@@ -240,7 +259,7 @@ public final class ReliableUploader {
                         }
                     }
                     retryAttempt = 0;
-                    if (!quarantinedFound) lastFailureRetryable = true;
+                    if (actionable || !quarantinedFound) lastFailureRetryable = true;
                     if (!found) currentOperation = "idle";
                     else if (!actionable && quarantinedFound) {
                         currentOperation = "waiting_quarantined_recordings";
@@ -365,6 +384,32 @@ public final class ReliableUploader {
         return root == null ? failure : root;
     }
 
+    private void orderForUpload(List<ReliableSessionManifest> sessions) {
+        Collections.sort(sessions, new Comparator<ReliableSessionManifest>() {
+            @Override public int compare(ReliableSessionManifest left,
+                                         ReliableSessionManifest right) {
+                int leftQuarantined = quarantinedSessionIds.contains(left.sessionId) ? 1 : 0;
+                int rightQuarantined = quarantinedSessionIds.contains(right.sessionId) ? 1 : 0;
+                if (leftQuarantined != rightQuarantined) return leftQuarantined - rightQuarantined;
+                int leftPriority = uploadPriority(left);
+                int rightPriority = uploadPriority(right);
+                if (leftPriority != rightPriority) return leftPriority - rightPriority;
+                long leftUpdated = Math.max(left.updatedAt, left.createdAt);
+                long rightUpdated = Math.max(right.updatedAt, right.createdAt);
+                int updated = Long.compare(rightUpdated, leftUpdated);
+                if (updated != 0) return updated;
+                return left.sessionId.compareTo(right.sessionId);
+            }
+        });
+    }
+
+    private static int uploadPriority(ReliableSessionManifest manifest) {
+        if (hasPendingAudio(manifest)) return 0;
+        if (needsTransferWork(manifest)) return 1;
+        if (needsWork(manifest)) return 2;
+        return 3;
+    }
+
     private static boolean hasPendingAudio(ReliableSessionManifest manifest) {
         for (ReliableSessionManifest.Segment segment : manifest.segments) {
             if (!segment.remoteAccepted) return true;
@@ -457,7 +502,7 @@ public final class ReliableUploader {
             UploadStallWatchdog watchdog = new UploadStallWatchdog(
                     UploadStallWatchdog.DEFAULT_TIMEOUT_MS, () -> {
                         watchdogTrips++;
-                        lastFailure = "Upload made no durable progress for two hours";
+                        lastFailure = "Upload made no durable progress for two minutes";
                         listener.onDiagnostic("WARN", "upload.no_progress_timeout",
                                 sessionId, lastFailure,
                                 fields("seq", segment.seq,
@@ -479,6 +524,7 @@ public final class ReliableUploader {
                             currentTotalBytes = totalBytes;
                             lastProgressWallMs = System.currentTimeMillis();
                             lastFailure = "";
+                            lastFailureRetryable = true;
                             retryAttempt = 0;
                             store.markRemotePartProgress(sessionId, segment.seq,
                                     durableBytes, serverId, revision);
