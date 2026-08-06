@@ -54,7 +54,8 @@ public final class RecordingUploadWorker extends Worker
                     value.awaitStopped(5000L);
                     return Result.success();
                 }
-                if (value.isPermanentlyPaused()) {
+                if (!value.hasActionableTransferWork()
+                        || value.isPermanentlyPaused()) {
                     value.stop();
                     value.awaitStopped(5000L);
                     return Result.retry();

@@ -50,6 +50,8 @@ public final class RecordingService extends Service {
     public static final String ACTION_RESUME = "com.hans.android.voicebutton.RESUME";
     public static final String ACTION_FINISH_AND_START = "com.hans.android.voicebutton.FINISH_AND_START";
     public static final String ACTION_RETRY = "com.hans.android.voicebutton.RETRY";
+    public static final String ACTION_RECOVER_AFTER_BOOT =
+            "com.hans.android.voicebutton.RECOVER_AFTER_BOOT";
     public static final String ACTION_DELETE_LOCAL = "com.hans.android.voicebutton.DELETE_LOCAL";
     public static final String ACTION_EXIT = "com.hans.android.voicebutton.EXIT";
     public static final String ACTION_SILENCE_ALARM = "com.hans.android.voicebutton.SILENCE_ALARM";
@@ -470,7 +472,7 @@ public final class RecordingService extends Service {
         boolean foregroundLaunch = ACTION_START.equals(action)
                 || ACTION_RESUME.equals(action)
                 || ACTION_FINISH_AND_START.equals(action)
-                || ACTION_RETRY.equals(action);
+                || ACTION_RECOVER_AFTER_BOOT.equals(action);
         if (foregroundLaunch) ensureForeground();
         try {
             serviceExecutor.execute(() -> executeServiceAction(action, deviceId,
@@ -502,10 +504,14 @@ public final class RecordingService extends Service {
             else if (ACTION_FINISH.equals(action) || ACTION_STOP.equals(action)) {
                 finishRecording(sessionId);
             } else if (ACTION_RETRY.equals(action)) {
-                restartUploader("manual_retry");
-                refresh("RECONCILING",
-                        "Restarted the transfer worker and checking Jetson durable offsets",
-                        false, snapshot.routedInput);
+                retrySynchronizationNow("legacy_retry_action");
+            } else if (ACTION_RECOVER_AFTER_BOOT.equals(action)) {
+                diag(PhoneDiagnostics.INFO, "service.boot_recovery_checked",
+                        currentSessionId,
+                        "Boot recovery checked persisted capture continuity",
+                        PhoneDiagnostics.fields("recording",
+                                recorder.isRecording(),
+                                "state", snapshot.state));
             } else if (ACTION_DELETE_LOCAL.equals(action)) deleteLocalFiles();
             else if (ACTION_SILENCE_ALARM.equals(action)) silenceFailureAlarm();
             else if (ACTION_EXIT.equals(action)) shutdownForUserExit("explicit_close");
@@ -533,6 +539,46 @@ public final class RecordingService extends Service {
 
     public void removeStatusListener(StatusListener listener) { if (listener != null) listeners.remove(listener); }
     public Snapshot getSnapshot() { return snapshot; }
+
+    public void retrySynchronization() {
+        try {
+            serviceExecutor.execute(() -> {
+                try {
+                    retrySynchronizationNow("manual_retry");
+                } catch (Exception failure) {
+                    diagError("upload.manual_retry_failed", null,
+                            "Restarting synchronization", failure,
+                            PhoneDiagnostics.fields("recording",
+                                    recorder.isRecording(),
+                                    "state", snapshot.state));
+                    if (!recorder.isRecording()) {
+                        refresh("FAILED", PhoneDiagnostics.exactFailure(
+                                "Restarting synchronization", failure)
+                                + ". Local recordings remain preserved.",
+                                false, snapshot.routedInput);
+                    }
+                }
+            });
+        } catch (RuntimeException failure) {
+            diagError("upload.manual_retry_queue_failed", null,
+                    "Queueing synchronization retry", failure,
+                    PhoneDiagnostics.fields("state", snapshot.state));
+        }
+    }
+
+    private void retrySynchronizationNow(String reason) throws IOException {
+        if (recorder.isRecording()) {
+            diag(PhoneDiagnostics.INFO, "upload.manual_retry_deferred", currentSessionId,
+                    "Synchronization retry was deferred until recording stops",
+                    PhoneDiagnostics.fields("reason", reason,
+                            "recording", true));
+            return;
+        }
+        restartUploader(reason);
+        refresh("RECONCILING",
+                "Restarted synchronization and checking Jetson durable offsets",
+                false, snapshot.routedInput);
+    }
 
     public List<ReliableSessionStore.Folder> listFolders() {
         return store == null ? Collections.singletonList(

@@ -87,7 +87,6 @@ public final class MainActivity extends Activity {
     private RecordingService service;
     private boolean bound;
     private RecordingService.Snapshot snapshot = RecordingService.Snapshot.initial();
-    private String promptedSessionId = "";
     private PhoneDiagnostics diagnostics;
     private SharedPreferences guiPreferences;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -623,7 +622,6 @@ public final class MainActivity extends Activity {
     private void showRecoveryDialog(ReliableSessionManifest interrupted) {
         if (interrupted == null || interrupted.paused
                 || !"INTERRUPTED".equals(interrupted.state) || isFinishing()) return;
-        promptedSessionId = interrupted.sessionId;
         new AlertDialog.Builder(this)
                 .setTitle("Interrupted recording found")
                 .setMessage("About " + RecordingUi.formatDuration(interrupted.totalDurationMs)
@@ -661,11 +659,22 @@ public final class MainActivity extends Activity {
                     if (which == 0) openPlayer();
                     else if (which == 1) showStatusDetails();
                     else if (which == 2) refreshInputs();
-                    else if (which == 3) sendAction(RecordingService.ACTION_RETRY, null, false);
+                    else if (which == 3) retrySynchronization();
                     else if (which == 4) copySupportSummary();
                     else if (which == 5) exportFullDiagnostics();
                     else showAbout();
                 }).setNegativeButton("Back", null).show();
+    }
+
+    private void retrySynchronization() {
+        diag(PhoneDiagnostics.INFO, "ui.synchronization_retry_requested", null,
+                "The user requested synchronization only",
+                PhoneDiagnostics.fields("recording", snapshot.recording,
+                        "state", snapshot.state,
+                        "pending_bytes", snapshot.uploadPendingBytes));
+        RecordingService value = service;
+        if (value != null) value.retrySynchronization();
+        else UploadWorkScheduler.enqueue(this, "manual_retry_without_service");
     }
 
     private void openPlayer() {
@@ -829,13 +838,6 @@ public final class MainActivity extends Activity {
             progressBar.setProgress(snapshot.uploadProgressPermille);
         }
         progressBar.setContentDescription(transferText.getText());
-        if (snapshot.interrupted != null && !snapshot.recording
-                && !snapshot.recordingErrorActive
-                && !"RECOVERING".equals(snapshot.state)
-                && !snapshot.interrupted.sessionId.equals(promptedSessionId)
-                && hasPermission(Manifest.permission.RECORD_AUDIO)
-                && !inputs.isEmpty()) showRecoveryDialog(snapshot.interrupted);
-        if (snapshot.interrupted == null) promptedSessionId = "";
     }
 
     private void configureSecondaryAction(ReliableSessionManifest open) {

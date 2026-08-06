@@ -114,7 +114,7 @@ public final class ReliableUploadClient {
     private final AtomicReference<HttpURLConnection> activeConnection = new AtomicReference<>();
 
     public ReliableUploadClient(String baseUrl) {
-        this(baseUrl, "VoiceButton/0.32 Android");
+        this(baseUrl, "VoiceButton/0.33 Android");
     }
 
     public ReliableUploadClient(String baseUrl, String userAgent) {

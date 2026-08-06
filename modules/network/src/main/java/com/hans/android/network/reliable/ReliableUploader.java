@@ -10,6 +10,7 @@ import com.hans.android.audio.reliable.ReliableSessionStore;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -41,6 +42,8 @@ public final class ReliableUploader {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final Object wake = new Object();
     private final Set<String> remoteFoldersKnown = new HashSet<>();
+    private final Set<String> quarantinedSessionIds =
+            Collections.synchronizedSet(new HashSet<>());
     private Thread thread;
     private volatile String currentOperation = "idle";
     private volatile String currentSessionId = "";
@@ -95,6 +98,22 @@ public final class ReliableUploader {
         return "paused_permanent".equals(currentOperation) && !lastFailureRetryable;
     }
 
+    public boolean hasActionableTransferWork() {
+        try {
+            if (!store.foldersNeedingSync().isEmpty()) return true;
+            for (ReliableSessionManifest manifest : store.list()) {
+                if (completedOnly && !manifest.recordingFinished) continue;
+                if (needsTransferWork(manifest)
+                        && !quarantinedSessionIds.contains(manifest.sessionId)) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+            return true;
+        }
+        return false;
+    }
+
     public boolean hasPendingTransferWork() {
         try {
             if (!store.foldersNeedingSync().isEmpty()) return true;
@@ -146,6 +165,7 @@ public final class ReliableUploader {
                 + ", part=" + currentDurableBytes + "/" + currentTotalBytes
                 + ", adaptive_part_bytes=" + client.currentPartBytes()
                 + ", retry_attempt=" + retryAttempt
+                + ", quarantined_sessions=" + quarantinedSessionIds.size()
                 + ", last_progress_wall_ms=" + lastProgressWallMs
                 + ", watchdog_trips=" + watchdogTrips
                 + ", last_failure_retryable=" + lastFailureRetryable
@@ -164,6 +184,8 @@ public final class ReliableUploader {
             leaseHeld = true;
             while (running.get()) {
                 boolean found = false;
+                boolean actionable = false;
+                boolean quarantinedFound = false;
                 boolean urgentAudio = false;
                 boolean networkUnavailable = false;
                 try {
@@ -171,6 +193,7 @@ public final class ReliableUploader {
                             store.foldersNeedingSync();
                     if (!pendingFolders.isEmpty()) {
                         found = true;
+                        actionable = true;
                         if (!hasNetwork()) {
                             networkUnavailable = true;
                             listener.onState("",
@@ -193,6 +216,11 @@ public final class ReliableUploader {
                         if (completedOnly && !manifest.recordingFinished) continue;
                         if (!needsWork(manifest)) continue;
                         found = true;
+                        if (quarantinedSessionIds.contains(manifest.sessionId)) {
+                            quarantinedFound = true;
+                            continue;
+                        }
+                        actionable = true;
                         urgentAudio |= hasPendingAudio(manifest);
                         if (!hasNetwork()) {
                             networkUnavailable = true;
@@ -200,13 +228,27 @@ public final class ReliableUploader {
                                     "Waiting for network; every local chunk remains queued");
                             break;
                         }
-                        reconcile(manifest);
+                        try {
+                            reconcile(manifest);
+                        } catch (Exception failure) {
+                            if (!running.get() || isRetryableFailure(failure)) {
+                                throw failure;
+                            }
+                            quarantineSession(manifest, failure);
+                            quarantinedFound = true;
+                        }
                     }
                     retryAttempt = 0;
-                    lastFailureRetryable = true;
+                    if (!quarantinedFound) lastFailureRetryable = true;
                     if (!found) currentOperation = "idle";
+                    else if (!actionable && quarantinedFound) {
+                        currentOperation = "waiting_quarantined_recordings";
+                    }
                     waitForSignal(networkUnavailable ? 60_000L
-                            : urgentAudio ? 250L : (found ? 1000L : 1500L));
+                            : urgentAudio ? 250L
+                            : (!actionable && quarantinedFound)
+                            ? PERMANENT_RECHECK_MS
+                            : (found ? 1000L : 1500L));
                 } catch (Exception failure) {
                     if (shouldStopAfterFailure(running.get(), failure)) break;
                     if (Thread.currentThread().isInterrupted()) Thread.interrupted();
@@ -255,6 +297,34 @@ public final class ReliableUploader {
                 if (thread == Thread.currentThread()) running.set(false);
             }
         }
+    }
+
+    private void quarantineSession(ReliableSessionManifest manifest,
+                                   Exception failure) {
+        String sessionId = manifest.sessionId;
+        quarantinedSessionIds.add(sessionId);
+        lastFailureRetryable = false;
+        lastFailure = failure.getClass().getSimpleName() + ": "
+                + String.valueOf(failure.getMessage());
+        currentOperation = "session_quarantined";
+        String exact = "One recording was skipped after a non-retryable "
+                + "synchronization failure; every other recording continues. "
+                + lastFailure;
+        listener.onDiagnostic("ERROR", "upload.session_quarantined",
+                sessionId, exact,
+                fields("retryable", false,
+                        "quarantined_session_count",
+                        quarantinedSessionIds.size(),
+                        "exception_class", failure.getClass().getName(),
+                        "exception_message",
+                        String.valueOf(failure.getMessage())),
+                failure);
+        listener.onState(sessionId, exact);
+        listener.onChanged();
+    }
+
+    static boolean shouldQuarantineSessionFailure(Throwable failure) {
+        return !isRetryableFailure(failure);
     }
 
     static boolean shouldStopAfterFailure(boolean stillRunning, Throwable failure) {

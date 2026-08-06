@@ -24,11 +24,19 @@ public class ReliableUploaderFailurePolicyTest {
                 new ReliableUploadClient.ProtocolException(503, "restart")));
     }
 
-    @Test public void permanentValidationFailurePauses() {
+    @Test public void permanentValidationFailureQuarantinesOnlyThatRecording() {
         assertFalse(ReliableUploader.isRetryableFailure(
                 new ReliableUploadClient.ProtocolException(401, "unauthorized")));
         assertFalse(ReliableUploader.isRetryableFailure(
                 new IllegalStateException("local chunk missing")));
+        assertTrue(ReliableUploader.shouldQuarantineSessionFailure(
+                new ReliableUploadClient.ProtocolException(400,
+                        "one recording rejected")));
+        assertTrue(ReliableUploader.shouldQuarantineSessionFailure(
+                new IllegalStateException("local chunk missing")));
+        assertFalse(ReliableUploader.shouldQuarantineSessionFailure(
+                new ReliableUploadClient.ProtocolException(503,
+                        "server restarting")));
     }
 
     @Test public void explicitStopEndsWorker() {
