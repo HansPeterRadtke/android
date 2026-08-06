@@ -35,4 +35,15 @@ public class MainScreenTextTest {
         org.junit.Assert.assertEquals(first, second);
     }
 
+    @Test public void failureIncidentTextDoesNotExposeAlarmLanguage() {
+        String title = MainScreenText.stateTitle("FAILED", false, false, true);
+        String summary = MainScreenText.stateSummary("FAILED", false, false,
+                true, false);
+        String supportKey = MainScreenText.structureKey("FAILED", false, false,
+                true, false, false, "default", 0, 0);
+        assertFalse(title.toLowerCase(java.util.Locale.US).contains("alarm"));
+        assertFalse(summary.toLowerCase(java.util.Locale.US).contains("alarm"));
+        assertFalse(supportKey.toLowerCase(java.util.Locale.US).contains("alarm"));
+    }
+
 }

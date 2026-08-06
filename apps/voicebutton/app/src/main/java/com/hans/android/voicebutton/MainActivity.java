@@ -842,7 +842,7 @@ public final class MainActivity extends Activity {
 
     private void configureSecondaryAction(ReliableSessionManifest open) {
         if (snapshot.recordingErrorActive && snapshot.recordingErrorAlarmAudible) {
-            secondaryButton.setText("Silence alarm");
+            secondaryButton.setText("Clear alert");
             secondaryButton.setTextColor(AndroidUi.RED);
             secondaryButton.setBackground(AndroidUi.round(Color.WHITE,
                     AndroidUi.RED, AndroidUi.dp(this, 12)));

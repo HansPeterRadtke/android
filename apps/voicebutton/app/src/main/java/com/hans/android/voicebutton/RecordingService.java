@@ -63,7 +63,6 @@ public final class RecordingService extends Service {
     public static final String EXTRA_FOLDER_NAME = "folder_name";
 
     private static final String CHANNEL_ID = "reliable_voice_capture";
-    private static final String ERROR_CHANNEL_ID = "recording_failure_alarm";
     private static final int NOTIFICATION_ID = 4101;
     private static final int STOP_NONE = 0;
     private static final int STOP_PAUSE = 1;
@@ -685,7 +684,7 @@ public final class RecordingService extends Service {
         out.append("state=").append(value.state)
                 .append(" recording=").append(value.recording)
                 .append(" paused=").append(value.paused)
-                .append(" alarm=").append(value.recordingErrorActive).append('\n');
+                .append(" recording_error=").append(value.recordingErrorActive).append('\n');
         out.append("status=").append(limit(value.explanation, 400)).append('\n');
         out.append("microphone=").append(limit(value.routedInput, 240))
                 .append(" signal=").append(value.inputSignalDetected).append('\n');
@@ -1087,7 +1086,11 @@ public final class RecordingService extends Service {
                 refresh("PAUSING", "Pause is already closing the current durable PCM journal", false, "Not recording");
                 return;
             }
-            throw new IllegalStateException("No recording is currently active to pause");
+            currentSessionId = null;
+            refresh("READY", "No active recording was found; pause request was ignored safely",
+                    false, "Not recording");
+            main.post(this::leaveForegroundIfIdle);
+            return;
         }
         stopDisposition = STOP_PAUSE;
         refresh("PAUSING", "Closing and synchronizing the current durable PCM journal", true, snapshot.routedInput);
@@ -2041,9 +2044,9 @@ public final class RecordingService extends Service {
         failureAlarm.start(detail);
         ensureForeground();
         acquireCaptureWakeLock();
-        diag(PhoneDiagnostics.ERROR, "recording.failure_alarm_started", sessionId,
+        diag(PhoneDiagnostics.ERROR, "recording.failure_incident_started", sessionId,
                 detail, PhoneDiagnostics.fields(
-                        "audible", failureAlarm.isAudible(),
+                        "audible", false,
                         "recovery_attempt", recordingRecoveryAttempt));
         publish();
         updateNotification();
@@ -2051,8 +2054,8 @@ public final class RecordingService extends Service {
 
     private void silenceFailureAlarm() {
         failureAlarm.silence();
-        diag(PhoneDiagnostics.WARN, "recording.failure_alarm_silenced",
-                currentSessionId, "The repeating recording failure alarm was silenced; automatic recovery continues",
+        diag(PhoneDiagnostics.WARN, "recording.failure_incident_cleared",
+                currentSessionId, "The recording failure incident was cleared; automatic recovery continues",
                 PhoneDiagnostics.fields("recovery_pending", recordingRecoveryPending,
                         "recovery_attempt", recordingRecoveryAttempt));
         refresh(snapshot.state, snapshot.explanation, snapshot.recording, snapshot.routedInput);
@@ -2193,8 +2196,7 @@ public final class RecordingService extends Service {
         Intent open = new Intent(this, MainActivity.class);
         PendingIntent openIntent = PendingIntent.getActivity(this, 0, open,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        String notificationChannel = failureAlarm.isActive() ? ERROR_CHANNEL_ID : CHANNEL_ID;
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, notificationChannel)
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_voice_button)
                 .setContentTitle(failureAlarm.isActive() ? "RECORDING INTERRUPTED"
                         : snapshot.recording ? "Reliable recording is active"
@@ -2206,17 +2208,8 @@ public final class RecordingService extends Service {
                 .setContentIntent(openIntent)
                 .setOnlyAlertOnce(true)
                 .setOngoing(shouldKeepServiceAlive() || isCriticalForegroundState(snapshot.state))
-                .setCategory(failureAlarm.isActive()
-                        ? NotificationCompat.CATEGORY_ERROR : NotificationCompat.CATEGORY_SERVICE)
-                .setPriority(failureAlarm.isActive()
-                        ? NotificationCompat.PRIORITY_MAX : NotificationCompat.PRIORITY_LOW);
-        if (failureAlarm.isActive() && failureAlarm.isAudible()) {
-            Intent silence = new Intent(RecordingService.this, RecordingService.class)
-                    .setAction(ACTION_SILENCE_ALARM);
-            PendingIntent silenceIntent = PendingIntent.getService(RecordingService.this, 9, silence,
-                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            builder.addAction(0, "Silence alarm", silenceIntent);
-        }
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .setPriority(NotificationCompat.PRIORITY_LOW);
         if (snapshot.recording) {
             Intent pause = new Intent(this, RecordingService.class).setAction(ACTION_PAUSE);
             PendingIntent pauseIntent = PendingIntent.getService(this, 1, pause,
@@ -2257,11 +2250,6 @@ public final class RecordingService extends Service {
                 "Reliable recording and transfer", NotificationManager.IMPORTANCE_LOW);
         channel.setDescription("Protects, compresses, and reconciles recordings");
         manager.createNotificationChannel(channel);
-        NotificationChannel errorChannel = new NotificationChannel(ERROR_CHANNEL_ID,
-                "Recording interruption alarm", NotificationManager.IMPORTANCE_HIGH);
-        errorChannel.setDescription("Urgent repeating alert when microphone recording stops unexpectedly");
-        errorChannel.enableVibration(true);
-        manager.createNotificationChannel(errorChannel);
     }
 
     private void shutdownForUserExit(String reason) {
