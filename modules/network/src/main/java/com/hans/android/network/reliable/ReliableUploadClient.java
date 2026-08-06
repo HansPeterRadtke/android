@@ -72,13 +72,23 @@ public final class ReliableUploadClient {
         public final long manifestRevision;
         public final Map<Integer, RemoteSegment> received;
         public final Map<Integer, Transcript> transcripts;
+        public final int provisionalTranscriptComplete;
+        public final int provisionalTranscriptTotal;
+        public final String finalTranscriptState;
 
         Status(boolean committed, String serverId, long manifestRevision,
                Map<Integer, RemoteSegment> received,
-               Map<Integer, Transcript> transcripts) {
+               Map<Integer, Transcript> transcripts,
+               int provisionalTranscriptComplete,
+               int provisionalTranscriptTotal,
+               String finalTranscriptState) {
             this.committed = committed; this.serverId = serverId;
             this.manifestRevision = manifestRevision;
             this.received = received; this.transcripts = transcripts;
+            this.provisionalTranscriptComplete = provisionalTranscriptComplete;
+            this.provisionalTranscriptTotal = provisionalTranscriptTotal;
+            this.finalTranscriptState = finalTranscriptState == null
+                    ? "NONE" : finalTranscriptState;
         }
     }
 
@@ -114,7 +124,7 @@ public final class ReliableUploadClient {
     private final AtomicReference<HttpURLConnection> activeConnection = new AtomicReference<>();
 
     public ReliableUploadClient(String baseUrl) {
-        this(baseUrl, "VoiceButton/0.33 Android");
+        this(baseUrl, "VoiceButton/0.34 Android");
     }
 
     public ReliableUploadClient(String baseUrl, String userAgent) {
@@ -171,31 +181,9 @@ public final class ReliableUploadClient {
     }
 
     public Status status(ReliableSessionManifest manifest) throws Exception {
-        JSONObject response = getJson("/audio/v2/status?folder=" + encode(manifest.folderId)
-                + "&sid=" + encode(manifest.sessionId));
-        LinkedHashMap<Integer, RemoteSegment> received = new LinkedHashMap<>();
-        JSONArray array = response.optJSONArray("received");
-        if (array != null) for (int i = 0; i < array.length(); i++) {
-            JSONObject item = array.getJSONObject(i);
-            int seq = item.getInt("seq");
-            received.put(seq, new RemoteSegment(seq,
-                    item.optString("sha256", ""), item.optLong("bytes", 0L),
-                    item.optLong("server_received_at_ms", 0L),
-                    item.optLong("server_durable_at_ms", 0L)));
-        }
-        LinkedHashMap<Integer, Transcript> transcripts = new LinkedHashMap<>();
-        JSONArray text = response.optJSONArray("transcripts");
-        if (text != null) for (int i = 0; i < text.length(); i++) {
-            JSONObject item = text.getJSONObject(i);
-            int seq = item.getInt("seq");
-            transcripts.put(seq, new Transcript(seq,
-                    item.optString("state", "PENDING"),
-                    item.optString("text", ""), item.optString("engine", ""),
-                    item.optLong("created_at_ms", 0L), item.optString("error", "")));
-        }
-        return new Status(response.optBoolean("committed", false),
-                response.optString("server_id", ""),
-                response.optLong("manifest_revision", 0L), received, transcripts);
+        JSONObject response = getJson("/audio/v2/sync-status?folder="
+                + encode(manifest.folderId) + "&sid=" + encode(manifest.sessionId));
+        return parseStatus(response);
     }
 
     public Ack uploadSegment(ReliableSessionManifest manifest,
@@ -319,15 +307,23 @@ public final class ReliableUploadClient {
         JSONObject payload = new JSONObject(manifest.canonicalCommitJson());
         payload.put("manifest_sha256", manifest.commitSha256());
         JSONObject response = postJson("/audio/v2/commit?folder=" + encode(manifest.folderId)
-                + "&sid=" + encode(manifest.sessionId), payload);
+                + "&sid=" + encode(manifest.sessionId) + "&compact=1", payload);
         if (!response.optBoolean("committed", false)) {
             throw new ProtocolException(409, "Server did not commit the complete recording");
         }
         return parseStatus(response);
     }
 
-    private Status parseStatus(JSONObject response) throws Exception {
+    static Status parseStatus(JSONObject response) throws Exception {
         LinkedHashMap<Integer, RemoteSegment> received = new LinkedHashMap<>();
+        JSONArray compact = response.optJSONArray("received_compact");
+        if (compact != null) for (int i = 0; i < compact.length(); i++) {
+            JSONArray item = compact.getJSONArray(i);
+            int seq = item.getInt(0);
+            received.put(seq, new RemoteSegment(seq,
+                    item.optString(2, ""), item.optLong(1, 0L),
+                    item.optLong(3, 0L), item.optLong(4, 0L)));
+        }
         JSONArray array = response.optJSONArray("received");
         if (array != null) for (int i = 0; i < array.length(); i++) {
             JSONObject item = array.getJSONObject(i); int seq = item.getInt("seq");
@@ -343,9 +339,26 @@ public final class ReliableUploadClient {
                     item.optString("text", ""), item.optString("engine", ""),
                     item.optLong("created_at_ms", 0L), item.optString("error", "")));
         }
-        return new Status(response.optBoolean("committed", false),
-                response.optString("server_id", ""),
-                response.optLong("manifest_revision", 0L), received, transcripts);
+        JSONObject finalTranscript = response.optJSONObject("final_transcript");
+        String finalState = finalTranscript == null ? "NONE"
+                : finalTranscript.optString("state", "NONE");
+        boolean committed = response.optBoolean("committed", false);
+        if (committed && "COMPLETE".equals(finalState) && !received.isEmpty()) {
+            String finalText = finalTranscript.optString("text", "");
+            String engine = finalTranscript.optString("engine", "");
+            long createdAt = finalTranscript.optLong("created_at_ms", 0L);
+            boolean first = true;
+            for (Integer seq : received.keySet()) {
+                transcripts.put(seq, new Transcript(seq, "COMPLETE",
+                        first ? finalText : "", engine, createdAt, ""));
+                first = false;
+            }
+        }
+        return new Status(committed, response.optString("server_id", ""),
+                response.optLong("manifest_revision", 0L), received, transcripts,
+                response.optInt("provisional_transcript_complete", transcripts.size()),
+                response.optInt("provisional_transcript_total", transcripts.size()),
+                finalState);
     }
 
     public void cancelActiveRequest() {

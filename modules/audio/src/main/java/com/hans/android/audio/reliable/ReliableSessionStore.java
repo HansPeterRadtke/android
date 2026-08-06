@@ -28,6 +28,42 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class ReliableSessionStore {
+    public static final class RemoteChunkState {
+        public final int seq;
+        public final String serverId;
+        public final long revision;
+        public final long receivedAtMs;
+        public final long durableAtMs;
+
+        public RemoteChunkState(int seq, String serverId, long revision,
+                                long receivedAtMs, long durableAtMs) {
+            this.seq = seq;
+            this.serverId = serverId == null ? "" : serverId;
+            this.revision = revision;
+            this.receivedAtMs = receivedAtMs;
+            this.durableAtMs = durableAtMs;
+        }
+    }
+
+    public static final class TranscriptState {
+        public final int seq;
+        public final String state;
+        public final String text;
+        public final String engine;
+        public final long createdAtMs;
+        public final String error;
+
+        public TranscriptState(int seq, String state, String text, String engine,
+                               long createdAtMs, String error) {
+            this.seq = seq;
+            this.state = state == null ? "PENDING" : state;
+            this.text = text == null ? "" : text;
+            this.engine = engine == null ? "" : engine;
+            this.createdAtMs = createdAtMs;
+            this.error = error == null ? "" : error;
+        }
+    }
+
     public static final class Folder {
         public final String id;
         public final String name;
@@ -728,6 +764,77 @@ public final class ReliableSessionStore {
         save(manifest);
     }
 
+    public synchronized void reconcileRemoteState(
+            String sessionId, List<RemoteChunkState> remoteChunks,
+            List<TranscriptState> transcripts, boolean committed) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        boolean changed = false;
+        boolean transcriptChanged = false;
+        if (remoteChunks != null) for (RemoteChunkState remote : remoteChunks) {
+            ReliableSessionManifest.Segment segment = manifest.findSegment(remote.seq);
+            if (segment == null) continue;
+            if (!segment.remoteAccepted
+                    || segment.remotePartialBytes != segment.mp3Bytes
+                    || !segment.remoteServerId.equals(remote.serverId)
+                    || segment.remoteManifestRevision != remote.revision
+                    || segment.remoteReceivedAtMs != remote.receivedAtMs
+                    || segment.remoteDurableAtMs != remote.durableAtMs
+                    || !segment.lastSendError.isEmpty()) {
+                segment.remoteAccepted = true;
+                segment.remotePartialBytes = segment.mp3Bytes;
+                segment.remoteServerId = remote.serverId;
+                segment.remoteManifestRevision = remote.revision;
+                segment.remoteReceivedAtMs = remote.receivedAtMs;
+                segment.remoteDurableAtMs = remote.durableAtMs;
+                segment.lastSendError = "";
+                changed = true;
+            }
+            if (!remote.serverId.isEmpty()
+                    && !manifest.remoteServerId.equals(remote.serverId)) {
+                manifest.remoteServerId = remote.serverId;
+                changed = true;
+            }
+            long nextRevision = Math.max(manifest.remoteManifestRevision,
+                    remote.revision);
+            if (nextRevision != manifest.remoteManifestRevision) {
+                manifest.remoteManifestRevision = nextRevision;
+                changed = true;
+            }
+        }
+        if (transcripts != null) for (TranscriptState update : transcripts) {
+            ReliableSessionManifest.Segment segment = manifest.findSegment(update.seq);
+            if (segment == null) continue;
+            if (!segment.transcriptState.equals(update.state)
+                    || !segment.transcriptText.equals(update.text)
+                    || !segment.transcriptEngine.equals(update.engine)
+                    || segment.transcriptCreatedAtMs != update.createdAtMs
+                    || !segment.transcriptError.equals(update.error)) {
+                segment.transcriptState = update.state;
+                segment.transcriptText = update.text;
+                segment.transcriptEngine = update.engine;
+                segment.transcriptCreatedAtMs = update.createdAtMs;
+                segment.transcriptError = update.error;
+                changed = true;
+                transcriptChanged = true;
+            }
+        }
+        if (committed && (!manifest.remoteCommitted
+                || (manifest.conversionFinished
+                && !"COMPLETE".equals(manifest.state))
+                || !manifest.error.isEmpty())) {
+            manifest.remoteCommitted = true;
+            manifest.state = manifest.conversionFinished ? "COMPLETE" : manifest.state;
+            manifest.error = "";
+            changed = true;
+        }
+        File aggregateTranscript = new File(sessionDir(sessionId), "transcript.txt");
+        if (transcripts != null && !transcripts.isEmpty()
+                && !aggregateTranscript.isFile()) transcriptChanged = true;
+        if (!changed && !transcriptChanged) return;
+        if (changed) save(manifest);
+        if (transcriptChanged) rebuildTranscript(manifest);
+    }
+
     public synchronized void markTranscript(String sessionId, int seq, String state,
                                             String text, String engine, long createdAtMs,
                                             String error) throws IOException {
@@ -1397,8 +1504,11 @@ public final class ReliableSessionStore {
     }
 
     private synchronized void rebuildTranscript(String sessionId) throws IOException {
-        ReliableSessionManifest manifest = load(sessionId);
-        File target = new File(sessionDir(sessionId), "transcript.txt");
+        rebuildTranscript(load(sessionId));
+    }
+
+    private void rebuildTranscript(ReliableSessionManifest manifest) throws IOException {
+        File target = new File(sessionDir(manifest.sessionId), "transcript.txt");
         File temp = new File(target.getAbsolutePath() + ".tmp");
         try (FileOutputStream out = new FileOutputStream(temp)) {
             for (ReliableSessionManifest.Segment segment : manifest.orderedSegments()) {

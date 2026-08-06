@@ -10,6 +10,7 @@ import com.hans.android.audio.reliable.ReliableSessionStore;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -426,6 +427,16 @@ public final class ReliableUploader {
         store.markRemoteDisplayName(sessionId, manifest.displayName);
         manifest = store.load(sessionId);
 
+        listener.onState(sessionId, "Checking Jetson's durable recording progress");
+        ReliableUploadClient.Status status = client.status(manifest);
+        applyStatus(manifest, status);
+        manifest = store.load(sessionId);
+        listener.onState(sessionId, "Jetson has " + manifest.durableRemoteChunkCount()
+                + " of " + manifest.segments.size() + " chunks · provisional transcripts "
+                + status.provisionalTranscriptComplete + " of "
+                + status.provisionalTranscriptTotal + " · final transcript "
+                + status.finalTranscriptState);
+
         for (ReliableSessionManifest.Segment segment : manifest.orderedSegments()) {
             if (!running.get()) return;
             if (segment.remoteAccepted) continue;
@@ -495,7 +506,7 @@ public final class ReliableUploader {
 
         listener.onState(sessionId,
                 "Reconciling durable chunks and transcript chunks");
-        ReliableUploadClient.Status status = client.status(store.load(sessionId));
+        status = client.status(store.load(sessionId));
         applyStatus(store.load(sessionId), status);
         manifest = store.load(sessionId);
         boolean allRemote = true;
@@ -514,7 +525,6 @@ public final class ReliableUploader {
             status = client.commit(manifest);
             applyStatus(manifest, status);
         }
-        if (status.committed) store.markRemoteCommitted(sessionId);
         currentOperation = "idle";
         currentSequence = -1;
         currentDurableBytes = 0L;
@@ -525,6 +535,7 @@ public final class ReliableUploader {
 
     private void applyStatus(ReliableSessionManifest local,
                              ReliableUploadClient.Status status) throws Exception {
+        List<ReliableSessionStore.RemoteChunkState> remoteChunks = new ArrayList<>();
         for (Map.Entry<Integer, ReliableUploadClient.RemoteSegment> entry
                 : status.received.entrySet()) {
             ReliableSessionManifest.Segment segment = local.findSegment(entry.getKey());
@@ -535,16 +546,18 @@ public final class ReliableUploader {
                 throw new ReliableUploadClient.ProtocolException(409,
                         "Server chunk conflict at sequence " + segment.seq);
             }
-            store.markRemoteAccepted(local.sessionId, segment.seq, status.serverId,
-                    status.manifestRevision, remote.receivedAtMs,
-                    remote.durableAtMs);
+            remoteChunks.add(new ReliableSessionStore.RemoteChunkState(
+                    segment.seq, status.serverId, status.manifestRevision,
+                    remote.receivedAtMs, remote.durableAtMs));
         }
+        List<ReliableSessionStore.TranscriptState> transcripts = new ArrayList<>();
         for (ReliableUploadClient.Transcript transcript : status.transcripts.values()) {
-            store.markTranscript(local.sessionId, transcript.seq, transcript.state,
-                    transcript.text, transcript.engine, transcript.createdAtMs,
-                    transcript.error);
+            transcripts.add(new ReliableSessionStore.TranscriptState(
+                    transcript.seq, transcript.state, transcript.text,
+                    transcript.engine, transcript.createdAtMs, transcript.error));
         }
-        if (status.committed) store.markRemoteCommitted(local.sessionId);
+        store.reconcileRemoteState(local.sessionId, remoteChunks, transcripts,
+                status.committed);
     }
 
     private boolean hasNetwork() {

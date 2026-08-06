@@ -63,3 +63,6 @@ Version 0.32 limits changes to recording transmission reliability. Uploads now u
 
 
 Version 0.32 makes microphone capture loss-averse and isolated. While recording, Voice Button stops and drains MP3 conversion and network upload, writes each 50 ms microphone block directly into one append-only PCM journal, synchronizes it every second, and keeps a thirty-second AudioRecord buffer. There is no Java audio queue, live MP3 encoder, per-block manifest rewrite, hashing, or upload on the capture path. Pause, finish, failure, and service destruction keep foreground protection until the journal is synchronized and closed. Open and closed PCM journals are recovered after process death; sticky recovery resumes the microphone before conversion or transfer. After capture stops, PCM is encoded, finalized, and handed to the adaptive resumable WorkManager-backed uploader.
+
+
+Version 0.34 replaces full-manifest mobile reconciliation with Jetson's compact durable-status protocol. It reconciles all already-durable chunks before uploading, batches local remote-state updates into one durable manifest transaction, requests compact commit acknowledgements, and keeps polling separately until the canonical final transcript is complete.
