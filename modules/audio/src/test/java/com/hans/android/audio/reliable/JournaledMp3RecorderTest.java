@@ -11,12 +11,12 @@ import com.hans.android.audio.AudioInputOption;
 import org.junit.Test;
 
 public class JournaledMp3RecorderTest {
-    @Test public void classicBluetoothUsesTelephoneRateBeforeWidebandFallback() {
+    @Test public void classicBluetoothRejectsEightKilohertzFallback() {
         AudioInputOption bluetooth = new AudioInputOption(1484,
                 AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
                 "Bluetooth headset microphone — G06-BT",
                 AudioInputOption.Category.BLUETOOTH);
-        assertArrayEquals(new int[] {16000, 8000},
+        assertArrayEquals(new int[] {16000},
                 JournaledMp3Recorder.candidateInputSampleRates(bluetooth));
     }
 
@@ -28,15 +28,15 @@ public class JournaledMp3RecorderTest {
         assertArrayEquals(new int[] {48000, 44100, 32000, 16000},
                 JournaledMp3Recorder.candidateInputSampleRates(builtIn));
     }
-    @Test public void highQualityProfileUsesFortyEightKilohertzAndHighBitrate() {
+    @Test public void speechProfileUsesFortyEightKilohertzAndEfficientBitrate() {
         org.junit.Assert.assertEquals(48000, ReliableSessionManifest.OUTPUT_SAMPLE_RATE);
-        org.junit.Assert.assertEquals(192, Mp3Converter.BITRATE_KBPS);
+        org.junit.Assert.assertEquals(96, Mp3Converter.BITRATE_KBPS);
     }
 
     @Test public void capturePathHasNoLiveEncoderOrJavaAudioQueue() {
         assertFalse(JournaledMp3Recorder.encodesWhileCapturing());
-        assertTrue(JournaledMp3Recorder.captureBufferBytes(48000, 4096)
-                >= 48000 * 2 * 30);
+        org.junit.Assert.assertEquals(48000,
+                JournaledMp3Recorder.captureBufferBytes(48000, 4096));
         org.junit.Assert.assertEquals(1000,
                 JournaledMp3Recorder.syncIntervalMs());
     }

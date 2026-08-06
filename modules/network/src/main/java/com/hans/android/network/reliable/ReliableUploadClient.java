@@ -29,8 +29,8 @@ public final class ReliableUploadClient {
     public static final int MIN_UPLOAD_PART_BYTES = AdaptiveUploadPolicy.MIN_PART_BYTES;
     public static final int INITIAL_UPLOAD_PART_BYTES = AdaptiveUploadPolicy.INITIAL_PART_BYTES;
     public static final int MAX_UPLOAD_PART_BYTES = AdaptiveUploadPolicy.MAX_PART_BYTES;
-    public static final int CONNECT_TIMEOUT_MS = 0;
-    public static final int READ_TIMEOUT_MS = 0;
+    public static final int CONNECT_TIMEOUT_MS = 15_000;
+    public static final int READ_TIMEOUT_MS = 45_000;
 
     public interface ProgressListener {
         void onProgress(long durableBytes, long totalBytes,
@@ -409,13 +409,9 @@ public final class ReliableUploadClient {
     private HttpURLConnection open(String path, String method) throws Exception {
         checkInterrupted();
         HttpURLConnection connection = (HttpURLConnection) new URL(baseUrl + path).openConnection();
-        // No fixed connect or response deadline: a very slow but progressing
-        // mobile request remains valid. The uploader's long no-progress watchdog
-        // and network callbacks cancel genuinely stuck or obsolete connections.
+        // Bound every request. Uploads are resumable, so timing out and retrying
+        // is safer than allowing one half-open connection to block the entire queue.
         connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
-        // No fixed response deadline: a very slow but progressing mobile upload
-        // remains valid. The uploader's long no-progress watchdog and network
-        // callbacks cancel genuinely stuck or obsolete connections.
         connection.setReadTimeout(READ_TIMEOUT_MS);
         connection.setUseCaches(false);
         connection.setRequestMethod(method);

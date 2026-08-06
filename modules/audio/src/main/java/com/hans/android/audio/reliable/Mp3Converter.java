@@ -16,7 +16,7 @@ import java.util.List;
 import java.util.UUID;
 
 public final class Mp3Converter {
-    public static final int BITRATE_KBPS = 192;
+    public static final int BITRATE_KBPS = 96;
     private static final int SAMPLES = 8192;
 
     public File encodeSegment(File wav, File target) throws IOException {
@@ -83,7 +83,6 @@ public final class Mp3Converter {
         short[] samples = new short[SAMPLES];
         byte[] bytes = new byte[SAMPLES * 2];
         byte[] encoded = new byte[7200 + SAMPLES * 3];
-        float encodingGain = 1.0f;
         try (BufferedInputStream in = new BufferedInputStream(new FileInputStream(pcmFile));
              FileOutputStream fileOut = new FileOutputStream(temp);
              BufferedOutputStream out = new BufferedOutputStream(fileOut)) {
@@ -92,25 +91,10 @@ public final class Mp3Converter {
                 int count = readSome(in, bytes);
                 if (count <= 0) break;
                 int sampleCount = count / 2;
-                int blockPeak = 0;
                 for (int i = 0; i < sampleCount; i++) {
                     int lo = bytes[i * 2] & 0xff;
                     int hi = bytes[i * 2 + 1];
-                    short value = (short)((hi << 8) | lo);
-                    samples[i] = value;
-                    int absolute = value == Short.MIN_VALUE ? 32768 : Math.abs((int)value);
-                    if (absolute > blockPeak) blockPeak = absolute;
-                }
-                float blockPeakRatio = blockPeak / 32768.0f;
-                float targetGain = blockPeakRatio <= 0.0001f
-                        ? 4.0f : Math.max(1.0f, Math.min(4.0f, 0.80f / blockPeakRatio));
-                if (targetGain < encodingGain) encodingGain = targetGain;
-                else encodingGain += (targetGain - encodingGain) * 0.10f;
-                for (int i = 0; i < sampleCount; i++) {
-                    int amplified = Math.round(samples[i] * encodingGain);
-                    if (amplified > Short.MAX_VALUE) amplified = Short.MAX_VALUE;
-                    else if (amplified < Short.MIN_VALUE) amplified = Short.MIN_VALUE;
-                    samples[i] = (short)amplified;
+                    samples[i] = (short)((hi << 8) | lo);
                 }
                 int size = lame.encode(samples, samples, sampleCount, encoded);
                 if (size < 0) throw new IOException("LAME PCM recovery failed: " + size);

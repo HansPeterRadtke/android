@@ -42,9 +42,8 @@ public final class JournaledMp3Recorder {
     private static final int SECONDARY_INPUT_SAMPLE_RATE = 44100;
     private static final int SPEECH_INPUT_SAMPLE_RATE = 32000;
     private static final int NARROW_INPUT_SAMPLE_RATE = 16000;
-    private static final int BLUETOOTH_FALLBACK_INPUT_SAMPLE_RATE = 8000;
     private static final int BLOCK_MS = 50;
-    private static final int AUDIO_RECORD_BUFFER_MS = 30_000;
+    private static final int AUDIO_RECORD_BUFFER_MS = 500;
     private static final int PCM_SYNC_MS = 1_000;
     private static final long NO_DATA_GRACE_MS = 3_000L;
 
@@ -94,8 +93,7 @@ public final class JournaledMp3Recorder {
     static int[] candidateInputSampleRates(AudioInputOption input) {
         if (input != null && input.isBluetooth()) {
             if (input.getDeviceType() == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) {
-                return new int[] {NARROW_INPUT_SAMPLE_RATE,
-                        BLUETOOTH_FALLBACK_INPUT_SAMPLE_RATE};
+                return new int[] {NARROW_INPUT_SAMPLE_RATE};
             }
             return new int[] {PREFERRED_INPUT_SAMPLE_RATE,
                     SPEECH_INPUT_SAMPLE_RATE, NARROW_INPUT_SAMPLE_RATE};

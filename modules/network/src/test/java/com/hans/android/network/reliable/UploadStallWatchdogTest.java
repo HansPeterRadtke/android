@@ -25,6 +25,7 @@ public class UploadStallWatchdogTest {
     }
 
     @Test public void defaultTimeoutAllowsExtremelySlowRequests() {
-        assertTrue(UploadStallWatchdog.DEFAULT_TIMEOUT_MS >= 2L * 60L * 60L * 1000L);
+        assertTrue(UploadStallWatchdog.DEFAULT_TIMEOUT_MS >= 60_000L);
+        assertTrue(UploadStallWatchdog.DEFAULT_TIMEOUT_MS <= 5L * 60L * 1000L);
     }
 }
