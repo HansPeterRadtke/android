@@ -549,6 +549,7 @@ public final class MainActivity extends Activity {
                 .putString(PREF_FOLDER_ID, selectedFolderId)
                 .putString(PREF_FOLDER_NAME, selectedFolderName)
                 .putInt(PREF_DEVICE_ID, selectedDeviceId)
+                .putInt(PREF_ENHANCEMENT_LEVEL, selectedEnhancementLevel)
                 .apply();
     }
 

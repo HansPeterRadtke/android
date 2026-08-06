@@ -242,8 +242,8 @@ final class VlcAudioPlayer {
             return;
         }
         if (!requestAudioFocus()) {
-            notifyError("Another application currently owns audio playback");
-            return;
+            engineState = "playing-without-focus";
+            notifyState("playing without exclusive audio focus");
         }
         player.play();
     }

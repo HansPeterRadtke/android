@@ -349,7 +349,7 @@ public final class RecordingService extends Service {
                 PhoneDiagnostics.fields("thread", Thread.currentThread().getName()));
         try {
             UploadWorkCoordinator.awaitServiceOwnership();
-            store = new ReliableSessionStore(this);
+            store = ReliableSessionStore.openForBrowsing(this);
             normalizeInterruptedSessions();
             List<ReliableSessionManifest> sessions = store.list();
             ReliableSessionManifest open = null;
@@ -372,6 +372,7 @@ public final class RecordingService extends Service {
             uploader = new ReliableUploader(this, store,
                     BuildConfig.VOICE_BASE_URL, uploaderListener);
             registerNetworkCallback();
+            scheduleFullStorageRecovery("service_initialized");
             serviceInitialized = true;
             serviceInitializing = false;
             diag(PhoneDiagnostics.INFO, "service.recovery_scan",
@@ -1798,6 +1799,43 @@ public final class RecordingService extends Service {
         }
     }
 
+    private void scheduleFullStorageRecovery(String reason) {
+        main.postDelayed(() -> {
+            ExecutorService executor = conversion;
+            try {
+                executor.execute(() -> {
+                    if (exitRequested.get() || recorder.isRecording() || store == null) {
+                        if (!exitRequested.get()) scheduleFullStorageRecovery("capture_active");
+                        return;
+                    }
+                    synchronized (fileMaintenanceLock) {
+                        if (exitRequested.get() || recorder.isRecording()) return;
+                        try {
+                            long started = SystemClock.elapsedRealtime();
+                            store.recoverAll();
+                            normalizeInterruptedSessions();
+                            signalUploader("deferred_storage_recovery");
+                            diag(PhoneDiagnostics.INFO, "storage.deferred_recovery_complete",
+                                    currentSessionId,
+                                    "Deferred recording storage recovery completed after foreground actions were available",
+                                    PhoneDiagnostics.fields("reason", reason,
+                                            "duration_ms", Math.max(0L,
+                                                    SystemClock.elapsedRealtime() - started)));
+                        } catch (Exception failure) {
+                            diagError("storage.deferred_recovery_failed", currentSessionId,
+                                    "Deferred recording storage recovery", failure,
+                                    PhoneDiagnostics.fields("reason", reason));
+                        }
+                    }
+                });
+            } catch (RuntimeException rejected) {
+                diagError("storage.deferred_recovery_rejected", currentSessionId,
+                        "Queueing deferred recording storage recovery", rejected,
+                        PhoneDiagnostics.fields("reason", reason));
+            }
+        }, 5000L);
+    }
+
     private void normalizeInterruptedSessions() {
         List<ReliableSessionManifest> interrupted = new ArrayList<>();
         for (ReliableSessionManifest manifest : store.list()) if (!manifest.recordingFinished) interrupted.add(manifest);
@@ -1881,7 +1919,7 @@ public final class RecordingService extends Service {
                     File externalCache = getExternalCacheDir();
                     if (externalCache != null) deleteTree(externalCache);
                     checkMaintenanceInterrupted();
-                    store = new ReliableSessionStore(this);
+                    store = ReliableSessionStore.openForBrowsing(this);
                     conversion = Executors.newSingleThreadExecutor();
                     uploader = new ReliableUploader(this, store, BuildConfig.VOICE_BASE_URL, uploaderListener);
                     uploader.start();
@@ -1894,7 +1932,7 @@ public final class RecordingService extends Service {
                 if (exitRequested.get()) return;
                 if (!success) {
                     try {
-                        store = new ReliableSessionStore(this);
+                        store = ReliableSessionStore.openForBrowsing(this);
                         conversion = Executors.newSingleThreadExecutor();
                         uploader = new ReliableUploader(this, store, BuildConfig.VOICE_BASE_URL, uploaderListener);
                         uploader.start();
