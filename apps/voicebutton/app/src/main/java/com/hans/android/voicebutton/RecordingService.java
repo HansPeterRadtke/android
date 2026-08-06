@@ -1012,7 +1012,6 @@ public final class RecordingService extends Service {
 
     private void startCapture(String sessionId, AudioInputOption input)
             throws IOException {
-        suspendDeferredWorkForCapture();
         ensureForeground();
         acquireCaptureWakeLock();
         currentSessionId = sessionId;
@@ -1171,10 +1170,11 @@ public final class RecordingService extends Service {
                             "start_duration_ms", Math.max(0L,
                                     SystemClock.elapsedRealtime()
                                             - recordingStartedAt),
-                            "live_mp3", false,
-                            "upload_during_capture", false));
+                            "live_mp3", true,
+                            "upload_during_capture", true,
+                            "capture_blocked_by_deferred_work", false));
             refresh("RECORDING",
-                    "Microphone audio is being written directly to durable local storage; conversion and transfer are suspended",
+                    "Microphone capture is active immediately; enhanced PCM is protected locally",
                     true, routedDevice);
             main.removeCallbacks(ticker);
             main.post(ticker);
@@ -1281,13 +1281,14 @@ public final class RecordingService extends Service {
                 backgroundWorkCached = true;
                 diag(PhoneDiagnostics.INFO,
                         "recording.pcm_journal_committed", sessionId,
-                        "Direct PCM journal metadata was committed after microphone capture stopped",
+                        "Direct PCM journal metadata was committed; live encoding may run while capture continues",
                         PhoneDiagnostics.fields("seq", seq,
                                 "bytes", pcmJournal.length(),
                                 "duration_ms", durationMs,
                                 "input_sample_rate", inputSampleRate,
                                 "file_name", pcmJournal.getName(),
                                 "attempt", attempt));
+                schedulePcmJournalEncoding(sessionId, seq);
                 return;
             } catch (Exception failure) {
                 last = failure;
@@ -1485,6 +1486,40 @@ public final class RecordingService extends Service {
         });
     }
 
+    private void schedulePcmJournalEncoding(String sessionId, int seq) {
+        conversion.execute(() -> {
+            synchronized (fileMaintenanceLock) {
+            try {
+                ReliableSessionManifest manifest = store.load(sessionId);
+                ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+                if (segment == null || segment.pcmJournalName.isEmpty()) return;
+                if (!segment.mp3Name.isEmpty()
+                        && store.mp3File(sessionId, segment).isFile()
+                        && store.clearVerifiedPcmJournal(sessionId, seq)) {
+                    signalUploader("verified_live_pcm_chunk");
+                    return;
+                }
+                recoverPcmJournalsForSession(sessionId);
+                signalUploader("live_pcm_chunk_encoded");
+                refreshFromWorker("UPLOADING",
+                        "Live audio chunk " + (seq + 1)
+                                + " is compressed and queued for transcription");
+            } catch (Exception failure) {
+                if (exitRequested.get() || failure instanceof java.io.InterruptedIOException
+                        || Thread.currentThread().isInterrupted()) return;
+                String exact = PhoneDiagnostics.exactFailure(
+                        "Live PCM to MP3 conversion", failure)
+                        + ". The PCM journal remains recoverable on the phone.";
+                store.markError(sessionId, exact);
+                diagError("recording.live_pcm_encode_failed", sessionId,
+                        "Live PCM to MP3 conversion", failure,
+                        PhoneDiagnostics.fields("seq", seq));
+                refreshFromWorker("FAILED", exact);
+            }
+            }
+        });
+    }
+
     private void scheduleSegmentEncoding(String sessionId, int seq) {
         conversion.execute(() -> {
             synchronized (fileMaintenanceLock) {
@@ -1660,7 +1695,11 @@ public final class RecordingService extends Service {
                 continue;
             }
             for (ReliableSessionManifest.Segment segment : manifest.orderedSegments()) {
-                if (!segment.wavName.isEmpty() && segment.mp3Name.isEmpty()) scheduleSegmentEncoding(manifest.sessionId, segment.seq);
+                if (!segment.pcmJournalName.isEmpty() && segment.mp3Name.isEmpty()) {
+                    schedulePcmJournalEncoding(manifest.sessionId, segment.seq);
+                } else if (!segment.wavName.isEmpty() && segment.mp3Name.isEmpty()) {
+                    scheduleSegmentEncoding(manifest.sessionId, segment.seq);
+                }
             }
             if (manifest.recordingFinished && !manifest.conversionFinished) scheduleFinalization(manifest.sessionId);
             else if (!manifest.recordingFinished && !manifest.autoResumeRequested) {

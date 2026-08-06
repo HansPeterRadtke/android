@@ -6,6 +6,7 @@ import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.media.audiofx.AutomaticGainControl;
+import android.media.audiofx.NoiseSuppressor;
 import android.os.Process;
 import android.os.SystemClock;
 
@@ -20,10 +21,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Loss-averse microphone capture.
  *
- * The AudioRecord thread writes raw PCM directly to one append-only journal for
- * the entire capture run. It never waits for MP3 encoding, manifest rewrites,
- * diagnostics transmission, or network upload. The journal is synchronized at
- * a bounded interval and is discoverable from its filename after process death.
+ * The AudioRecord thread writes raw PCM directly to short append-only journals.
+ * Rotation makes closed chunks available for background MP3 encoding and upload
+ * while the microphone keeps running. The capture thread itself never waits for
+ * MP3 encoding, diagnostics transmission, or network upload. Journals are
+ * synchronized at a bounded interval and are discoverable from their filenames
+ * after process death.
  */
 public final class JournaledMp3Recorder {
     public interface Listener {
@@ -43,8 +46,9 @@ public final class JournaledMp3Recorder {
     private static final int SPEECH_INPUT_SAMPLE_RATE = 32000;
     private static final int NARROW_INPUT_SAMPLE_RATE = 16000;
     private static final int BLOCK_MS = 50;
-    private static final int AUDIO_RECORD_BUFFER_MS = 500;
+    private static final int AUDIO_RECORD_BUFFER_MS = 200;
     private static final int PCM_SYNC_MS = 1_000;
+    private static final int LIVE_JOURNAL_SEGMENT_MS = 2_000;
     private static final long NO_DATA_GRACE_MS = 3_000L;
 
     private final AtomicBoolean recording = new AtomicBoolean(false);
@@ -115,7 +119,7 @@ public final class JournaledMp3Recorder {
     }
 
     static boolean encodesWhileCapturing() {
-        return false;
+        return true;
     }
 
     private void capture(Context context, AudioInputOption input,
@@ -125,10 +129,13 @@ public final class JournaledMp3Recorder {
         AudioRouteController route = new AudioRouteController(context);
         AudioRecord recorder = null;
         AutomaticGainControl automaticGainControl = null;
+        NoiseSuppressor noiseSuppressor = null;
+        SpeechEnhancer enhancer = new SpeechEnhancer();
         DurablePcmJournal journal = null;
         int seq = -1;
         int inputSampleRate = 0;
         long capturedSamples = 0L;
+        long segmentSamples = 0L;
         long samplesSinceSync = 0L;
         long syncCount = 0L;
         long syncTotalMs = 0L;
@@ -141,6 +148,8 @@ public final class JournaledMp3Recorder {
                     "direct_pcm_journal=true, queue=false, live_mp3=false"
                             + ", block_ms=" + BLOCK_MS
                             + ", pcm_sync_ms=" + PCM_SYNC_MS
+                            + ", live_journal_segment_ms="
+                            + LIVE_JOURNAL_SEGMENT_MS
                             + ", audio_record_buffer_ms="
                             + AUDIO_RECORD_BUFFER_MS);
             stage = "prepare_audio_route";
@@ -154,7 +163,7 @@ public final class JournaledMp3Recorder {
             inputSampleRate = setup.sampleRate;
             activeRecord = recorder;
 
-            stage = "enable_automatic_gain_control";
+            stage = "enable_speech_capture_processing";
             if (AutomaticGainControl.isAvailable()) {
                 try {
                     automaticGainControl = AutomaticGainControl.create(
@@ -175,6 +184,28 @@ public final class JournaledMp3Recorder {
                 }
             } else {
                 listener.onRecorderEvent("capture.automatic_gain_control",
+                        -1, 0L, 0L, "available=false");
+            }
+            if (NoiseSuppressor.isAvailable()) {
+                try {
+                    noiseSuppressor = NoiseSuppressor.create(
+                            recorder.getAudioSessionId());
+                    if (noiseSuppressor != null) {
+                        noiseSuppressor.setEnabled(true);
+                        listener.onRecorderEvent(
+                                "capture.noise_suppressor", -1,
+                                0L, 0L, "available=true, enabled="
+                                        + noiseSuppressor.getEnabled());
+                    }
+                } catch (RuntimeException noiseFailure) {
+                    listener.onRecorderEvent(
+                            "capture.noise_suppressor", -1,
+                            0L, 0L, "available=true, enabled=false, error="
+                                    + noiseFailure.getClass().getSimpleName()
+                                    + ": " + noiseFailure.getMessage());
+                }
+            } else {
+                listener.onRecorderEvent("capture.noise_suppressor",
                         -1, 0L, 0L, "available=false");
             }
 
@@ -227,6 +258,8 @@ public final class JournaledMp3Recorder {
                     inputSampleRate / 10L);
             long syncTarget = Math.max(1L,
                     inputSampleRate * PCM_SYNC_MS / 1000L);
+            long liveSegmentTarget = Math.max(1L,
+                    inputSampleRate * LIVE_JOURNAL_SEGMENT_MS / 1000L);
 
             while (recording.get()) {
                 stage = "read_microphone_samples";
@@ -234,6 +267,7 @@ public final class JournaledMp3Recorder {
                         readBuffer.length, AudioRecord.READ_BLOCKING);
                 if (read > 0) {
                     noDataStarted = 0L;
+                    enhancer.process(readBuffer, read);
                     for (int i = 0; i < read; i++) {
                         short value = readBuffer[i];
                         int absolute = value == Short.MIN_VALUE
@@ -241,9 +275,10 @@ public final class JournaledMp3Recorder {
                         if (absolute > levelPeak) levelPeak = absolute;
                         levelSquareSum += (double)value * (double)value;
                     }
-                    stage = "append_direct_pcm_journal";
+                    stage = "append_enhanced_pcm_journal";
                     journal.append(readBuffer, read);
                     capturedSamples += read;
+                    segmentSamples += read;
                     samplesSinceSync += read;
                     levelSampleCount += read;
 
@@ -272,11 +307,40 @@ public final class JournaledMp3Recorder {
                         if (syncMs >= 1000L) {
                             listener.onRecorderEvent(
                                     "capture.slow_pcm_sync", seq,
-                                    capturedSamples * 2L,
-                                    capturedSamples * 1000L
+                                    segmentSamples * 2L,
+                                    segmentSamples * 1000L
                                             / Math.max(1, inputSampleRate),
                                     "sync_duration_ms=" + syncMs);
                         }
+                    }
+                    if (segmentSamples >= liveSegmentTarget) {
+                        stage = "rotate_live_pcm_journal";
+                        File closedFile = journal.publish();
+                        journal = null;
+                        store.fsyncSessionDirectory(sessionId);
+                        long durationMs = inputSampleRate <= 0 ? 0L
+                                : segmentSamples * 1000L / inputSampleRate;
+                        listener.onJournalCommitted(sessionId, seq,
+                                closedFile, inputSampleRate,
+                                segmentSamples * 2L, durationMs);
+                        listener.onRecorderEvent(
+                                "capture.pcm_journal_rotated", seq,
+                                segmentSamples * 2L, durationMs,
+                                "created_at_ms=" + createdAtMs
+                                        + ", sync_count=" + syncCount
+                                        + ", sync_total_ms=" + syncTotalMs
+                                        + ", sync_max_ms=" + syncMaxMs
+                                        + ", file="
+                                        + closedFile.getName());
+                        seq++;
+                        journal = new DurablePcmJournal(directory, seq,
+                                inputSampleRate);
+                        createdAtMs = System.currentTimeMillis();
+                        segmentSamples = 0L;
+                        samplesSinceSync = 0L;
+                        syncCount = 0L;
+                        syncTotalMs = 0L;
+                        syncMaxMs = 0L;
                     }
                 } else if (!recording.get()) {
                     break;
@@ -324,6 +388,10 @@ public final class JournaledMp3Recorder {
                 try { automaticGainControl.release(); }
                 catch (RuntimeException ignored) {}
             }
+            if (noiseSuppressor != null) {
+                try { noiseSuppressor.release(); }
+                catch (RuntimeException ignored) {}
+            }
             if (recorder != null) {
                 try {
                     if (recorder.getRecordingState()
@@ -339,19 +407,19 @@ public final class JournaledMp3Recorder {
             if (journal != null) {
                 try {
                     stage = "close_direct_pcm_journal";
-                    if (capturedSamples > 0L) {
+                    if (segmentSamples > 0L) {
                         File closedFile = journal.publish();
                         journal = null;
                         store.fsyncSessionDirectory(sessionId);
                         long durationMs = inputSampleRate <= 0 ? 0L
-                                : capturedSamples * 1000L
+                                : segmentSamples * 1000L
                                 / inputSampleRate;
                         listener.onJournalCommitted(sessionId, seq,
                                 closedFile, inputSampleRate,
-                                capturedSamples * 2L, durationMs);
+                                segmentSamples * 2L, durationMs);
                         listener.onRecorderEvent(
                                 "capture.pcm_journal_closed", seq,
-                                capturedSamples * 2L, durationMs,
+                                segmentSamples * 2L, durationMs,
                                 "created_at_ms=" + createdAtMs
                                         + ", sync_count=" + syncCount
                                         + ", sync_total_ms=" + syncTotalMs
@@ -390,9 +458,7 @@ public final class JournaledMp3Recorder {
 
     private static RecordSetup createAudioRecord(AudioInputOption input,
                                                   Listener listener) {
-        int source = input != null && input.isBluetooth()
-                ? MediaRecorder.AudioSource.VOICE_COMMUNICATION
-                : MediaRecorder.AudioSource.MIC;
+        int source = MediaRecorder.AudioSource.VOICE_RECOGNITION;
         StringBuilder failures = new StringBuilder();
         for (int sampleRate : candidateInputSampleRates(input)) {
             int minimum = AudioRecord.getMinBufferSize(sampleRate,
@@ -420,9 +486,7 @@ public final class JournaledMp3Recorder {
                                     + ", allocated_buffer_ms="
                                     + AUDIO_RECORD_BUFFER_MS
                                     + ", source="
-                                    + (source
-                                    == MediaRecorder.AudioSource.MIC
-                                    ? "MIC" : "VOICE_COMMUNICATION"));
+                                    + "VOICE_RECOGNITION");
                     return new RecordSetup(value, sampleRate);
                 }
                 appendFailure(failures, sampleRate
@@ -446,6 +510,61 @@ public final class JournaledMp3Recorder {
                                       String value) {
         if (failures.length() > 0) failures.append("; ");
         failures.append(value);
+    }
+
+    private static final class SpeechEnhancer {
+        private static final double TARGET_RMS = 0.16;
+        private static final double SPEECH_RMS_FLOOR = 0.006;
+        private static final double SPEECH_PEAK_FLOOR = 0.025;
+        private static final double MAX_GAIN = 5.0;
+        private static final double MIN_GAIN = 0.75;
+        private double highPassPreviousInput;
+        private double highPassPreviousOutput;
+        private double gain = 1.0;
+
+        void process(short[] samples, int count) {
+            if (samples == null || count <= 0) return;
+            double squareSum = 0.0;
+            int peak = 0;
+            for (int i = 0; i < count; i++) {
+                int value = samples[i];
+                int absolute = value == Short.MIN_VALUE
+                        ? 32768 : Math.abs(value);
+                if (absolute > peak) peak = absolute;
+                double normalized = value / 32768.0;
+                squareSum += normalized * normalized;
+            }
+            double rms = Math.sqrt(squareSum / Math.max(1, count));
+            double peakRatio = peak / 32768.0;
+            boolean speechLikely = rms >= SPEECH_RMS_FLOOR
+                    || peakRatio >= SPEECH_PEAK_FLOOR;
+            double target = speechLikely
+                    ? TARGET_RMS / Math.max(SPEECH_RMS_FLOOR, rms)
+                    : 1.0;
+            target = Math.max(MIN_GAIN, Math.min(MAX_GAIN, target));
+            double smoothing = target < gain ? 0.35 : 0.08;
+            gain += (target - gain) * smoothing;
+            for (int i = 0; i < count; i++) {
+                double input = samples[i] / 32768.0;
+                double filtered = input - highPassPreviousInput
+                        + 0.995 * highPassPreviousOutput;
+                highPassPreviousInput = input;
+                highPassPreviousOutput = filtered;
+                double value = filtered * gain;
+                if (!speechLikely) value *= 0.45;
+                value = softLimit(value);
+                int pcm = (int)Math.round(value * 32767.0);
+                if (pcm > Short.MAX_VALUE) pcm = Short.MAX_VALUE;
+                else if (pcm < Short.MIN_VALUE) pcm = Short.MIN_VALUE;
+                samples[i] = (short)pcm;
+            }
+        }
+
+        private static double softLimit(double value) {
+            if (value > 0.92) return 0.92 + (value - 0.92) / (1.0 + Math.abs(value - 0.92));
+            if (value < -0.92) return -0.92 + (value + 0.92) / (1.0 + Math.abs(value + 0.92));
+            return value;
+        }
     }
 
     private static final class RecordSetup {

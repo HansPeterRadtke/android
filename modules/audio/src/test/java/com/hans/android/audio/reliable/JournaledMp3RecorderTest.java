@@ -34,8 +34,8 @@ public class JournaledMp3RecorderTest {
     }
 
     @Test public void capturePathHasNoLiveEncoderOrJavaAudioQueue() {
-        assertFalse(JournaledMp3Recorder.encodesWhileCapturing());
-        org.junit.Assert.assertEquals(48000,
+        org.junit.Assert.assertTrue(JournaledMp3Recorder.encodesWhileCapturing());
+        org.junit.Assert.assertEquals(19200,
                 JournaledMp3Recorder.captureBufferBytes(48000, 4096));
         org.junit.Assert.assertEquals(1000,
                 JournaledMp3Recorder.syncIntervalMs());
