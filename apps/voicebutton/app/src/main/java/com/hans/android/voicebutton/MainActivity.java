@@ -725,10 +725,18 @@ public final class MainActivity extends Activity {
     private void copySupportSummary() {
         String report;
         RecordingService value = service;
+        VoiceButtonLocalTrace.log(this, "ui.main.copy_support_tap",
+                "state", snapshot.state,
+                "service_bound", value != null,
+                "player", readLatestPlayerSummary());
         if (value == null) {
             report = "Voice Button support summary\napp_version="
-                    + BuildConfig.VERSION_NAME + "\nservice=not_connected\nstate="
-                    + snapshot.state + "\nstatus=" + snapshot.explanation + "\n";
+                    + BuildConfig.VERSION_NAME + " code=" + BuildConfig.VERSION_CODE
+                    + "\nservice=not_connected\nstate="
+                    + snapshot.state + "\nstatus=" + snapshot.explanation
+                    + "\nplayer=" + readLatestPlayerSummary()
+                    + "\nlocal_trace_tail=\n"
+                    + VoiceButtonLocalTrace.tail(this, 24000) + "\n";
         } else report = value.buildSupportSummary();
         try {
             ClipboardManager clipboard = (ClipboardManager)
@@ -767,8 +775,14 @@ public final class MainActivity extends Activity {
         RecordingService value = service;
         uiWorker.execute(() -> {
             try {
+                VoiceButtonLocalTrace.log(this, "ui.main.export_diagnostics_tap",
+                        "state", snapshot.state,
+                        "service_bound", value != null,
+                        "player", readLatestPlayerSummary());
                 String report = value == null ? "Recording service is not connected.\n"
                         + "Support summary:\n" + snapshot.state + "\n" + snapshot.explanation
+                        + "\nPlayer:\n" + readLatestPlayerSummary()
+                        + "\nLocal trace tail:\n" + VoiceButtonLocalTrace.tail(this, 48000) + "\n"
                         : value.buildDebugReport();
                 try (OutputStream output = getContentResolver().openOutputStream(destination, "w")) {
                     if (output == null) throw new java.io.IOException("Destination could not be opened");

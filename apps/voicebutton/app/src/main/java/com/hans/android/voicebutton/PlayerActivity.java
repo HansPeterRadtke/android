@@ -91,12 +91,10 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             playerBound = true;
             player.attach(playerService);
             playerService.addListener(PlayerActivity.this);
-            if (!player.hasPendingOpen() && !playerService.hasSource()) {
-                ContextCompat.startForegroundService(PlayerActivity.this,
-                        new Intent(PlayerActivity.this,
-                                PlayerPlaybackService.class)
-                                .setAction(PlayerPlaybackService.ACTION_RESTORE));
-            }
+            VoiceButtonLocalTrace.log(PlayerActivity.this,
+                    "ui.player.passive_restore_suppressed",
+                    "pending_open", player.hasPendingOpen(),
+                    "service_has_source", playerService.hasSource());
         }
 
         @Override public void onServiceDisconnected(ComponentName name) {

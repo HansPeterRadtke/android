@@ -591,7 +591,7 @@ public final class PlayerPlaybackService extends Service
         boolean restoredAutoplay = currentSettings != null && currentSettings.autoplay;
         open(checkpoint.original, active, checkpoint.queue,
                 checkpoint.queueIndex, checkpoint.logicalPositionMs,
-                checkpoint.resumeOnOpen || forcePlay, restoredStudio,
+                forcePlay, restoredStudio,
                 restoredStudio ? checkpoint.studioSpeed : 1f,
                 checkpoint.instantSpeed, restoredVolume, restoredMuted,
                 restoredLoop, restoredBack, restoredForward, restoredAutoplay);

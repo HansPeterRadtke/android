@@ -115,6 +115,20 @@ public final class ReliableUploader {
         return false;
     }
 
+    public void clearQuarantine(String reason) {
+        quarantinedSessionIds.clear();
+        lastFailureRetryable = true;
+        lastFailure = "";
+        if ("waiting_quarantined_recordings".equals(currentOperation)
+                || "session_quarantined".equals(currentOperation)) {
+            currentOperation = "idle";
+        }
+        listener.onDiagnostic("INFO", "upload.quarantine_cleared", "",
+                "Upload quarantine was cleared for retry",
+                fields("reason", reason), null);
+        signal();
+    }
+
     public boolean hasPendingTransferWork() {
         try {
             if (!store.foldersNeedingSync().isEmpty()) return true;
@@ -336,8 +350,10 @@ public final class ReliableUploader {
         Throwable root = rootCause(failure);
         if (root instanceof ReliableUploadClient.ProtocolException) {
             int code = ((ReliableUploadClient.ProtocolException)root).httpCode;
-            return code == 408 || code == 409 || code == 425 || code == 429
-                    || code >= 500;
+            String message = root.getMessage() == null ? "" : root.getMessage();
+            if (message.contains("part_body_size_invalid")) return true;
+            return code == 408 || code == 409 || code == 413
+                    || code == 425 || code == 429 || code >= 500;
         }
         if (root instanceof IOException) return true;
         return !(root instanceof IllegalArgumentException)
