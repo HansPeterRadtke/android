@@ -692,6 +692,23 @@ public final class MainActivity extends Activity {
                 .setMessage(message).setPositiveButton("Back", null).show();
     }
 
+    private String readLatestPlayerSummary() {
+        java.io.File file = new java.io.File(new java.io.File(getNoBackupFilesDir(),
+                "player_state"), "latest_summary.txt");
+        if (!file.isFile()) return "unavailable";
+        try (java.io.FileInputStream in = new java.io.FileInputStream(file);
+             java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
+            String value = new String(out.toByteArray(), java.nio.charset.StandardCharsets.UTF_8).trim();
+            return value.isEmpty() ? "empty" : value.replace("\n", " ").replace("\r", " ");
+        } catch (Exception failure) {
+            return "unreadable: " + failure.getClass().getSimpleName()
+                    + ": " + failure.getMessage();
+        }
+    }
+
     private void copySupportSummary() {
         String report;
         RecordingService value = service;

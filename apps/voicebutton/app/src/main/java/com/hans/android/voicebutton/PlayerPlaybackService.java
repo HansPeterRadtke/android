@@ -23,6 +23,8 @@ import android.os.SystemClock;
 import androidx.core.content.ContextCompat;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -35,6 +37,8 @@ public final class PlayerPlaybackService extends Service
             "com.hans.android.voicebutton.PLAYER_ACTIVATE";
     static final String ACTION_RESTORE =
             "com.hans.android.voicebutton.PLAYER_RESTORE";
+    static final String ACTION_RESTORE_PLAY =
+            "com.hans.android.voicebutton.PLAYER_RESTORE_PLAY";
     static final String ACTION_PLAY =
             "com.hans.android.voicebutton.PLAYER_PLAY";
     static final String ACTION_PAUSE =
@@ -194,7 +198,10 @@ public final class PlayerPlaybackService extends Service
             promoteImmediately();
         } else if (ACTION_RESTORE.equals(action)) {
             promoteImmediately();
-            restoreCheckpointAsync();
+            restoreCheckpointAsync(false);
+        } else if (ACTION_RESTORE_PLAY.equals(action)) {
+            promoteImmediately();
+            restoreCheckpointAsync(true);
         } else if (ACTION_PLAY.equals(action)) play();
         else if (ACTION_PAUSE.equals(action)) pause();
         else if (ACTION_PREVIOUS.equals(action)) changeQueue(-1);
@@ -394,7 +401,7 @@ public final class PlayerPlaybackService extends Service
                         "engine", player.technicalSummary()));
     }
 
-    private void restoreCheckpointAsync() {
+    private void restoreCheckpointAsync(boolean forcePlay) {
         checkpointExecutor.execute(() -> {
             PlayerCheckpointStore store = checkpointStore;
             if (store == null) {
@@ -402,11 +409,11 @@ public final class PlayerPlaybackService extends Service
                 checkpointStore = store;
             }
             PlayerCheckpoint checkpoint = store.load();
-            main.post(() -> restoreCheckpoint(checkpoint));
+            main.post(() -> restoreCheckpoint(checkpoint, forcePlay));
         });
     }
 
-    private void restoreCheckpoint(PlayerCheckpoint checkpoint) {
+    private void restoreCheckpoint(PlayerCheckpoint checkpoint, boolean forcePlay) {
         if (closing || checkpoint == null || !checkpoint.hasSource()
                 || activeSource != null) {
             if (activeSource == null) demoteIfIdle();
@@ -429,7 +436,7 @@ public final class PlayerPlaybackService extends Service
         boolean restoredAutoplay = currentSettings != null && currentSettings.autoplay;
         open(checkpoint.original, active, checkpoint.queue,
                 checkpoint.queueIndex, checkpoint.logicalPositionMs,
-                checkpoint.resumeOnOpen, restoredStudio,
+                checkpoint.resumeOnOpen || forcePlay, restoredStudio,
                 restoredStudio ? checkpoint.studioSpeed : 1f,
                 checkpoint.instantSpeed, restoredVolume, restoredMuted,
                 restoredLoop, restoredBack, restoredForward, restoredAutoplay);
@@ -486,7 +493,34 @@ public final class PlayerPlaybackService extends Service
     private void publish() {
         Snapshot value = currentSnapshot();
         snapshot = value;
+        writeLatestPlayerSummaryAsync(value);
         for (Listener listener : listeners) listener.onPlayerSnapshot(value);
+    }
+
+    private void writeLatestPlayerSummaryAsync(Snapshot value) {
+        if (value == null) return;
+        checkpointExecutor.execute(() -> {
+            try {
+                File directory = new File(getNoBackupFilesDir(), "player_state");
+                if (!directory.isDirectory() && !directory.mkdirs()) return;
+                File target = new File(directory, "latest_summary.txt");
+                String text = "state=" + value.state
+                        + " playing=" + value.playing
+                        + " seekable=" + value.seekable
+                        + " time_ms=" + value.physicalTimeMs
+                        + " length_ms=" + value.physicalLengthMs
+                        + " rate=" + value.rate
+                        + " source=" + (value.originalSource == null ? "" : value.originalSource.title)
+                        + " uri=" + (value.activeSource == null ? "" : value.activeSource.uri)
+                        + " error=" + value.error
+                        + " engine=" + value.engineSummary;
+                try (FileOutputStream out = new FileOutputStream(target, false)) {
+                    out.write(text.getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                    out.getFD().sync();
+                }
+            } catch (Exception ignored) {}
+        });
     }
 
     private void promoteImmediately() {

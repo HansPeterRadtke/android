@@ -618,6 +618,17 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         runOnUiThread(() -> applyPlayerSnapshot(value));
     }
 
+    private void requestRestoreAndPlay() {
+        stateText.setText("Restoring last file");
+        ContextCompat.startForegroundService(this,
+                new Intent(this, PlayerPlaybackService.class)
+                        .setAction(PlayerPlaybackService.ACTION_RESTORE_PLAY));
+        if (!playerBound) {
+            bindService(new Intent(this, PlayerPlaybackService.class),
+                    playerConnection, Context.BIND_AUTO_CREATE);
+        }
+    }
+
     private void applyPlayerSnapshot(PlayerPlaybackService.Snapshot value) {
         if (value == null) return;
         if (value.originalSource == null && originalSource != null
@@ -730,16 +741,22 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         }
 
         void playPause(){
+            if (originalSource == null || activeSource == null) {
+                requestRestoreAndPlay();
+                return;
+            }
             if (service == null || !service.hasSource()) {
-                open(activeSource == null ? null : activeSource.uri,
-                        true, settings.speed, settings.volume,
+                open(activeSource.uri, true, settings.speed, settings.volume,
                         settings.muted, settings.loop);
             } else service.playPause();
         }
         void play(){
+            if (originalSource == null || activeSource == null) {
+                requestRestoreAndPlay();
+                return;
+            }
             if (service == null || !service.hasSource()) {
-                open(activeSource == null ? null : activeSource.uri,
-                        true, settings.speed, settings.volume,
+                open(activeSource.uri, true, settings.speed, settings.volume,
                         settings.muted, settings.loop);
             } else service.play();
         }
