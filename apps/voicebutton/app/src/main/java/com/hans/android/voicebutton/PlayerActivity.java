@@ -620,6 +620,11 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
     private void applyPlayerSnapshot(PlayerPlaybackService.Snapshot value) {
         if (value == null) return;
+        if (value.originalSource == null && originalSource != null
+                && player.hasPendingOpen()) {
+            stateText.setText("Opening " + originalSource.kind);
+            return;
+        }
         PlayerSource previous = originalSource;
         playerSnapshot = value;
         originalSource = value.originalSource;
@@ -703,6 +708,15 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             if (service == null) {
                 pendingOpen = true;
                 pendingAutoplay = autoplay;
+                ContextCompat.startForegroundService(PlayerActivity.this,
+                        new Intent(PlayerActivity.this,
+                                PlayerPlaybackService.class)
+                                .setAction(PlayerPlaybackService.ACTION_ACTIVATE));
+                if (!playerBound) {
+                    bindService(new Intent(PlayerActivity.this,
+                                    PlayerPlaybackService.class),
+                            playerConnection, Context.BIND_AUTO_CREATE);
+                }
                 return;
             }
             ContextCompat.startForegroundService(PlayerActivity.this,
@@ -715,8 +729,20 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                     settings.skipForward, settings.autoplay);
         }
 
-        void playPause(){if(service!=null)service.playPause();}
-        void play(){if(service!=null)service.play();}
+        void playPause(){
+            if (service == null || !service.hasSource()) {
+                open(activeSource == null ? null : activeSource.uri,
+                        true, settings.speed, settings.volume,
+                        settings.muted, settings.loop);
+            } else service.playPause();
+        }
+        void play(){
+            if (service == null || !service.hasSource()) {
+                open(activeSource == null ? null : activeSource.uri,
+                        true, settings.speed, settings.volume,
+                        settings.muted, settings.loop);
+            } else service.play();
+        }
         void pause(){if(service!=null)service.pause();}
         void stop(){if(service!=null)service.stopPlayback();}
         void seek(long value){if(service!=null)service.seekPhysical(value);}

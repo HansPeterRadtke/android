@@ -346,94 +346,20 @@ public final class RecordingService extends Service {
                 PhoneDiagnostics.fields("thread", Thread.currentThread().getName()));
         try {
             UploadWorkCoordinator.awaitServiceOwnership();
-            store = new ReliableSessionStore(this);
-            normalizeInterruptedSessions();
-            List<ReliableSessionManifest> sessions = store.list();
-            ReliableSessionManifest open = null;
-            ReliableSessionManifest interrupted = null;
-            for (ReliableSessionManifest value : sessions) {
-                if (!value.recordingFinished
-                        && (open == null || value.createdAt > open.createdAt)) {
-                    open = value;
-                }
-                if (value.isInterrupted()
-                        && (interrupted == null
-                        || value.createdAt > interrupted.createdAt)) {
-                    interrupted = value;
-                }
-            }
-            long localBytes = store.localBytes();
-            localBytesCached = localBytes;
-            lastLocalBytesScanElapsedMs = SystemClock.elapsedRealtime();
-            currentSessionId = open == null ? null : open.sessionId;
+            store = ReliableSessionStore.openForBrowsing(this);
             uploader = new ReliableUploader(this, store,
                     BuildConfig.VOICE_BASE_URL, uploaderListener);
             registerNetworkCallback();
             serviceInitialized = true;
             serviceInitializing = false;
-            diag(PhoneDiagnostics.INFO, "service.recovery_scan",
-                    open == null ? null : open.sessionId,
-                    "Private recording storage recovery scan completed",
-                    PhoneDiagnostics.fields("session_count", sessions.size(),
-                            "open_session", open == null ? "" : open.sessionId,
-                            "open_state", open == null ? "" : open.state,
-                            "open_paused", open != null && open.paused,
-                            "open_finished", open != null
-                                    && open.recordingFinished,
-                            "open_segments", open == null
-                                    ? 0 : open.segments.size(),
-                            "interrupted_session", interrupted == null
-                                    ? "" : interrupted.sessionId,
-                            "local_bytes", localBytes,
-                            "initialization_ms", Math.max(0L,
+            diag(PhoneDiagnostics.INFO, "service.fast_ready", null,
+                    "RecordingService is ready for capture before backlog recovery",
+                    PhoneDiagnostics.fields("initialization_ms", Math.max(0L,
                                     SystemClock.elapsedRealtime() - started),
-                            "thread", Thread.currentThread().getName(),
-                            "capture_first_recovery", true));
-            if (RecordingIsolationPolicy.resumeCaptureBeforeDeferredWork(
-                    interrupted != null,
-                    interrupted != null && interrupted.autoResumeRequested)) {
-                try {
-                    AudioInputOption input = resolveInput(
-                            interrupted.selectedDeviceId);
-                    store.markResumed(interrupted.sessionId,
-                            input.getLabel(), input.getDeviceId());
-                    ensureForeground();
-                    startCapture(interrupted.sessionId, input);
-                    diag(PhoneDiagnostics.WARN,
-                            "recovery.capture_auto_resumed",
-                            interrupted.sessionId,
-                            "Recording automatically resumed before conversion or upload work after an unexpected Android process restart",
-                            PhoneDiagnostics.fields(
-                                    "device_id", input.getDeviceId(),
-                                    "folder_id", interrupted.folderId,
-                                    "deferred_work_started", false));
-                } catch (Exception resumeFailure) {
-                    String exact = PhoneDiagnostics.exactFailure(
-                            "Automatically resuming recording",
-                            resumeFailure);
-                    store.markInterrupted(interrupted.sessionId, exact);
-                    startFailureIncident(interrupted.sessionId, exact);
-                    scheduleAutomaticRecovery(interrupted.sessionId);
-                    refresh("RECOVERING", exact
-                                    + ". Retrying automatically; durable PCM remains safe.",
-                            false, "Not recording");
-                }
-            } else {
-                resumeDeferredWork("service_initialized");
-                if (interrupted != null) {
-                    refresh("RECOVERY REQUIRED",
-                            "An interrupted recording needs your decision",
-                            false, "Not recording");
-                } else if (open != null && open.paused) {
-                    refresh("PAUSED",
-                            "The current recording is safely paused and available for playback",
-                            false, "Not recording");
-                } else {
-                    refresh("READY",
-                            "Ready to create a loss-protected recording",
-                            false, "Not recording");
-                }
-            }
+                            "thread", Thread.currentThread().getName()));
+            refresh("READY", "Ready to create a loss-protected recording",
+                    false, "Not recording");
+            scheduleDeferredStartupRecovery("service_initialized");
         } catch (Exception failure) {
             serviceInitialized = false;
             serviceInitializing = false;
@@ -845,37 +771,13 @@ public final class RecordingService extends Service {
     private synchronized void suspendDeferredWorkForCapture()
             throws IOException {
         ReliableUploader currentUploader = uploader;
-        if (currentUploader != null) {
-            currentUploader.stop();
-            if (!currentUploader.awaitStopped(15_000L)) {
-                throw new IOException(
-                        "The transfer worker could not be drained before microphone capture");
-            }
-        }
-        ExecutorService currentConversion = conversion;
-        currentConversion.shutdownNow();
-        boolean stopped;
-        try {
-            stopped = currentConversion.awaitTermination(
-                    15_000L, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            throw new IOException(
-                    "Interrupted while isolating microphone capture",
-                    interrupted);
-        }
-        if (!stopped) {
-            throw new IOException(
-                    "MP3 maintenance could not be drained before microphone capture");
-        }
-        conversion = Executors.newSingleThreadExecutor();
+        if (currentUploader != null) currentUploader.stop();
         diag(PhoneDiagnostics.INFO,
-                "recording.deferred_work_suspended", currentSessionId,
-                "Conversion and network transfer were fully stopped before microphone capture",
+                "recording.deferred_work_deprioritized", currentSessionId,
+                "Background upload was asked to stop without blocking microphone capture",
                 PhoneDiagnostics.fields(
-                        "uploader_stopped", currentUploader == null
-                                || !currentUploader.isWorkerAlive(),
-                        "conversion_stopped", true));
+                        "uploader_present", currentUploader != null,
+                        "conversion_stopped", false));
     }
 
     private void resumeDeferredWork(String reason) {
@@ -1676,6 +1578,50 @@ public final class RecordingService extends Service {
         }
     }
 
+    private void scheduleDeferredStartupRecovery(String reason) {
+        main.postDelayed(() -> {
+            if (exitRequested.get() || recorder.isRecording() || store == null) return;
+            ExecutorService current = conversion;
+            try {
+                current.execute(() -> {
+                    if (exitRequested.get() || recorder.isRecording() || store == null) return;
+                    synchronized (fileMaintenanceLock) {
+                        if (exitRequested.get() || recorder.isRecording()) return;
+                        try {
+                            long started = SystemClock.elapsedRealtime();
+                            store.recoverAll();
+                            normalizeInterruptedSessions();
+                            localBytesCached = store.localBytes();
+                            lastLocalBytesScanElapsedMs = SystemClock.elapsedRealtime();
+                            diag(PhoneDiagnostics.INFO,
+                                    "service.deferred_recovery_scan", currentSessionId,
+                                    "Private recording storage recovery completed after capture became available",
+                                    PhoneDiagnostics.fields("reason", reason,
+                                            "local_bytes", localBytesCached,
+                                            "duration_ms", Math.max(0L,
+                                                    SystemClock.elapsedRealtime() - started)));
+                            if (!recorder.isRecording()) {
+                                resumeDeferredWork("deferred_recovery_complete");
+                                refresh("READY",
+                                        "Ready to create a loss-protected recording",
+                                        false, "Not recording");
+                            }
+                        } catch (Exception failure) {
+                            diagError("service.deferred_recovery_failed",
+                                    currentSessionId,
+                                    "Deferred storage recovery", failure,
+                                    PhoneDiagnostics.fields("reason", reason));
+                        }
+                    }
+                });
+            } catch (RuntimeException failure) {
+                diagError("service.deferred_recovery_queue_failed", currentSessionId,
+                        "Queueing deferred storage recovery", failure,
+                        PhoneDiagnostics.fields("reason", reason));
+            }
+        }, 5000L);
+    }
+
     private void normalizeInterruptedSessions() {
         List<ReliableSessionManifest> interrupted = new ArrayList<>();
         for (ReliableSessionManifest manifest : store.list()) if (!manifest.recordingFinished) interrupted.add(manifest);
@@ -1888,8 +1834,8 @@ public final class RecordingService extends Service {
         int inputLevelPermille = RecordingFeedback.levelPermille(peakDbfs);
         boolean inputSignalDetected = actualRecording && levelAgeMs < 1500L && peakDbfs > -50f;
         long nowElapsed = SystemClock.elapsedRealtime();
-        if (store != null && (localBytesCached <= 0L
-                || nowElapsed - lastLocalBytesScanElapsedMs >= 30000L)) {
+        if (store != null && !actualRecording
+                && nowElapsed - lastLocalBytesScanElapsedMs >= 30000L) {
             localBytesCached = store.localBytes();
             lastLocalBytesScanElapsedMs = nowElapsed;
         }
