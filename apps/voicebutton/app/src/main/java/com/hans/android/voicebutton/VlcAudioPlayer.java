@@ -176,9 +176,8 @@ final class VlcAudioPlayer {
             List<String> options = new ArrayList<>();
             options.add("--audio-time-stretch");
             options.add("--no-video-title-show");
-            options.add("--file-caching=80");
-            options.add("--network-caching=250");
-            options.add("--live-caching=80");
+            options.add("--file-caching=1000");
+            options.add("--network-caching=1500");
             options.add("--clock-jitter=0");
             libVLC = new LibVLC(app, options);
             player = new MediaPlayer(libVLC);
@@ -213,9 +212,6 @@ final class VlcAudioPlayer {
             media.setHWDecoderEnabled(true, false);
             media.addOption(":no-video");
             media.addOption(":audio-time-stretch");
-            media.addOption(":file-caching=80");
-            media.addOption(":network-caching=250");
-            media.addOption(":live-caching=80");
             player.setMedia(media);
             media.release();
             player.setVolume(muted ? 0 : desiredVolume);
@@ -228,8 +224,7 @@ final class VlcAudioPlayer {
             engineState = "open-failed";
             closeDescriptor();
             notifyError("Could not open audio: "
-                    + failure.getClass().getSimpleName() + ": " + failure.getMessage()
-                    + " · " + technicalSummary());
+                    + failure.getClass().getSimpleName() + ": " + failure.getMessage());
         }
     }
 
@@ -239,8 +234,8 @@ final class VlcAudioPlayer {
             return;
         }
         if (!requestAudioFocus()) {
-            engineState = "playing-without-focus";
-            notifyState("playing without exclusive audio focus");
+            notifyError("Another application currently owns audio playback");
+            return;
         }
         player.play();
     }
@@ -322,8 +317,7 @@ final class VlcAudioPlayer {
                 playing = false;
                 abandonAudioFocus();
                 engineState = "decode-error";
-                notifyError("LibVLC could not decode or play this source · "
-                        + technicalSummary());
+                notifyError("LibVLC could not decode or play this source");
                 break;
             default: break;
         }

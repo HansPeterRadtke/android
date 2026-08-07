@@ -620,15 +620,6 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
     private void applyPlayerSnapshot(PlayerPlaybackService.Snapshot value) {
         if (value == null) return;
-        if (value.originalSource == null && originalSource != null
-                && player.hasPendingOpen()) {
-            playerDiagnostic(PhoneDiagnostics.WARN,
-                    "player.ignored_idle_snapshot_during_pending_open",
-                    originalSource.title,
-                    PhoneDiagnostics.fields("state", value.state,
-                            "engine", value.engineSummary));
-            return;
-        }
         PlayerSource previous = originalSource;
         playerSnapshot = value;
         originalSource = value.originalSource;
@@ -712,59 +703,20 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             if (service == null) {
                 pendingOpen = true;
                 pendingAutoplay = autoplay;
-                playerDiagnostic(PhoneDiagnostics.INFO, "player.pending_open",
-                        originalSource.title,
-                        PhoneDiagnostics.fields("uri", activeSource.uri.toString(),
-                                "autoplay", autoplay));
-                ContextCompat.startForegroundService(PlayerActivity.this,
-                        new Intent(PlayerActivity.this,
-                                PlayerPlaybackService.class)
-                                .setAction(PlayerPlaybackService.ACTION_ACTIVATE));
-                if (!playerBound) {
-                    bindService(new Intent(PlayerActivity.this,
-                                    PlayerPlaybackService.class),
-                            playerConnection, Context.BIND_AUTO_CREATE);
-                }
                 return;
             }
             ContextCompat.startForegroundService(PlayerActivity.this,
                     new Intent(PlayerActivity.this,
                             PlayerPlaybackService.class)
                             .setAction(PlayerPlaybackService.ACTION_ACTIVATE));
-            playerDiagnostic(PhoneDiagnostics.INFO, "player.service_open",
-                    originalSource.title,
-                    PhoneDiagnostics.fields("uri", activeSource.uri.toString(),
-                            "autoplay", autoplay,
-                            "speed", speed,
-                            "queue_index", queueIndex,
-                            "queue_size", queueUris.size()));
             service.open(originalSource, activeSource, queueSources(), queueIndex,
                     0L, autoplay, studioActive, studioSpeed, speed,
                     volume, muted, loop, settings.skipBack,
                     settings.skipForward, settings.autoplay);
         }
 
-        void playPause(){
-            if (shouldOpenForPlay()) {
-                open(activeSource.uri, true, settings.speed, settings.volume,
-                        settings.muted, settings.loop);
-                return;
-            }
-            if(service!=null)service.playPause();
-        }
-        void play(){
-            if (shouldOpenForPlay()) {
-                open(activeSource.uri, true, settings.speed, settings.volume,
-                        settings.muted, settings.loop);
-                return;
-            }
-            if(service!=null)service.play();
-        }
-        private boolean shouldOpenForPlay(){
-            return originalSource != null && activeSource != null
-                    && (service == null || pendingOpen || !service.hasSource()
-                    || !playerSnapshot.error.isEmpty());
-        }
+        void playPause(){if(service!=null)service.playPause();}
+        void play(){if(service!=null)service.play();}
         void pause(){if(service!=null)service.pause();}
         void stop(){if(service!=null)service.stopPlayback();}
         void seek(long value){if(service!=null)service.seekPhysical(value);}

@@ -22,8 +22,8 @@ public class ReliableUploadClientTest {
     }
 
     @Test public void responseReadHasNoFixedDeadline() {
-        assertEquals(15_000, ReliableUploadClient.CONNECT_TIMEOUT_MS);
-        assertEquals(45_000, ReliableUploadClient.READ_TIMEOUT_MS);
+        assertEquals(0, ReliableUploadClient.CONNECT_TIMEOUT_MS);
+        assertEquals(0, ReliableUploadClient.READ_TIMEOUT_MS);
     }
 
     @Test public void parsesRetryAfterSeconds() {

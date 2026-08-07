@@ -14,7 +14,6 @@ import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.io.InterruptedIOException;
 import java.net.HttpURLConnection;
-import java.net.UnknownHostException;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -22,9 +21,6 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.TimeZone;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -33,8 +29,8 @@ public final class ReliableUploadClient {
     public static final int MIN_UPLOAD_PART_BYTES = AdaptiveUploadPolicy.MIN_PART_BYTES;
     public static final int INITIAL_UPLOAD_PART_BYTES = AdaptiveUploadPolicy.INITIAL_PART_BYTES;
     public static final int MAX_UPLOAD_PART_BYTES = AdaptiveUploadPolicy.MAX_PART_BYTES;
-    public static final int CONNECT_TIMEOUT_MS = 15_000;
-    public static final int READ_TIMEOUT_MS = 45_000;
+    public static final int CONNECT_TIMEOUT_MS = 0;
+    public static final int READ_TIMEOUT_MS = 0;
 
     public interface ProgressListener {
         void onProgress(long durableBytes, long totalBytes,
@@ -123,7 +119,6 @@ public final class ReliableUploadClient {
     }
 
     private final String baseUrl;
-    private final List<String> baseUrls;
     private final String userAgent;
     private final AdaptiveUploadPolicy uploadPolicy = new AdaptiveUploadPolicy();
     private final AtomicReference<HttpURLConnection> activeConnection = new AtomicReference<>();
@@ -133,16 +128,10 @@ public final class ReliableUploadClient {
     }
 
     public ReliableUploadClient(String baseUrl, String userAgent) {
-        ArrayList<String> urls = new ArrayList<>();
-        String raw = baseUrl == null ? "" : baseUrl.trim();
-        for (String part : raw.split("[,\n]")) {
-            String value = part == null ? "" : part.trim();
-            while (value.endsWith("/")) value = value.substring(0, value.length() - 1);
-            if (!value.isEmpty() && !urls.contains(value)) urls.add(value);
-        }
-        if (urls.isEmpty()) throw new IllegalArgumentException("Server URL is empty");
-        this.baseUrls = Collections.unmodifiableList(urls);
-        this.baseUrl = urls.get(0);
+        String value = baseUrl == null ? "" : baseUrl.trim();
+        while (value.endsWith("/")) value = value.substring(0, value.length() - 1);
+        if (value.isEmpty()) throw new IllegalArgumentException("Server URL is empty");
+        this.baseUrl = value;
         this.userAgent = userAgent;
     }
 
@@ -378,88 +367,55 @@ public final class ReliableUploadClient {
     }
 
     private JSONObject getJson(String path) throws Exception {
-        Exception lastFailure = null;
-        for (String endpoint : baseUrls) {
-            HttpURLConnection connection = null;
-            try {
-                connection = open(endpoint, path, "GET");
-                return readJsonResponse(connection);
-            } catch (Exception failure) {
-                lastFailure = failure;
-                if (!shouldTryNextEndpoint(failure)) throw failure;
-            } finally {
-                if (connection != null) {
-                    activeConnection.compareAndSet(connection, null);
-                    connection.disconnect();
-                }
-            }
-        }
-        throw lastFailure == null ? new UnknownHostException(baseUrl) : lastFailure;
+        return readJsonResponse(open(path, "GET"));
     }
 
     private JSONObject postBytes(String path, byte[] bytes,
                                  String contentType) throws Exception {
-        Exception lastFailure = null;
-        for (String endpoint : baseUrls) {
-            HttpURLConnection connection = null;
-            try {
-                connection = open(endpoint, path, "POST");
-                connection.setDoOutput(true);
-                connection.setRequestProperty("Content-Type", contentType);
-                connection.setFixedLengthStreamingMode(bytes.length);
-                try (BufferedOutputStream out = new BufferedOutputStream(
-                        connection.getOutputStream())) {
-                    checkInterrupted();
-                    out.write(bytes);
-                    out.flush();
-                }
-                return readJsonResponse(connection);
-            } catch (Exception failure) {
-                lastFailure = failure;
-                if (!shouldTryNextEndpoint(failure)) throw failure;
-            } finally {
-                if (connection != null) {
-                    activeConnection.compareAndSet(connection, null);
-                    connection.disconnect();
-                }
+        HttpURLConnection connection = open(path, "POST");
+        try {
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", contentType);
+            connection.setFixedLengthStreamingMode(bytes.length);
+            try (BufferedOutputStream out = new BufferedOutputStream(
+                    connection.getOutputStream())) {
+                checkInterrupted();
+                out.write(bytes);
+                out.flush();
             }
+            return readJsonResponse(connection);
+        } finally {
+            activeConnection.compareAndSet(connection, null);
+            connection.disconnect();
         }
-        throw lastFailure == null ? new UnknownHostException(baseUrl) : lastFailure;
     }
 
     private JSONObject postJson(String path, JSONObject payload) throws Exception {
         byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
-        Exception lastFailure = null;
-        for (String endpoint : baseUrls) {
-            HttpURLConnection connection = null;
-            try {
-                connection = open(endpoint, path, "POST");
-                connection.setDoOutput(true);
-                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-                connection.setFixedLengthStreamingMode(bytes.length);
-                try (BufferedOutputStream out = new BufferedOutputStream(connection.getOutputStream())) {
-                    checkInterrupted(); out.write(bytes);
-                }
-                return readJsonResponse(connection);
-            } catch (Exception failure) {
-                lastFailure = failure;
-                if (!shouldTryNextEndpoint(failure)) throw failure;
-            } finally {
-                if (connection != null) {
-                    activeConnection.compareAndSet(connection, null);
-                    connection.disconnect();
-                }
+        HttpURLConnection connection = open(path, "POST");
+        try {
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            connection.setFixedLengthStreamingMode(bytes.length);
+            try (BufferedOutputStream out = new BufferedOutputStream(connection.getOutputStream())) {
+                checkInterrupted(); out.write(bytes);
             }
+            return readJsonResponse(connection);
+        } finally {
+            activeConnection.compareAndSet(connection, null); connection.disconnect();
         }
-        throw lastFailure == null ? new UnknownHostException(baseUrl) : lastFailure;
     }
 
-    private HttpURLConnection open(String endpoint, String path, String method) throws Exception {
+    private HttpURLConnection open(String path, String method) throws Exception {
         checkInterrupted();
-        HttpURLConnection connection = (HttpURLConnection) new URL(endpoint + path).openConnection();
-        // Bound every request. Uploads are resumable, so timing out and retrying
-        // is safer than allowing one half-open connection to block the entire queue.
+        HttpURLConnection connection = (HttpURLConnection) new URL(baseUrl + path).openConnection();
+        // No fixed connect or response deadline: a very slow but progressing
+        // mobile request remains valid. The uploader's long no-progress watchdog
+        // and network callbacks cancel genuinely stuck or obsolete connections.
         connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+        // No fixed response deadline: a very slow but progressing mobile upload
+        // remains valid. The uploader's long no-progress watchdog and network
+        // callbacks cancel genuinely stuck or obsolete connections.
         connection.setReadTimeout(READ_TIMEOUT_MS);
         connection.setUseCaches(false);
         connection.setRequestMethod(method);
@@ -467,16 +423,6 @@ public final class ReliableUploadClient {
         connection.setRequestProperty("Accept", "application/json, audio/mpeg");
         activeConnection.set(connection);
         return connection;
-    }
-
-    private static boolean shouldTryNextEndpoint(Exception failure) {
-        if (failure instanceof UnknownHostException) return true;
-        String message = String.valueOf(failure.getMessage()).toLowerCase(Locale.US);
-        return message.contains("unable to resolve host")
-                || message.contains("no address associated")
-                || message.contains("failed to connect")
-                || message.contains("connection refused")
-                || message.contains("timed out");
     }
 
     private JSONObject readJsonResponse(HttpURLConnection connection) throws Exception {

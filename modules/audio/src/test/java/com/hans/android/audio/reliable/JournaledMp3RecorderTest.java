@@ -11,12 +11,12 @@ import com.hans.android.audio.AudioInputOption;
 import org.junit.Test;
 
 public class JournaledMp3RecorderTest {
-    @Test public void classicBluetoothRejectsEightKilohertzFallback() {
+    @Test public void classicBluetoothUsesTelephoneRateBeforeWidebandFallback() {
         AudioInputOption bluetooth = new AudioInputOption(1484,
                 AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
                 "Bluetooth headset microphone — G06-BT",
                 AudioInputOption.Category.BLUETOOTH);
-        assertArrayEquals(new int[] {16000},
+        assertArrayEquals(new int[] {16000, 8000},
                 JournaledMp3Recorder.candidateInputSampleRates(bluetooth));
     }
 
@@ -28,27 +28,17 @@ public class JournaledMp3RecorderTest {
         assertArrayEquals(new int[] {48000, 44100, 32000, 16000},
                 JournaledMp3Recorder.candidateInputSampleRates(builtIn));
     }
-    @Test public void speechProfileUsesFortyEightKilohertzAndEfficientBitrate() {
+    @Test public void highQualityProfileUsesFortyEightKilohertzAndHighBitrate() {
         org.junit.Assert.assertEquals(48000, ReliableSessionManifest.OUTPUT_SAMPLE_RATE);
-        org.junit.Assert.assertEquals(96, Mp3Converter.BITRATE_KBPS);
+        org.junit.Assert.assertEquals(192, Mp3Converter.BITRATE_KBPS);
     }
 
-    @Test public void capturePathRotatesLiveJournalsForBackgroundEncoding() {
-        org.junit.Assert.assertTrue(JournaledMp3Recorder.encodesWhileCapturing());
-        org.junit.Assert.assertEquals(19200,
-                JournaledMp3Recorder.captureBufferBytes(48000, 4096));
+    @Test public void capturePathHasNoLiveEncoderOrJavaAudioQueue() {
+        assertFalse(JournaledMp3Recorder.encodesWhileCapturing());
+        assertTrue(JournaledMp3Recorder.captureBufferBytes(48000, 4096)
+                >= 48000 * 2 * 30);
         org.junit.Assert.assertEquals(1000,
                 JournaledMp3Recorder.syncIntervalMs());
-    }
-
-
-    @Test public void enhancementLevelNamesAreStable() {
-        org.junit.Assert.assertEquals("off", JournaledMp3Recorder.enhancementName(-1));
-        org.junit.Assert.assertEquals("off", JournaledMp3Recorder.enhancementName(0));
-        org.junit.Assert.assertEquals("natural", JournaledMp3Recorder.enhancementName(1));
-        org.junit.Assert.assertEquals("strong", JournaledMp3Recorder.enhancementName(2));
-        org.junit.Assert.assertEquals("maximum", JournaledMp3Recorder.enhancementName(3));
-        org.junit.Assert.assertEquals("maximum", JournaledMp3Recorder.enhancementName(99));
     }
 
 }

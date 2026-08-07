@@ -17,11 +17,7 @@ public class MainScreenTextTest {
     }
 
     @Test public void quietSignalIsExplicitlyStillRecording() {
-        String text = MainScreenText.microphone(true, false,
-                123, -36.5f, -18.0f);
-        assertTrue(text.contains("recording continues"));
-        assertTrue(text.contains("12%"));
-        assertTrue(text.contains("peak -18.0 dB"));
+        assertTrue(MainScreenText.microphone(true, false).contains("recording continues"));
     }
     @Test public void overviewStateDoesNotExposeUploaderDebugNoise() {
         String value = MainScreenText.stateSummary("SYNCHRONIZING", false, false,
@@ -37,17 +33,6 @@ public class MainScreenTextTest {
         String second = MainScreenText.structureKey("RECORDING", true, false,
                 false, false, true, "default", 4, 10);
         org.junit.Assert.assertEquals(first, second);
-    }
-
-    @Test public void failureIncidentTextDoesNotExposeAlarmLanguage() {
-        String title = MainScreenText.stateTitle("FAILED", false, false, true);
-        String summary = MainScreenText.stateSummary("FAILED", false, false,
-                true, false);
-        String supportKey = MainScreenText.structureKey("FAILED", false, false,
-                true, false, false, "default", 0, 0);
-        assertFalse(title.toLowerCase(java.util.Locale.US).contains("alarm"));
-        assertFalse(summary.toLowerCase(java.util.Locale.US).contains("alarm"));
-        assertFalse(supportKey.toLowerCase(java.util.Locale.US).contains("alarm"));
     }
 
 }
