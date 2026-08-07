@@ -267,9 +267,21 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
         LinearLayout transport = row();
         backSkipButton = AndroidUi.secondaryButton(this, "−10s");
-        backSkipButton.setOnClickListener(v -> player.skip(-settings.skipBack));
+        backSkipButton.setOnClickListener(v -> {
+            VoiceButtonLocalTrace.log(this, "ui.player.skip_tap", "direction", "back", "seconds", settings.skipBack, "state", playerSnapshot.state);
+            player.skip(-settings.skipBack);
+        });
         playButton = AndroidUi.primaryButton(this, "Play");
         playButton.setOnClickListener(v -> {
+            VoiceButtonLocalTrace.log(this, "ui.player.play_button_tap",
+                    "snapshot_state", playerSnapshot.state,
+                    "snapshot_playing", playerSnapshot.playing,
+                    "snapshot_error", playerSnapshot.error,
+                    "source", originalSource == null ? "" : originalSource.title,
+                    "active_uri", activeSource == null ? "" : activeSource.uri,
+                    "service_bound", player.isAttached(),
+                    "service_has_source", player.hasSource(),
+                    "pending_open", player.hasPendingOpen());
             if (player.isPlaying()) {
                 playButton.setText("Play");
                 stateText.setText("Pausing");
@@ -280,7 +292,10 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             player.playPause();
         });
         forwardSkipButton = AndroidUi.secondaryButton(this, "+10s");
-        forwardSkipButton.setOnClickListener(v -> player.skip(settings.skipForward));
+        forwardSkipButton.setOnClickListener(v -> {
+            VoiceButtonLocalTrace.log(this, "ui.player.skip_tap", "direction", "forward", "seconds", settings.skipForward, "state", playerSnapshot.state);
+            player.skip(settings.skipForward);
+        });
         transport.addView(backSkipButton, weighted());
         LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(
                 0, AndroidUi.dp(this, 58), 1.35f);
@@ -344,6 +359,13 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         waveformView.setImageDrawable(null);
         titleText.setText(source.title);
         stateText.setText("Opening " + source.kind);
+        VoiceButtonLocalTrace.log(this, "ui.player.open_source",
+                "title", source.title,
+                "kind", source.kind,
+                "uri", source.uri,
+                "autoplay", autoplay,
+                "queue_index", queueIndex,
+                "bytes", source.bytes);
         playerDiagnostic(PhoneDiagnostics.INFO, "player.open", source.title,
                 PhoneDiagnostics.fields("kind", source.kind,
                         "uri_scheme", source.uri.getScheme(),
@@ -640,6 +662,16 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
     private void applyPlayerSnapshot(PlayerPlaybackService.Snapshot value) {
         if (value == null) return;
+        VoiceButtonLocalTrace.log(this, "ui.player.snapshot",
+                "state", value.state,
+                "playing", value.playing,
+                "time", value.physicalTimeMs,
+                "length", value.physicalLengthMs,
+                "rate", value.rate,
+                "source", value.originalSource == null ? "" : value.originalSource.title,
+                "uri", value.activeSource == null ? "" : value.activeSource.uri,
+                "error", value.error,
+                "engine", value.engineSummary);
         if (value.originalSource == null && originalSource != null
                 && player.hasPendingOpen()) {
             stateText.setText("Opening " + originalSource.kind);
@@ -709,6 +741,10 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         private boolean pendingAutoplay;
 
         void attach(PlayerPlaybackService value) {
+            VoiceButtonLocalTrace.log(PlayerActivity.this, "ui.player.service_attach",
+                    "pending_open", pendingOpen,
+                    "source", originalSource == null ? "" : originalSource.title,
+                    "active_uri", activeSource == null ? "" : activeSource.uri);
             service = value;
             if (pendingOpen) {
                 boolean autoplay = pendingAutoplay;
@@ -719,13 +755,30 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             }
         }
 
-        void detach() { service = null; }
+        void detach() {
+            VoiceButtonLocalTrace.log(PlayerActivity.this, "ui.player.service_detach",
+                    "source", originalSource == null ? "" : originalSource.title,
+                    "state", playerSnapshot.state);
+            service = null;
+        }
         boolean hasPendingOpen() { return pendingOpen; }
+        boolean isAttached() { return service != null; }
+        boolean hasSource() { return service != null && service.hasSource(); }
 
         void open(Uri uri, boolean autoplay, float speed, int volume,
                   boolean muted, boolean loop) {
-            if (originalSource == null || activeSource == null) return;
+            if (originalSource == null || activeSource == null) {
+                VoiceButtonLocalTrace.log(PlayerActivity.this, "ui.player.bridge_open_no_source",
+                        "autoplay", autoplay,
+                        "service_bound", service != null,
+                        "pending_open", pendingOpen);
+                return;
+            }
             if (service == null) {
+                VoiceButtonLocalTrace.log(PlayerActivity.this, "ui.player.bridge_open_pending",
+                        "source", originalSource.title,
+                        "uri", activeSource.uri,
+                        "autoplay", autoplay);
                 pendingOpen = true;
                 pendingAutoplay = autoplay;
                 ContextCompat.startForegroundService(PlayerActivity.this,
@@ -743,6 +796,12 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                     new Intent(PlayerActivity.this,
                             PlayerPlaybackService.class)
                             .setAction(PlayerPlaybackService.ACTION_ACTIVATE));
+            VoiceButtonLocalTrace.log(PlayerActivity.this, "ui.player.bridge_service_open",
+                    "source", originalSource.title,
+                    "uri", activeSource.uri,
+                    "autoplay", autoplay,
+                    "speed", speed,
+                    "queue_index", queueIndex);
             service.open(originalSource, activeSource, queueSources(), queueIndex,
                     0L, autoplay, studioActive, studioSpeed, speed,
                     volume, muted, loop, settings.skipBack,
@@ -750,6 +809,13 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         }
 
         void playPause(){
+            VoiceButtonLocalTrace.log(PlayerActivity.this, "ui.player.bridge_play_pause",
+                    "source", originalSource == null ? "" : originalSource.title,
+                    "active_uri", activeSource == null ? "" : activeSource.uri,
+                    "service_bound", service != null,
+                    "has_source", service != null && service.hasSource(),
+                    "state", playerSnapshot.state,
+                    "playing", playerSnapshot.playing);
             if (originalSource == null || activeSource == null) {
                 requestRestoreAndPlay();
                 return;

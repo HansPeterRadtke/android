@@ -557,6 +557,15 @@ public final class MainActivity extends Activity {
 
     private void primaryAction() {
 
+        VoiceButtonLocalTrace.log(this, "ui.main.primary_tap",
+                "state", snapshot.state,
+                "recording", snapshot.recording,
+                "paused", snapshot.paused,
+                "selected_device_id", selectedDeviceId,
+                "service_bound", service != null,
+                "button_text", primaryButton == null ? "" : primaryButton.getText());
+        if (primaryButton != null) primaryButton.setText("Working…");
+        if (statusDetail != null) statusDetail.setText("Button accepted: " + snapshot.state);
         diag(PhoneDiagnostics.INFO, "ui.main.primary_pressed", snapshot.currentSessionId,
                 "Primary recording action was pressed",
                 PhoneDiagnostics.fields("state", snapshot.state,
@@ -678,6 +687,10 @@ public final class MainActivity extends Activity {
     }
 
     private void openPlayer() {
+        VoiceButtonLocalTrace.log(this, "ui.main.open_player_tap",
+                "state", snapshot.state,
+                "service_bound", service != null,
+                "current_session", snapshot.currentSessionId);
         startActivity(new Intent(this, PlayerActivity.class));
     }
 

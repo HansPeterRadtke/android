@@ -88,6 +88,15 @@ final class VlcAudioPlayer {
 
     void openAt(Uri uri, long startMs, boolean shouldPlay, float speed,
                 int volume, boolean muted, boolean loop) {
+        VoiceButtonLocalTrace.log(app, "player.vlc.open_at",
+                "uri", uri,
+                "start_ms", startMs,
+                "should_play", shouldPlay,
+                "speed", speed,
+                "volume", volume,
+                "muted", muted,
+                "loop", loop,
+                "engine_state", engineState);
         sourceUri = uri;
         desiredRate = speed;
         desiredVolume = Math.max(0, Math.min(100, volume));
@@ -107,6 +116,12 @@ final class VlcAudioPlayer {
 
     void playPause() { if (playing) pause(); else play(); }
     void play() {
+        VoiceButtonLocalTrace.log(app, "player.vlc.play_request",
+                "engine_state", engineState,
+                "playing", playing,
+                "time", cachedTimeMs,
+                "length", cachedLengthMs,
+                "source", sourceUri);
         engineState = "play-requested";
         notifyState("starting playback");
         post(this::playOnEngine);
@@ -195,6 +210,10 @@ final class VlcAudioPlayer {
     }
 
     private void openOnEngine(Uri uri, boolean autoplay) {
+        VoiceButtonLocalTrace.log(app, "player.vlc.open_engine_enter",
+                "uri", uri,
+                "autoplay", autoplay,
+                "thread", Thread.currentThread().getName());
         try {
             initializeEngine();
             if (player == null) throw new IllegalStateException("LibVLC is not ready");
@@ -217,6 +236,11 @@ final class VlcAudioPlayer {
             media.addOption(":no-video");
             media.addOption(":audio-time-stretch");
             player.setMedia(media);
+            VoiceButtonLocalTrace.log(app, "player.vlc.media_set",
+                    "uri", uri,
+                    "route", route,
+                    "autoplay", autoplay,
+                    "summary", technicalSummary());
             media.release();
             player.setVolume(muted ? 0 : desiredVolume);
             player.setRate(desiredRate);
@@ -234,6 +258,13 @@ final class VlcAudioPlayer {
     }
 
     private void playOnEngine() {
+        VoiceButtonLocalTrace.log(app, "player.vlc.play_engine_enter",
+                "thread", Thread.currentThread().getName(),
+                "engine_state", engineState,
+                "playing", playing,
+                "focus_held", focusHeld,
+                "source", sourceUri,
+                "summary", technicalSummary());
         if (player == null) {
             notifyError("LibVLC is still starting");
             return;
@@ -249,6 +280,14 @@ final class VlcAudioPlayer {
 
     private void event(MediaPlayer.Event event) {
         if (released) return;
+        VoiceButtonLocalTrace.log(app, "player.vlc.event",
+                "type", event.type,
+                "engine_state", engineState,
+                "playing", playing,
+                "time", cachedTimeMs,
+                "length", cachedLengthMs,
+                "buffer", event.type == MediaPlayer.Event.Buffering ? event.getBuffering() : -1,
+                "summary", technicalSummary());
         switch (event.type) {
             case MediaPlayer.Event.Playing:
                 terminalError = false;

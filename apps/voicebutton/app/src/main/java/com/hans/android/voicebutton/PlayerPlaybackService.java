@@ -194,6 +194,14 @@ public final class PlayerPlaybackService extends Service
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? ACTION_ACTIVATE : intent.getAction();
+        VoiceButtonLocalTrace.log(this, "player.service.on_start_command",
+                "action", action,
+                "flags", flags,
+                "start_id", startId,
+                "has_source", activeSource != null,
+                "snapshot_state", snapshot.state,
+                "playing", snapshot.playing,
+                "engine", snapshot.engineSummary);
         if (ACTION_ACTIVATE.equals(action)) {
             promoteImmediately();
         } else if (ACTION_RESTORE.equals(action)) {
@@ -247,6 +255,15 @@ public final class PlayerPlaybackService extends Service
               boolean requestedMuted, boolean requestedLoop,
               float requestedSkipBack, float requestedSkipForward,
               boolean requestedAutoplay) {
+        VoiceButtonLocalTrace.log(this, "player.service.open_enter",
+                "original", original == null ? "" : original.title,
+                "active", active == null ? "" : active.title,
+                "uri", active == null ? "" : active.uri,
+                "logical_position", logicalPositionMs,
+                "should_play", shouldPlay,
+                "closing", closing,
+                "queue_size", requestedQueue == null ? 0 : requestedQueue.size(),
+                "queue_index", requestedIndex);
         if (original == null || active == null || closing) return;
         originalSource = original;
         activeSource = active;
@@ -266,6 +283,14 @@ public final class PlayerPlaybackService extends Service
         long physical = PlayerTimeline.physicalTime(logicalPositionMs,
                 studioActive, studioSpeed);
         float playbackRate = studioActive ? 1f : instantSpeed;
+        VoiceButtonLocalTrace.log(this, "player.service.open_engine",
+                "uri", activeSource.uri,
+                "physical", physical,
+                "should_play", shouldPlay,
+                "rate", playbackRate,
+                "volume", volume,
+                "muted", muted,
+                "loop", loop);
         player.openAt(activeSource.uri, physical, shouldPlay,
                 playbackRate, volume, muted, loop);
         snapshot = new Snapshot("opening", "", shouldPlay, false,
@@ -305,9 +330,27 @@ public final class PlayerPlaybackService extends Service
     void previous() { changeQueue(-1); }
     void next() { changeQueue(1); }
 
-    void playPause() { if (player.isPlaying()) pause(); else play(); }
+    void playPause() {
+        VoiceButtonLocalTrace.log(this, "player.service.play_pause",
+                "engine_playing", player.isPlaying(),
+                "snapshot_state", snapshot.state,
+                "snapshot_playing", snapshot.playing,
+                "has_source", activeSource != null,
+                "source", activeSource == null ? "" : activeSource.title,
+                "engine", player.technicalSummary());
+        if (player.isPlaying()) pause(); else play();
+    }
 
     void play() {
+        VoiceButtonLocalTrace.log(this, "player.service.play_enter",
+                "has_source", activeSource != null,
+                "source", activeSource == null ? "" : activeSource.title,
+                "uri", activeSource == null ? "" : activeSource.uri,
+                "snapshot_state", snapshot.state,
+                "time", player.time(),
+                "length", player.length(),
+                "engine_playing", player.isPlaying(),
+                "engine", player.technicalSummary());
         if (activeSource == null) {
             restoreCheckpointAsync(true);
             return;
@@ -315,6 +358,11 @@ public final class PlayerPlaybackService extends Service
         promoteImmediately();
         if (PlayerTerminalPolicy.restartFromBeginning(snapshot.state,
                 player.time(), player.length())) {
+            VoiceButtonLocalTrace.log(this, "player.service.play_reopen_terminal",
+                    "state", snapshot.state,
+                    "time", player.time(),
+                    "length", player.length(),
+                    "source", activeSource.title);
             open(originalSource, activeSource, new ArrayList<>(queue), queueIndex,
                     0L, true, studioActive, studioSpeed, instantSpeed,
                     volume, muted, loop, skipBack, skipForward, autoplay);
@@ -373,6 +421,14 @@ public final class PlayerPlaybackService extends Service
     }
 
     @Override public void onState(String state) {
+        VoiceButtonLocalTrace.log(this, "player.service.on_state",
+                "state", state,
+                "engine_playing", player.isPlaying(),
+                "time", player.time(),
+                "length", player.length(),
+                "rate", player.rate(),
+                "source", activeSource == null ? "" : activeSource.title,
+                "engine", player.technicalSummary());
         if (PlayerTerminalPolicy.ignoreStateAfterError(snapshot.error, state)) return;
         snapshot = new Snapshot(state, "", player.isPlaying(),
                 player.isSeekable(), player.time(), player.length(),
@@ -399,6 +455,11 @@ public final class PlayerPlaybackService extends Service
     }
 
     @Override public void onError(String detail) {
+        VoiceButtonLocalTrace.log(this, "player.service.on_error",
+                "detail", detail,
+                "source", activeSource == null ? "" : activeSource.title,
+                "uri", activeSource == null ? "" : activeSource.uri,
+                "engine", player.technicalSummary());
         snapshot = new Snapshot("error", detail, false, false,
                 player.time(), player.length(), player.rate(),
                 originalSource, activeSource, studioActive, studioSpeed,
