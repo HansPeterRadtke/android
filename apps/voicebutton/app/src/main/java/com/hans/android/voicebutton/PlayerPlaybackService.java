@@ -308,12 +308,26 @@ public final class PlayerPlaybackService extends Service
     void playPause() { if (player.isPlaying()) pause(); else play(); }
 
     void play() {
-        if (activeSource == null) return;
+        if (activeSource == null) {
+            restoreCheckpointAsync(true);
+            return;
+        }
         promoteImmediately();
         if (PlayerTerminalPolicy.restartFromBeginning(snapshot.state,
                 player.time(), player.length())) {
-            player.seek(0L);
+            open(originalSource, activeSource, new ArrayList<>(queue), queueIndex,
+                    0L, true, studioActive, studioSpeed, instantSpeed,
+                    volume, muted, loop, skipBack, skipForward, autoplay);
+            return;
         }
+        snapshot = new Snapshot("starting playback", "", true,
+                player.isSeekable(), player.time(), player.length(),
+                player.rate(), originalSource, activeSource,
+                studioActive, studioSpeed, queueIndex, queue.size(),
+                player.technicalSummary());
+        publish();
+        updateMediaSession();
+        updateNotification();
         player.play();
         saveCheckpointAsync(true);
     }

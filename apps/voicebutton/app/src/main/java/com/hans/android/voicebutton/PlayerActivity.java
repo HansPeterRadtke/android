@@ -269,7 +269,16 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         backSkipButton = AndroidUi.secondaryButton(this, "−10s");
         backSkipButton.setOnClickListener(v -> player.skip(-settings.skipBack));
         playButton = AndroidUi.primaryButton(this, "Play");
-        playButton.setOnClickListener(v -> player.playPause());
+        playButton.setOnClickListener(v -> {
+            if (player.isPlaying()) {
+                playButton.setText("Play");
+                stateText.setText("Pausing");
+            } else {
+                playButton.setText("Pause");
+                stateText.setText("Starting playback");
+            }
+            player.playPause();
+        });
         forwardSkipButton = AndroidUi.secondaryButton(this, "+10s");
         forwardSkipButton.setOnClickListener(v -> player.skip(settings.skipForward));
         transport.addView(backSkipButton, weighted());

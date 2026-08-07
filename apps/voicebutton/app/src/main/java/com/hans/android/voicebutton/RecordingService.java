@@ -848,8 +848,12 @@ public final class RecordingService extends Service {
         diag(PhoneDiagnostics.INFO, "recording.start_requested", null,
                 "A new recording was requested", PhoneDiagnostics.fields("device_id", deviceId));
         if (recorder.isRecording()) throw new IOException("A recording is already active");
-        ReliableSessionManifest unfinished = store.latestUnfinished();
-        if (unfinished != null) {
+        ReliableSessionManifest unfinished = snapshot.openSession;
+        if (unfinished == null && currentSessionId != null && !currentSessionId.isEmpty()) {
+            try { unfinished = store.load(currentSessionId); }
+            catch (Exception ignored) { unfinished = null; }
+        }
+        if (unfinished != null && !unfinished.recordingFinished) {
             currentSessionId = unfinished.sessionId;
             String state = unfinished.paused ? "PAUSED" : "RECOVERY REQUIRED";
             String detail = unfinished.paused
@@ -1799,11 +1803,17 @@ public final class RecordingService extends Service {
 
     private Snapshot buildSnapshot(RefreshRequest request) {
         Snapshot previous = snapshot;
-        List<ReliableSessionManifest> sessions = store == null
-                ? Collections.emptyList() : store.list();
-        ReliableSessionManifest open = store == null ? null : store.latestUnfinished();
-        ReliableSessionManifest interrupted = store == null ? null : store.latestInterrupted();
         boolean actualRecording = recorder.isRecording();
+        boolean captureState = actualRecording
+                || "RECORDING".equals(request.state)
+                || "PREPARING".equals(request.state);
+        List<ReliableSessionManifest> sessions = store == null
+                ? Collections.emptyList()
+                : captureState ? previous.sessions : store.list();
+        ReliableSessionManifest open = captureState ? previous.openSession
+                : store == null ? null : store.latestUnfinished();
+        ReliableSessionManifest interrupted = captureState ? previous.interrupted
+                : store == null ? null : store.latestInterrupted();
         boolean actualPaused = open != null && open.paused && !actualRecording;
         boolean actualInterrupted = open != null && open.isInterrupted() && !actualRecording;
         String state = RecordingStateResolver.normalize(request.state,
@@ -1812,7 +1822,7 @@ public final class RecordingService extends Service {
         String resolvedSessionId = open != null ? open.sessionId
                 : actualRecording ? currentSessionId : null;
         String selected = previous.selectedInput;
-        if (resolvedSessionId != null && store != null) {
+        if (resolvedSessionId != null && store != null && !actualRecording) {
             try { selected = store.load(resolvedSessionId).selectedInput; }
             catch (Exception ignored) {}
         }

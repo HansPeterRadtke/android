@@ -106,7 +106,11 @@ final class VlcAudioPlayer {
     }
 
     void playPause() { if (playing) pause(); else play(); }
-    void play() { post(this::playOnEngine); }
+    void play() {
+        engineState = "play-requested";
+        notifyState("starting playback");
+        post(this::playOnEngine);
+    }
     void pause() { post(() -> { if (player != null) player.pause(); }); }
     void stop() { post(() -> { if (player != null) player.stop(); abandonAudioFocus(); }); }
     boolean isPlaying() { return playing; }
@@ -238,6 +242,8 @@ final class VlcAudioPlayer {
             notifyError("Another application currently owns audio playback");
             return;
         }
+        engineState = "starting playback";
+        notifyState("starting playback");
         player.play();
     }
 
