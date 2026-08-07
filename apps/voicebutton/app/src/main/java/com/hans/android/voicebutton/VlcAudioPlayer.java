@@ -15,7 +15,6 @@ import org.videolan.libvlc.LibVLC;
 import org.videolan.libvlc.Media;
 import org.videolan.libvlc.MediaPlayer;
 
-import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -209,10 +208,7 @@ final class VlcAudioPlayer {
                 media = new Media(libVLC, sourceDescriptor.getFileDescriptor());
             } else if (PlayerOpenRoute.FILE_PATH.equals(route)
                     && uri != null && uri.getPath() != null) {
-                File file = new File(uri.getPath());
-                sourceDescriptor = ParcelFileDescriptor.open(file,
-                        ParcelFileDescriptor.MODE_READ_ONLY);
-                media = new Media(libVLC, sourceDescriptor.getFileDescriptor());
+                media = new Media(libVLC, uri.getPath());
             } else media = new Media(libVLC, uri);
             media.setHWDecoderEnabled(true, false);
             media.addOption(":no-video");
