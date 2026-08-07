@@ -10,6 +10,9 @@ import android.content.ServiceConnection;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.media.AudioAttributes;
+import android.media.MediaPlayer;
+import android.media.PlaybackParams;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -83,6 +86,12 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
     private long logicalDurationMs;
     private boolean userSeeking;
     private PlayerSource pendingExportSource;
+    private MediaPlayer directPlayer;
+    private boolean directPlaybackActive;
+    private boolean directPrepared;
+    private boolean directPlaying;
+    private long directDurationMs;
+    private String directError = "";
     private final ServiceConnection playerConnection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
             PlayerPlaybackService.LocalBinder local =
@@ -188,6 +197,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         if (studioFuture != null) studioFuture.cancel(true);
         if (waveformFuture != null) waveformFuture.cancel(true);
         studioExecutor.shutdownNow(); fileExecutor.shutdownNow();
+        stopDirectPlayback(false);
         if (waveformBitmap != null) waveformBitmap.recycle();
         super.onDestroy();
     }
@@ -230,7 +240,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                 float ratio = Math.max(0f, Math.min(1f,
                         event.getX() / Math.max(1f, view.getWidth())));
                 long logical = Math.round(logicalDuration() * ratio);
-                player.seek(PlayerTimeline.physicalTime(logical,
+                seekPlayback(PlayerTimeline.physicalTime(logical,
                         studioActive, studioSpeed));
                 return true;
             }
@@ -251,7 +261,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             @Override public void onStopTrackingTouch(SeekBar bar) {
                 long logical = PlayerTimeline.fromProgress(
                         bar.getProgress(), logicalDuration());
-                player.seek(PlayerTimeline.physicalTime(logical,
+                seekPlayback(PlayerTimeline.physicalTime(logical,
                         studioActive, studioSpeed));
                 userSeeking = false;
             }
@@ -267,11 +277,11 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
         LinearLayout transport = row();
         backSkipButton = AndroidUi.secondaryButton(this, "−10s");
-        backSkipButton.setOnClickListener(v -> player.skip(-settings.skipBack));
+        backSkipButton.setOnClickListener(v -> skipPlayback(-settings.skipBack));
         playButton = AndroidUi.primaryButton(this, "Play");
-        playButton.setOnClickListener(v -> player.playPause());
+        playButton.setOnClickListener(v -> playPause());
         forwardSkipButton = AndroidUi.secondaryButton(this, "+10s");
-        forwardSkipButton.setOnClickListener(v -> player.skip(settings.skipForward));
+        forwardSkipButton.setOnClickListener(v -> skipPlayback(settings.skipForward));
         transport.addView(backSkipButton, weighted());
         LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(
                 0, AndroidUi.dp(this, 58), 1.35f);
@@ -339,10 +349,174 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                 PhoneDiagnostics.fields("kind", source.kind,
                         "uri_scheme", source.uri.getScheme(),
                         "bytes", source.bytes,
+                        "direct_local_file", isDirectLocalFile(source),
                         "activity_thread", Thread.currentThread().getName()));
+        if (isDirectLocalFile(source)) {
+            openDirectLocalFile(source, autoplay);
+            updateQueueButtons();
+            return;
+        }
+        stopDirectPlayback(false);
         player.open(source.uri, autoplay, settings.speed, settings.volume, settings.muted, settings.loop);
         loadWaveform(source, generation);
         applySpeed(); updateQueueButtons();
+    }
+
+    private boolean isDirectLocalFile(PlayerSource source) {
+        return source != null && source.uri != null
+                && "file".equalsIgnoreCase(source.uri.getScheme())
+                && source.uri.getPath() != null
+                && !source.uri.getPath().trim().isEmpty();
+    }
+
+    private void openDirectLocalFile(PlayerSource source, boolean autoplay) {
+        stopDirectPlayback(false);
+        directPlaybackActive = true;
+        directPrepared = false;
+        directPlaying = false;
+        directDurationMs = 0L;
+        directError = "";
+        player.detach();
+        playerSnapshot = PlayerPlaybackService.Snapshot.initial();
+        try {
+            MediaPlayer mediaPlayer = new MediaPlayer();
+            directPlayer = mediaPlayer;
+            mediaPlayer.setAudioAttributes(new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build());
+            mediaPlayer.setDataSource(source.uri.getPath());
+            mediaPlayer.setLooping(settings.loop);
+            mediaPlayer.setOnPreparedListener(value -> {
+                directPrepared = true;
+                directDurationMs = Math.max(0, value.getDuration());
+                setDirectSpeed();
+                if (settings.muted) value.setVolume(0f, 0f);
+                else {
+                    float volume = Math.max(0f, Math.min(1f, settings.volume / 100f));
+                    value.setVolume(volume, volume);
+                }
+                stateText.setText("Ready");
+                if (autoplay) directPlay();
+                updatePosition();
+            });
+            mediaPlayer.setOnCompletionListener(value -> {
+                directPlaying = false;
+                stateText.setText("Ended");
+                updatePosition();
+            });
+            mediaPlayer.setOnErrorListener((value, what, extra) -> {
+                directPlaying = false;
+                directError = "Android MediaPlayer error " + what + "/" + extra;
+                stateText.setText(directError);
+                Toast.makeText(this, directError, Toast.LENGTH_LONG).show();
+                playerDiagnostic(PhoneDiagnostics.ERROR, "player.direct_error",
+                        directError, PhoneDiagnostics.fields("source", source.title,
+                                "path", source.uri.getPath(), "what", what,
+                                "extra", extra));
+                updatePosition();
+                return true;
+            });
+            stateText.setText("Preparing local MP3");
+            mediaPlayer.prepareAsync();
+        } catch (Exception failure) {
+            directError = "Could not play local MP3: "
+                    + failure.getClass().getSimpleName() + ": "
+                    + failure.getMessage();
+            stateText.setText(directError);
+            Toast.makeText(this, directError, Toast.LENGTH_LONG).show();
+            playerDiagnostic(PhoneDiagnostics.ERROR, "player.direct_open_failed",
+                    directError, PhoneDiagnostics.fields("source", source.title,
+                            "path", source.uri.getPath()));
+            stopDirectPlayback(false);
+        }
+    }
+
+    private void directPlay() {
+        if (!directPlaybackActive || directPlayer == null) return;
+        if (!directPrepared) {
+            stateText.setText("Preparing local MP3");
+            return;
+        }
+        try {
+            setDirectSpeed();
+            directPlayer.start();
+            directPlaying = true;
+            stateText.setText("Playing");
+            updatePosition();
+        } catch (Exception failure) {
+            directError = "Could not start local MP3: "
+                    + failure.getClass().getSimpleName() + ": "
+                    + failure.getMessage();
+            stateText.setText(directError);
+            Toast.makeText(this, directError, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void directPause() {
+        if (!directPlaybackActive || directPlayer == null || !directPrepared) return;
+        try {
+            directPlayer.pause();
+            directPlaying = false;
+            stateText.setText("Paused");
+            updatePosition();
+        } catch (Exception ignored) {}
+    }
+
+    private void stopDirectPlayback(boolean clearSource) {
+        MediaPlayer value = directPlayer;
+        directPlayer = null;
+        directPrepared = false;
+        directPlaying = false;
+        directDurationMs = 0L;
+        directError = "";
+        if (value != null) {
+            try { value.reset(); } catch (Exception ignored) {}
+            try { value.release(); } catch (Exception ignored) {}
+        }
+        directPlaybackActive = false;
+        if (clearSource) {
+            originalSource = null;
+            activeSource = null;
+        }
+    }
+
+    private void playPause() {
+        if (directPlaybackActive) {
+            if (directPlaying) directPause(); else directPlay();
+        } else player.playPause();
+    }
+
+    private void seekPlayback(long physicalMs) {
+        if (directPlaybackActive) {
+            if (directPlayer != null && directPrepared) {
+                directPlayer.seekTo((int)Math.max(0L, Math.min(
+                        Integer.MAX_VALUE, physicalMs)));
+            }
+            updatePosition();
+        } else player.seek(physicalMs);
+    }
+
+    private void skipPlayback(float seconds) {
+        if (directPlaybackActive) {
+            long target = directPositionMs() + Math.round(seconds * 1000f);
+            seekPlayback(Math.max(0L, Math.min(directDurationMs, target)));
+        } else player.skip(seconds);
+    }
+
+    private long directPositionMs() {
+        if (!directPlaybackActive || directPlayer == null || !directPrepared) return 0L;
+        try { return Math.max(0, directPlayer.getCurrentPosition()); }
+        catch (Exception ignored) { return 0L; }
+    }
+
+    private void setDirectSpeed() {
+        if (!directPlaybackActive || directPlayer == null || !directPrepared) return;
+        try {
+            PlaybackParams params = directPlayer.getPlaybackParams();
+            params.setSpeed(Math.max(0.25f, Math.min(8.0f, settings.speed)));
+            directPlayer.setPlaybackParams(params);
+        } catch (Exception ignored) {}
     }
 
     private void loadWaveform(PlayerSource source, int generation) {
@@ -379,6 +553,13 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
     private void applySpeed() {
         updateLabels();
+        if (directPlaybackActive) {
+            setDirectSpeed();
+            modeText.setText("Direct · Android MediaPlayer");
+            studioText.setText("Direct local MP3 playback");
+            studioProgress.setVisibility(View.INVISIBLE);
+            return;
+        }
         if (originalSource == null) return;
         if (settings.speedMode.equals(PlayerSettings.MODE_INSTANT) || Math.abs(settings.speed - 1f) < .0001f) {
             cancelStudio();
@@ -495,7 +676,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         dialog.setOnShowListener(x->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
             try{
                 float newMin=parse(min),newMax=parse(max),newStep=parse(step);if(newMin<.25f||newMax>8f||newMin>newMax||newStep<.01f||newStep>1f)throw new Exception("Speed range must stay within 0.25× to 8×; step 0.01 to 1.0");
-                settings.speedMin=newMin;settings.speedMax=newMax;settings.speedStep=newStep;settings.speed=settings.normalize(parse(speed));settings.skipBack=PlayerSettings.clamp(parse(back),.1f,3600f);settings.skipForward=PlayerSettings.clamp(parse(forward),.1f,3600f);settings.volume=Math.max(0,Math.min(100,Math.round(parse(volume))));settings.sleepMinutes=Math.max(0,Math.min(1440,Math.round(parse(sleep))));settings.muted=muted.isChecked();settings.loop=loop.isChecked();settings.autoplay=autoplay.isChecked();settings.speedMode=studio.isChecked()?PlayerSettings.MODE_STUDIO:PlayerSettings.MODE_INSTANT;settings.setPresets(presets.getText().toString());settings.save();player.setVolume(settings.volume,settings.muted);player.setLoop(settings.loop);player.updateSkipValues(settings.skipBack,settings.skipForward);scheduleSleepTimer();applySpeed();dialog.dismiss();
+                settings.speedMin=newMin;settings.speedMax=newMax;settings.speedStep=newStep;settings.speed=settings.normalize(parse(speed));settings.skipBack=PlayerSettings.clamp(parse(back),.1f,3600f);settings.skipForward=PlayerSettings.clamp(parse(forward),.1f,3600f);settings.volume=Math.max(0,Math.min(100,Math.round(parse(volume))));settings.sleepMinutes=Math.max(0,Math.min(1440,Math.round(parse(sleep))));settings.muted=muted.isChecked();settings.loop=loop.isChecked();settings.autoplay=autoplay.isChecked();settings.speedMode=studio.isChecked()?PlayerSettings.MODE_STUDIO:PlayerSettings.MODE_INSTANT;settings.setPresets(presets.getText().toString());settings.save();if(directPlaybackActive){setDirectSpeed();if(directPlayer!=null&&directPrepared){float directVolume=settings.muted?0f:Math.max(0f,Math.min(1f,settings.volume/100f));directPlayer.setVolume(directVolume,directVolume);directPlayer.setLooping(settings.loop);}}else{player.setVolume(settings.volume,settings.muted);player.setLoop(settings.loop);player.updateSkipValues(settings.skipBack,settings.skipForward);}scheduleSleepTimer();applySpeed();dialog.dismiss();
             }catch(Exception failure){Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show();}
         }));dialog.show();
     }
@@ -611,7 +792,22 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         long[] raw=intent.getLongArrayExtra(EXTRA_QUEUE_BYTES);queueBytes=new ArrayList<>();if(raw!=null)for(long value:raw)queueBytes.add(value);queueIndex=intent.getIntExtra(EXTRA_QUEUE_INDEX,-1);updateQueueButtons();
     }
     private static ArrayList<String> list(ArrayList<String> input){return input==null?new ArrayList<>():input;}
-    private void changeQueue(int delta){if(delta<0)player.previous();else player.next();}
+    private void changeQueue(int delta){
+        if (directPlaybackActive) {
+            int target = queueIndex + delta;
+            if (target >= 0 && target < queueUris.size()) {
+                PlayerSource next = new PlayerSource(Uri.parse(queueUris.get(target)),
+                        target < queueTitles.size() ? queueTitles.get(target) : "Audio",
+                        target < queueKinds.size() ? queueKinds.get(target)
+                                : PlayerSource.KIND_DOCUMENT,
+                        target < queueBytes.size() ? queueBytes.get(target) : 0L,
+                        target < queueSessions.size() ? queueSessions.get(target) : "",
+                        target < queueFolders.size() ? queueFolders.get(target) : "", null);
+                queueIndex = target;
+                openSource(next, settings.autoplay || directPlaying);
+            }
+        } else if(delta<0)player.previous();else player.next();
+    }
     private void updateQueueButtons(){if(previousButton!=null){previousButton.setEnabled(playerSnapshot.queueIndex>0);nextButton.setEnabled(playerSnapshot.queueIndex>=0&&playerSnapshot.queueIndex+1<playerSnapshot.queueSize);}}
 
     @Override public void onPlayerSnapshot(PlayerPlaybackService.Snapshot value) {
@@ -619,7 +815,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
     }
 
     private void applyPlayerSnapshot(PlayerPlaybackService.Snapshot value) {
-        if (value == null) return;
+        if (value == null || directPlaybackActive) return;
         PlayerSource previous = originalSource;
         playerSnapshot = value;
         originalSource = value.originalSource;
@@ -658,9 +854,9 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         updatePosition();
     }
 
-    private void updatePosition(){long logical=logicalPosition(),length=logicalDuration();timeText.setText(formatTime(logical)+" / "+formatTime(length));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));playButton.setText(player.isPlaying()?"Pause":"Play");}
-    private long logicalPosition(){return playerSnapshot.logicalTimeMs();}
-    private long logicalDuration(){long value=playerSnapshot.logicalLengthMs();return value>0?value:logicalDurationMs;}
+    private void updatePosition(){long logical=logicalPosition(),length=logicalDuration();timeText.setText(formatTime(logical)+" / "+formatTime(length));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));playButton.setText(directPlaybackActive?(directPlaying?"Pause":"Play"):(player.isPlaying()?"Pause":"Play"));}
+    private long logicalPosition(){return directPlaybackActive?directPositionMs():playerSnapshot.logicalTimeMs();}
+    private long logicalDuration(){if(directPlaybackActive)return directDurationMs;long value=playerSnapshot.logicalLengthMs();return value>0?value:logicalDurationMs;}
     private void updateLabels(){speedText.setText(formatSpeed(settings.speed));backSkipButton.setText("−"+formatSeconds(settings.skipBack));forwardSkipButton.setText("+"+formatSeconds(settings.skipForward));}
     private void scheduleSleepTimer(){main.removeCallbacks(sleepStop);if(settings.sleepMinutes>0)main.postDelayed(sleepStop,settings.sleepMinutes*60_000L);}
 
@@ -700,6 +896,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         void open(Uri uri, boolean autoplay, float speed, int volume,
                   boolean muted, boolean loop) {
             if (originalSource == null || activeSource == null) return;
+            stopDirectPlayback(false);
             if (service == null) {
                 pendingOpen = true;
                 pendingAutoplay = autoplay;
