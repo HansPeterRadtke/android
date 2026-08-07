@@ -75,6 +75,7 @@ public final class RecordingService extends Service {
     private static final long LIVE_TICK_MS = 500L;
     private static final long HEARTBEAT_MS = 30000L;
     private static final long NOTIFICATION_REFRESH_MS = 2000L;
+    private static final long STATUS_SESSION_SCAN_INTERVAL_MS = 5000L;
 
     public interface StatusListener { void onStatus(Snapshot snapshot); }
 
@@ -176,6 +177,11 @@ public final class RecordingService extends Service {
         thread.setDaemon(false);
         return thread;
     });
+    private final ExecutorService maintenanceExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "voicebutton-maintenance");
+        thread.setDaemon(true);
+        return thread;
+    });
     private final ExecutorService statusExecutor = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "voicebutton-status");
         thread.setDaemon(true);
@@ -206,6 +212,7 @@ public final class RecordingService extends Service {
     private volatile long lastUploaderRefreshElapsedMs;
     private volatile long localBytesCached;
     private volatile long lastLocalBytesScanElapsedMs;
+    private volatile long lastSessionListScanElapsedMs;
     private final AtomicReference<RefreshRequest> pendingUploaderRefresh = new AtomicReference<>();
     private volatile String lastLoggedState = "";
     private volatile String lastLoggedExplanation = "";
@@ -473,7 +480,7 @@ public final class RecordingService extends Service {
 
     public void retrySynchronization() {
         try {
-            serviceExecutor.execute(() -> {
+            maintenanceExecutor.execute(() -> {
                 try {
                     retrySynchronizationNow("manual_retry");
                 } catch (Exception failure) {
@@ -1135,7 +1142,7 @@ public final class RecordingService extends Service {
             long createdAtMs = Math.max(0L,
                     durableAtMs - Math.max(0L, durationMs));
             try {
-                serviceExecutor.execute(() -> commitPcmJournalWithRetry(
+                maintenanceExecutor.execute(() -> commitPcmJournalWithRetry(
                         sessionId, seq, pcmJournal, inputSampleRate,
                         pcmBytes, durationMs, createdAtMs, durableAtMs));
             } catch (RuntimeException rejected) {
@@ -1154,7 +1161,7 @@ public final class RecordingService extends Service {
 
         @Override public void onStopped(String sessionId) {
             try {
-                serviceExecutor.execute(() ->
+                maintenanceExecutor.execute(() ->
                         handleRecorderStopped(sessionId));
             } catch (RuntimeException rejected) {
                 String exact = PhoneDiagnostics.exactFailure(
@@ -1807,12 +1814,20 @@ public final class RecordingService extends Service {
         boolean captureState = actualRecording
                 || "RECORDING".equals(request.state)
                 || "PREPARING".equals(request.state);
+        long nowElapsed = SystemClock.elapsedRealtime();
+        boolean scanSessions = store != null && !captureState
+                && (lastSessionListScanElapsedMs <= 0L
+                || nowElapsed - lastSessionListScanElapsedMs
+                >= STATUS_SESSION_SCAN_INTERVAL_MS);
         List<ReliableSessionManifest> sessions = store == null
                 ? Collections.emptyList()
-                : captureState ? previous.sessions : store.list();
-        ReliableSessionManifest open = captureState ? previous.openSession
+                : scanSessions ? store.list() : previous.sessions;
+        if (scanSessions) lastSessionListScanElapsedMs = nowElapsed;
+        ReliableSessionManifest open = captureState || !scanSessions
+                ? previous.openSession
                 : store == null ? null : store.latestUnfinished();
-        ReliableSessionManifest interrupted = captureState ? previous.interrupted
+        ReliableSessionManifest interrupted = captureState || !scanSessions
+                ? previous.interrupted
                 : store == null ? null : store.latestInterrupted();
         boolean actualPaused = open != null && open.paused && !actualRecording;
         boolean actualInterrupted = open != null && open.isInterrupted() && !actualRecording;
@@ -1861,14 +1876,14 @@ public final class RecordingService extends Service {
         float peakDbfs = actualRecording && levelAgeMs < 1500L ? liveInputPeakDbfs : -120f;
         int inputLevelPermille = RecordingFeedback.levelPermille(peakDbfs);
         boolean inputSignalDetected = actualRecording && levelAgeMs < 1500L && peakDbfs > -50f;
-        long nowElapsed = SystemClock.elapsedRealtime();
         if (store != null && !actualRecording
                 && nowElapsed - lastLocalBytesScanElapsedMs >= 30000L) {
             localBytesCached = store.localBytes();
             lastLocalBytesScanElapsedMs = nowElapsed;
         }
         long localBytes = localBytesCached;
-        pendingFolderSyncCached = store != null && store.hasPendingFolderSync();
+        if (store == null) pendingFolderSyncCached = false;
+        else if (scanSessions) pendingFolderSyncCached = store.hasPendingFolderSync();
         return new Snapshot(state, explanation, actualRecording, actualPaused,
                 duration, localBytes, rmsDbfs, peakDbfs,
                 inputLevelPermille, inputSignalDetected,
@@ -2343,6 +2358,7 @@ public final class RecordingService extends Service {
         releaseCaptureWakeLock();
         if (uploader != null) uploader.stop();
         conversion.shutdownNow();
+        maintenanceExecutor.shutdownNow();
         statusExecutor.shutdownNow();
         serviceExecutor.shutdownNow();
         Thread maintenance = maintenanceThread;

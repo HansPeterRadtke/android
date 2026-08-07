@@ -798,6 +798,14 @@ public final class MainActivity extends Activity {
     }
 
     private void sendAction(String action, String sessionId, boolean foreground) {
+        VoiceButtonLocalTrace.log(this, "ui.main.send_recording_action",
+                "action", action,
+                "session", sessionId,
+                "foreground", foreground,
+                "selected_device_id", selectedDeviceId,
+                "folder", selectedFolderId,
+                "state", snapshot.state,
+                "service_bound", service != null);
 
         diag(PhoneDiagnostics.INFO, "ui.service_action_sent", sessionId,
                 "Main screen sent a RecordingService action",

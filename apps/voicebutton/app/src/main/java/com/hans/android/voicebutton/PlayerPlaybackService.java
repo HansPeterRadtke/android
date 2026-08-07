@@ -123,6 +123,11 @@ public final class PlayerPlaybackService extends Service
     private final Handler main = new Handler(Looper.getMainLooper());
     private final CopyOnWriteArrayList<Listener> listeners =
             new CopyOnWriteArrayList<>();
+    private final ExecutorService commandExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "voicebutton-player-command");
+        thread.setDaemon(true);
+        return thread;
+    });
     private final ArrayList<PlayerSource> queue = new ArrayList<>();
     private final ExecutorService checkpointExecutor =
             Executors.newSingleThreadExecutor(runnable -> {
@@ -136,8 +141,8 @@ public final class PlayerPlaybackService extends Service
     private MediaSession mediaSession;
     private PlayerCheckpointStore checkpointStore;
     private PlayerSettings settings;
-    private PlayerSource originalSource;
-    private PlayerSource activeSource;
+    private volatile PlayerSource originalSource;
+    private volatile PlayerSource activeSource;
     private int queueIndex = -1;
     private boolean studioActive;
     private float studioSpeed = 1f;
@@ -175,6 +180,29 @@ public final class PlayerPlaybackService extends Service
             }
         }
     };
+
+
+    private boolean onPlayerCommandThread() {
+        return "voicebutton-player-command".equals(Thread.currentThread().getName());
+    }
+
+    private void enqueuePlayerCommand(String name, Runnable command) {
+        if (command == null || closing) return;
+        try {
+            commandExecutor.execute(() -> {
+                VoiceButtonLocalTrace.log(this, "player.service.command_run",
+                        "name", name,
+                        "snapshot_state", snapshot.state,
+                        "has_source", activeSource != null,
+                        "playing", player != null && player.isPlaying());
+                command.run();
+            });
+        } catch (RuntimeException rejected) {
+            VoiceButtonLocalTrace.log(this, "player.service.command_rejected",
+                    "name", name,
+                    "error", rejected.getClass().getSimpleName() + ": " + rejected.getMessage());
+        }
+    }
 
     @Override public void onCreate() {
         super.onCreate();
@@ -255,6 +283,14 @@ public final class PlayerPlaybackService extends Service
               boolean requestedMuted, boolean requestedLoop,
               float requestedSkipBack, float requestedSkipForward,
               boolean requestedAutoplay) {
+        if (!onPlayerCommandThread()) {
+            enqueuePlayerCommand("open", () -> open(original, active,
+                    requestedQueue, requestedIndex, logicalPositionMs, shouldPlay,
+                    requestedStudio, requestedStudioSpeed, requestedInstantSpeed,
+                    requestedVolume, requestedMuted, requestedLoop,
+                    requestedSkipBack, requestedSkipForward, requestedAutoplay));
+            return;
+        }
         VoiceButtonLocalTrace.log(this, "player.service.open_enter",
                 "original", original == null ? "" : original.title,
                 "active", active == null ? "" : active.title,
@@ -305,6 +341,10 @@ public final class PlayerPlaybackService extends Service
     }
 
     void setSpeed(float speed) {
+        if (!onPlayerCommandThread()) {
+            enqueuePlayerCommand("set_speed", () -> setSpeed(speed));
+            return;
+        }
         instantSpeed = Math.max(.01f, speed);
         if (!studioActive) player.setSpeed(instantSpeed);
         saveCheckpointAsync(player.isPlaying());
@@ -312,17 +352,29 @@ public final class PlayerPlaybackService extends Service
     }
 
     void setVolume(int requestedVolume, boolean requestedMuted) {
+        if (!onPlayerCommandThread()) {
+            enqueuePlayerCommand("set_volume", () -> setVolume(requestedVolume, requestedMuted));
+            return;
+        }
         volume = Math.max(0, Math.min(100, requestedVolume));
         muted = requestedMuted;
         player.setVolume(volume, muted);
     }
 
     void setLoop(boolean requestedLoop) {
+        if (!onPlayerCommandThread()) {
+            enqueuePlayerCommand("set_loop", () -> setLoop(requestedLoop));
+            return;
+        }
         loop = requestedLoop;
         player.setLoop(loop);
     }
 
     void updateSkipValues(float backward, float forward) {
+        if (!onPlayerCommandThread()) {
+            enqueuePlayerCommand("update_skip", () -> updateSkipValues(backward, forward));
+            return;
+        }
         skipBack = Math.max(.1f, backward);
         skipForward = Math.max(.1f, forward);
     }
@@ -331,6 +383,10 @@ public final class PlayerPlaybackService extends Service
     void next() { changeQueue(1); }
 
     void playPause() {
+        if (!onPlayerCommandThread()) {
+            enqueuePlayerCommand("play_pause", this::playPause);
+            return;
+        }
         VoiceButtonLocalTrace.log(this, "player.service.play_pause",
                 "engine_playing", player.isPlaying(),
                 "snapshot_state", snapshot.state,
@@ -342,6 +398,10 @@ public final class PlayerPlaybackService extends Service
     }
 
     void play() {
+        if (!onPlayerCommandThread()) {
+            enqueuePlayerCommand("play", this::play);
+            return;
+        }
         VoiceButtonLocalTrace.log(this, "player.service.play_enter",
                 "has_source", activeSource != null,
                 "source", activeSource == null ? "" : activeSource.title,
@@ -381,18 +441,30 @@ public final class PlayerPlaybackService extends Service
     }
 
     void pause() {
+        if (!onPlayerCommandThread()) {
+            enqueuePlayerCommand("pause", this::pause);
+            return;
+        }
         if (player == null) return;
         player.pause();
         saveCheckpointAsync(false);
     }
 
     void stopPlayback() {
+        if (!onPlayerCommandThread()) {
+            enqueuePlayerCommand("stop", this::stopPlayback);
+            return;
+        }
         if (player == null) return;
         player.stop();
         saveCheckpointAsync(false);
     }
 
     void seekPhysical(long physicalTimeMs) {
+        if (!onPlayerCommandThread()) {
+            enqueuePlayerCommand("seek_physical", () -> seekPhysical(physicalTimeMs));
+            return;
+        }
         if (player == null) return;
         player.seek(physicalTimeMs);
         saveCheckpointAsync(player.isPlaying());
@@ -404,12 +476,20 @@ public final class PlayerPlaybackService extends Service
     }
 
     void skip(float seconds) {
+        if (!onPlayerCommandThread()) {
+            enqueuePlayerCommand("skip", () -> skip(seconds));
+            return;
+        }
         if (player == null) return;
         player.skip(seconds);
         saveCheckpointAsync(player.isPlaying());
     }
 
     private void changeQueue(int delta) {
+        if (!onPlayerCommandThread()) {
+            enqueuePlayerCommand("change_queue", () -> changeQueue(delta));
+            return;
+        }
         int target = queueIndex + delta;
         if (target < 0 || target >= queue.size()) return;
         boolean shouldPlay = autoplay || player.isPlaying();
@@ -798,6 +878,7 @@ public final class PlayerPlaybackService extends Service
             mediaSession.setActive(false);
             mediaSession.release();
         }
+        commandExecutor.shutdownNow();
         checkpointExecutor.shutdown();
         if (foreground) {
             stopForeground(STOP_FOREGROUND_REMOVE);
