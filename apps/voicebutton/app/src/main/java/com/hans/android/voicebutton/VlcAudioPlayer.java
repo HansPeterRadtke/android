@@ -228,7 +228,8 @@ final class VlcAudioPlayer {
             engineState = "open-failed";
             closeDescriptor();
             notifyError("Could not open audio: "
-                    + failure.getClass().getSimpleName() + ": " + failure.getMessage());
+                    + failure.getClass().getSimpleName() + ": " + failure.getMessage()
+                    + " · " + technicalSummary());
         }
     }
 
@@ -321,7 +322,8 @@ final class VlcAudioPlayer {
                 playing = false;
                 abandonAudioFocus();
                 engineState = "decode-error";
-                notifyError("LibVLC could not decode or play this source");
+                notifyError("LibVLC could not decode or play this source · "
+                        + technicalSummary());
                 break;
             default: break;
         }

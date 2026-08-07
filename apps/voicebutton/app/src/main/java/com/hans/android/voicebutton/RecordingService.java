@@ -659,6 +659,7 @@ public final class RecordingService extends Service {
         out.append("library_filename_layout=")
                 .append(FileNameParts.LAYOUT_ID).append('\n');
         out.append("player_lifecycle=foreground_service_atomic_checkpoint_v2\n");
+        out.append("player=").append(limit(readLatestPlayerSummary(), 1000)).append('\n');
         ReliableUploader uploaderValue = uploader;
         out.append("uploader=").append(uploaderValue == null
                 ? "unavailable" : limit(uploaderValue.debugSummary(), 1000)).append('\n');
@@ -675,6 +676,23 @@ public final class RecordingService extends Service {
         }
         if (out.length() > 24000) return out.substring(0, 24000) + "\n[summary truncated]\n";
         return out.toString();
+    }
+
+    private String readLatestPlayerSummary() {
+        File file = new File(new File(getNoBackupFilesDir(), "player_state"),
+                "latest_summary.txt");
+        if (!file.isFile()) return "unavailable";
+        try (java.io.FileInputStream in = new java.io.FileInputStream(file);
+             java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
+            String value = new String(out.toByteArray(), java.nio.charset.StandardCharsets.UTF_8).trim();
+            return value.isEmpty() ? "empty" : value;
+        } catch (Exception failure) {
+            return "unreadable: " + failure.getClass().getSimpleName()
+                    + ": " + failure.getMessage();
+        }
     }
 
     private static String limit(String value, int maximum) {

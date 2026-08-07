@@ -23,6 +23,8 @@ import android.os.SystemClock;
 import androidx.core.content.ContextCompat;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -486,7 +488,34 @@ public final class PlayerPlaybackService extends Service
     private void publish() {
         Snapshot value = currentSnapshot();
         snapshot = value;
+        writeLatestPlayerSummaryAsync(value);
         for (Listener listener : listeners) listener.onPlayerSnapshot(value);
+    }
+
+    private void writeLatestPlayerSummaryAsync(Snapshot value) {
+        if (value == null) return;
+        checkpointExecutor.execute(() -> {
+            try {
+                File directory = new File(getNoBackupFilesDir(), "player_state");
+                if (!directory.isDirectory() && !directory.mkdirs()) return;
+                File target = new File(directory, "latest_summary.txt");
+                String text = "state=" + value.state
+                        + " playing=" + value.playing
+                        + " seekable=" + value.seekable
+                        + " time_ms=" + value.physicalTimeMs
+                        + " length_ms=" + value.physicalLengthMs
+                        + " rate=" + value.rate
+                        + " source=" + (value.originalSource == null ? "" : value.originalSource.title)
+                        + " uri=" + (value.activeSource == null ? "" : value.activeSource.uri)
+                        + " error=" + value.error
+                        + " engine=" + value.engineSummary;
+                try (FileOutputStream out = new FileOutputStream(target, false)) {
+                    out.write(text.getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                    out.getFD().sync();
+                }
+            } catch (Exception ignored) {}
+        });
     }
 
     private void promoteImmediately() {
