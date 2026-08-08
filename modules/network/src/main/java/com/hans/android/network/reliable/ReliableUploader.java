@@ -216,12 +216,25 @@ public final class ReliableUploader {
                         } else {
                             for (ReliableSessionStore.Folder folder : pendingFolders) {
                                 if (!running.get()) break;
-                                listener.onState("", "Synchronizing folder " + folder.name);
-                                client.createFolder(folder.id, folder.name, folder.parentId);
-                                store.markFolderRemote(folder.id, folder.name, folder.parentId);
-                                remoteFoldersKnown.add(folder.id + "\u0000"
-                                        + folder.name + "\u0000" + folder.parentId);
-                                listener.onChanged();
+                                try {
+                                    listener.onState("", "Synchronizing folder " + folder.name);
+                                    client.createFolder(folder.id, folder.name, folder.parentId);
+                                    store.markFolderRemote(folder.id, folder.name, folder.parentId);
+                                    remoteFoldersKnown.add(folder.id + "\u0000"
+                                            + folder.name + "\u0000" + folder.parentId);
+                                    listener.onChanged();
+                                } catch (Exception folderFailure) {
+                                    lastFailure = folderFailure.getClass().getSimpleName()
+                                            + ": " + String.valueOf(folderFailure.getMessage());
+                                    listener.onDiagnostic("WARN", "upload.folder_sync_deferred", "",
+                                            "Folder sync failed but audio upload will continue",
+                                            fields("folder_id", folder.id,
+                                                    "folder_name", folder.name,
+                                                    "retryable", isRetryableFailure(folderFailure),
+                                                    "exception_class", folderFailure.getClass().getName(),
+                                                    "exception_message", String.valueOf(folderFailure.getMessage())),
+                                            folderFailure);
+                                }
                             }
                         }
                     }
@@ -407,11 +420,25 @@ public final class ReliableUploader {
         String folderKey = snapshot.folderId + "\u0000" + snapshot.folderName
                 + "\u0000" + localFolder.parentId;
         if (!remoteFoldersKnown.contains(folderKey)) {
-            client.createFolder(snapshot.folderId, snapshot.folderName,
-                    localFolder.parentId);
-            store.markFolderRemote(snapshot.folderId, snapshot.folderName,
-                    localFolder.parentId);
-            remoteFoldersKnown.add(folderKey);
+            try {
+                client.createFolder(snapshot.folderId, snapshot.folderName,
+                        localFolder.parentId);
+                store.markFolderRemote(snapshot.folderId, snapshot.folderName,
+                        localFolder.parentId);
+                remoteFoldersKnown.add(folderKey);
+            } catch (Exception folderFailure) {
+                lastFailure = folderFailure.getClass().getSimpleName()
+                        + ": " + String.valueOf(folderFailure.getMessage());
+                listener.onDiagnostic("WARN", "upload.session_folder_sync_deferred",
+                        sessionId,
+                        "Folder sync failed but chunk upload will continue",
+                        fields("folder_id", snapshot.folderId,
+                                "folder_name", snapshot.folderName,
+                                "retryable", isRetryableFailure(folderFailure),
+                                "exception_class", folderFailure.getClass().getName(),
+                                "exception_message", String.valueOf(folderFailure.getMessage())),
+                        folderFailure);
+            }
         }
         ReliableSessionManifest manifest = store.load(sessionId);
         boolean serverHasSession = manifest.remoteCommitted
@@ -439,9 +466,21 @@ public final class ReliableUploader {
             store.markRemoteFolder(sessionId, manifest.folderId, manifest.folderName);
             manifest = store.load(sessionId);
         }
-        client.updateMetadata(manifest);
-        store.markRemoteDisplayName(sessionId, manifest.displayName);
-        manifest = store.load(sessionId);
+        try {
+            client.updateMetadata(manifest);
+            store.markRemoteDisplayName(sessionId, manifest.displayName);
+            manifest = store.load(sessionId);
+        } catch (Exception metadataFailure) {
+            lastFailure = metadataFailure.getClass().getSimpleName()
+                    + ": " + String.valueOf(metadataFailure.getMessage());
+            listener.onDiagnostic("WARN", "upload.metadata_sync_deferred",
+                    sessionId,
+                    "Metadata sync failed but chunk upload will continue",
+                    fields("retryable", isRetryableFailure(metadataFailure),
+                            "exception_class", metadataFailure.getClass().getName(),
+                            "exception_message", String.valueOf(metadataFailure.getMessage())),
+                    metadataFailure);
+        }
 
         listener.onState(sessionId, "Checking Jetson's durable recording progress");
         ReliableUploadClient.Status status = client.status(manifest);
