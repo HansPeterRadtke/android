@@ -885,7 +885,9 @@ public final class MainActivity extends Activity {
         micLevelBar.setContentDescription(micLevelText.getText());
         setTextIfChanged(transferText, MainScreenText.transfer(snapshot.recording,
                 snapshot.uploadTotalBytes, snapshot.uploadPendingBytes,
-                snapshot.uploadProgressPermille));
+                snapshot.uploadProgressPermille, snapshot.liveUploadOperation,
+                snapshot.liveUploadSequence, snapshot.liveUploadDurableBytes,
+                snapshot.liveUploadTotalBytes));
         if (progressBar.getProgress() != snapshot.uploadProgressPermille) {
             progressBar.setProgress(snapshot.uploadProgressPermille);
         }

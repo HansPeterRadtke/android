@@ -5,14 +5,30 @@ final class MainScreenText {
 
     static String transfer(boolean recording, long totalBytes, long pendingBytes,
                            int progressPermille) {
+        return transfer(recording, totalBytes, pendingBytes, progressPermille,
+                "idle", -1, 0L, 0L);
+    }
+
+    static String transfer(boolean recording, long totalBytes, long pendingBytes,
+                           int progressPermille, String liveOperation,
+                           int liveSequence, long liveDurableBytes,
+                           long liveTotalBytes) {
+        String live = "";
+        if ("upload_chunk".equals(liveOperation) && liveTotalBytes > 0L) {
+            live = String.format(java.util.Locale.US,
+                    " · chunk %d: %s/%s",
+                    liveSequence + 1,
+                    RecordingUi.formatBytes(liveDurableBytes),
+                    RecordingUi.formatBytes(liveTotalBytes));
+        }
         if (totalBytes <= 0L) {
             return recording
-                    ? "Server: waiting for the first protected audio"
-                    : "Server: nothing waiting";
+                    ? "Server: waiting for the first protected audio" + live
+                    : "Server: nothing waiting" + live;
         }
-        if (pendingBytes <= 0L) return "Server: complete";
-        return String.format(java.util.Locale.US, "Server: %.1f%% · %s remaining",
-                progressPermille / 10.0f, RecordingUi.formatBytes(pendingBytes));
+        if (pendingBytes <= 0L) return "Server: complete" + live;
+        return String.format(java.util.Locale.US, "Server: %.1f%% · %s remaining%s",
+                progressPermille / 10.0f, RecordingUi.formatBytes(pendingBytes), live);
     }
 
     static String microphone(boolean recording, boolean signalDetected) {

@@ -57,6 +57,36 @@ public final class ReliableUploader {
     private volatile int watchdogTrips;
     private volatile int retryAttempt;
 
+    public static final class LiveProgress {
+        public final String operation;
+        public final String sessionId;
+        public final int sequence;
+        public final long durableBytes;
+        public final long totalBytes;
+        public final long lastProgressWallMs;
+        public final int retryAttempt;
+        public final String lastFailure;
+
+        LiveProgress(String operation, String sessionId, int sequence,
+                     long durableBytes, long totalBytes, long lastProgressWallMs,
+                     int retryAttempt, String lastFailure) {
+            this.operation = operation == null ? "" : operation;
+            this.sessionId = sessionId == null ? "" : sessionId;
+            this.sequence = sequence;
+            this.durableBytes = Math.max(0L, durableBytes);
+            this.totalBytes = Math.max(0L, totalBytes);
+            this.lastProgressWallMs = Math.max(0L, lastProgressWallMs);
+            this.retryAttempt = retryAttempt;
+            this.lastFailure = lastFailure == null ? "" : lastFailure;
+        }
+    }
+
+    public LiveProgress liveProgress() {
+        return new LiveProgress(currentOperation, currentSessionId,
+                currentSequence, currentDurableBytes, currentTotalBytes,
+                lastProgressWallMs, retryAttempt, lastFailure);
+    }
+
     public ReliableUploader(Context context, ReliableSessionStore store,
                             String baseUrl, Listener listener) {
         this(context, store, baseUrl, listener, false, false);

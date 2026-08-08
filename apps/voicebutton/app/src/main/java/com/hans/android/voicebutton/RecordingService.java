@@ -96,6 +96,13 @@ public final class RecordingService extends Service {
         public final int uploadTotalChunks;
         public final int uploadDurableChunks;
         public final int uploadProgressPermille;
+        public final String liveUploadOperation;
+        public final String liveUploadSessionId;
+        public final int liveUploadSequence;
+        public final long liveUploadDurableBytes;
+        public final long liveUploadTotalBytes;
+        public final int liveUploadProgressPermille;
+        public final long liveUploadLastProgressWallMs;
         public final String selectedInput;
         public final String routedInput;
         public final List<ReliableSessionManifest> sessions;
@@ -112,6 +119,10 @@ public final class RecordingService extends Service {
                  int inputLevelPermille, boolean inputSignalDetected,
                  long uploadTotalBytes, long uploadDurableBytes, long uploadPendingBytes,
                  int uploadTotalChunks, int uploadDurableChunks, int uploadProgressPermille,
+                 String liveUploadOperation, String liveUploadSessionId,
+                 int liveUploadSequence, long liveUploadDurableBytes,
+                 long liveUploadTotalBytes, int liveUploadProgressPermille,
+                 long liveUploadLastProgressWallMs,
                  String selectedInput, String routedInput,
                  List<ReliableSessionManifest> sessions, ReliableSessionManifest interrupted,
                  ReliableSessionManifest openSession, String currentSessionId,
@@ -133,6 +144,13 @@ public final class RecordingService extends Service {
             this.uploadTotalChunks = uploadTotalChunks;
             this.uploadDurableChunks = uploadDurableChunks;
             this.uploadProgressPermille = uploadProgressPermille;
+            this.liveUploadOperation = liveUploadOperation == null ? "" : liveUploadOperation;
+            this.liveUploadSessionId = liveUploadSessionId == null ? "" : liveUploadSessionId;
+            this.liveUploadSequence = liveUploadSequence;
+            this.liveUploadDurableBytes = liveUploadDurableBytes;
+            this.liveUploadTotalBytes = liveUploadTotalBytes;
+            this.liveUploadProgressPermille = liveUploadProgressPermille;
+            this.liveUploadLastProgressWallMs = liveUploadLastProgressWallMs;
             this.selectedInput = selectedInput;
             this.routedInput = routedInput;
             this.sessions = sessions;
@@ -149,6 +167,7 @@ public final class RecordingService extends Service {
             return new Snapshot("READY", "Choose an input and start recording", false, false, 0L, 0L,
                     -120f, -120f, 0, false,
                     0L, 0L, 0L, 0, 0, 0,
+                    "idle", "", -1, 0L, 0L, 0, 0L,
                     "No microphone selected", "Not recording", Collections.emptyList(), null, null, null,
                     false, false, "", 0);
         }
@@ -327,6 +346,7 @@ public final class RecordingService extends Service {
         snapshot = new Snapshot("STARTING", "Opening protected recording storage",
                 false, false, 0L, 0L, -120f, -120f, 0, false,
                 0L, 0L, 0L, 0, 0, 0,
+                "idle", "", -1, 0L, 0L, 0, 0L,
                 "Microphone not ready", "Not recording", Collections.emptyList(),
                 null, null, null, false, false, "", 0);
         publish();
@@ -338,6 +358,7 @@ public final class RecordingService extends Service {
                     "Starting the recording worker", failure), false, false,
                     0L, 0L, -120f, -120f, 0, false,
                     0L, 0L, 0L, 0, 0, 0,
+                    "idle", "", -1, 0L, 0L, 0, 0L,
                     "Microphone unavailable", "Not recording", Collections.emptyList(),
                     null, null, null, false, false, "", 0);
             publish();
@@ -379,6 +400,7 @@ public final class RecordingService extends Service {
             snapshot = new Snapshot("FAILED", exact, false, false,
                     0L, 0L, -120f, -120f, 0, false,
                     0L, 0L, 0L, 0, 0, 0,
+                    "idle", "", -1, 0L, 0L, 0, 0L,
                     "No microphone selected", "Not recording",
                     Collections.emptyList(), null, null, null,
                     failureAlarm.isActive(), failureAlarm.isAudible(),
@@ -1669,7 +1691,7 @@ public final class RecordingService extends Service {
                     || humanState.startsWith("Committing")
                     || humanState.startsWith("Reconciling");
             long now = SystemClock.elapsedRealtime();
-            if (terminal || now - lastUploaderRefreshElapsedMs >= 2000L) {
+            if (terminal || now - lastUploaderRefreshElapsedMs >= 500L) {
                 String requested = humanState.startsWith("Stored completely")
                         ? "READY" : "SYNCHRONIZING";
                 pendingUploaderRefresh.set(new RefreshRequest(
@@ -1867,6 +1889,22 @@ public final class RecordingService extends Service {
                 }
             }
         }
+        ReliableUploader.LiveProgress liveUpload = uploader == null ? null : uploader.liveProgress();
+        String liveOperation = liveUpload == null ? "idle" : liveUpload.operation;
+        String liveSessionId = liveUpload == null ? "" : liveUpload.sessionId;
+        int liveSequence = liveUpload == null ? -1 : liveUpload.sequence;
+        long liveDurable = liveUpload == null ? 0L : liveUpload.durableBytes;
+        long liveTotal = liveUpload == null ? 0L : liveUpload.totalBytes;
+        int livePermille = RecordingFeedback.uploadPermille(liveDurable, liveTotal);
+        long liveWall = liveUpload == null ? 0L : liveUpload.lastProgressWallMs;
+        if ("upload_chunk".equals(liveOperation) && liveTotal > 0L
+                && liveSequence >= 0 && !liveSessionId.isEmpty()) {
+            long persisted = persistedUploadBytes(sessions, liveSessionId,
+                    liveSequence);
+            long liveDelta = Math.max(0L,
+                    Math.min(liveTotal, liveDurable) - persisted);
+            if (liveDelta > 0L) uploadDurableBytes += liveDelta;
+        }
         long uploadPendingBytes = Math.max(0L, uploadTotalBytes - uploadDurableBytes);
         int uploadProgressPermille = RecordingFeedback.uploadPermille(
                 uploadDurableBytes, uploadTotalBytes);
@@ -1889,9 +1927,25 @@ public final class RecordingService extends Service {
                 inputLevelPermille, inputSignalDetected,
                 uploadTotalBytes, uploadDurableBytes, uploadPendingBytes,
                 uploadTotalChunks, uploadDurableChunks, uploadProgressPermille,
+                liveOperation, liveSessionId, liveSequence, liveDurable, liveTotal,
+                livePermille, liveWall,
                 selected, routedInput, sessions, interrupted, open, resolvedSessionId,
                 failureAlarm.isActive(), failureAlarm.isAudible(),
                 failureAlarm.getMessage(), recordingRecoveryAttempt);
+    }
+
+    private static long persistedUploadBytes(List<ReliableSessionManifest> sessions,
+                                             String sessionId, int sequence) {
+        if (sessions == null || sessionId == null || sessionId.isEmpty()) return 0L;
+        for (ReliableSessionManifest manifest : sessions) {
+            if (manifest == null || !sessionId.equals(manifest.sessionId)) continue;
+            ReliableSessionManifest.Segment segment = manifest.findSegment(sequence);
+            if (segment == null) return 0L;
+            if (segment.remoteAccepted) return Math.max(0L, segment.mp3Bytes);
+            return Math.max(0L, Math.min(segment.mp3Bytes,
+                    segment.remotePartialBytes));
+        }
+        return 0L;
     }
 
     private void applySnapshot(Snapshot built, RefreshRequest request) {
@@ -1944,6 +1998,10 @@ public final class RecordingService extends Service {
                 previous.uploadTotalBytes, previous.uploadDurableBytes,
                 previous.uploadPendingBytes, previous.uploadTotalChunks,
                 previous.uploadDurableChunks, previous.uploadProgressPermille,
+                previous.liveUploadOperation, previous.liveUploadSessionId,
+                previous.liveUploadSequence, previous.liveUploadDurableBytes,
+                previous.liveUploadTotalBytes, previous.liveUploadProgressPermille,
+                previous.liveUploadLastProgressWallMs,
                 previous.selectedInput, previous.routedInput, previous.sessions,
                 previous.interrupted, previous.openSession, previous.currentSessionId,
                 previous.recordingErrorActive, previous.recordingErrorAlarmAudible,
