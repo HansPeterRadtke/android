@@ -15,15 +15,17 @@ import com.hans.android.audio.AudioRouteController;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Loss-averse microphone capture.
  *
- * The AudioRecord thread writes raw PCM directly to one append-only journal for
- * the entire capture run. It never waits for MP3 encoding, manifest rewrites,
- * diagnostics transmission, or network upload. The journal is synchronized at
- * a bounded interval and is discoverable from its filename after process death.
+ * The urgent AudioRecord thread only reads microphone samples, computes levels,
+ * and copies them into RAM. Disk append, fsync, publish, MP3 encoding,
+ * diagnostics transmission, and network upload are handled by other threads.
  */
 public final class JournaledMp3Recorder {
     public interface Listener {
@@ -46,6 +48,8 @@ public final class JournaledMp3Recorder {
     private static final int BLOCK_MS = 50;
     private static final int AUDIO_RECORD_BUFFER_MS = 30_000;
     private static final int PCM_SYNC_MS = 1_000;
+    private static final int WRITER_QUEUE_WARN_BLOCKS = 200;
+    private static final long WRITER_JOIN_TIMEOUT_MS = 60_000L;
     private static final long NO_DATA_GRACE_MS = 3_000L;
 
     private final AtomicBoolean recording = new AtomicBoolean(false);
@@ -58,7 +62,7 @@ public final class JournaledMp3Recorder {
         if (!recording.compareAndSet(false, true)) return false;
         captureThread = new Thread(() -> capture(
                 context.getApplicationContext(), input, store, sessionId,
-                listener), "reliable-audio-direct-journal");
+                listener), "reliable-audio-capture");
         captureThread.setPriority(Thread.MAX_PRIORITY);
         captureThread.start();
         return true;
@@ -75,8 +79,6 @@ public final class JournaledMp3Recorder {
             try { value.stop(); }
             catch (Exception ignored) {}
         }
-        Thread valueThread = captureThread;
-        if (valueThread != null) valueThread.interrupt();
     }
 
     public boolean awaitStopped(long timeoutMs) {
@@ -120,6 +122,10 @@ public final class JournaledMp3Recorder {
         return false;
     }
 
+    static boolean captureThreadWritesDisk() {
+        return false;
+    }
+
     private void capture(Context context, AudioInputOption input,
                          ReliableSessionStore store, String sessionId,
                          Listener listener) {
@@ -128,19 +134,17 @@ public final class JournaledMp3Recorder {
         AudioRecord recorder = null;
         AutomaticGainControl automaticGainControl = null;
         DurablePcmJournal journal = null;
+        PcmJournalWriter writer = null;
+        PcmJournalWriter.Stats writerStats = PcmJournalWriter.Stats.empty();
         int seq = -1;
         int inputSampleRate = 0;
         long capturedSamples = 0L;
-        long samplesSinceSync = 0L;
-        long syncCount = 0L;
-        long syncTotalMs = 0L;
-        long syncMaxMs = 0L;
         long createdAtMs = 0L;
         String stage = "capture_start";
         boolean failureReported = false;
         try {
             listener.onRecorderEvent("capture.pipeline_start", -1, 0L, 0L,
-                    "direct_pcm_journal=true, queue=false, live_mp3=false"
+                    "direct_pcm_journal=true, queue=true, live_mp3=false"
                             + ", block_ms=" + BLOCK_MS
                             + ", pcm_sync_ms=" + PCM_SYNC_MS
                             + ", audio_record_buffer_ms="
@@ -197,6 +201,13 @@ public final class JournaledMp3Recorder {
             journal = new DurablePcmJournal(directory, seq,
                     inputSampleRate);
             createdAtMs = System.currentTimeMillis();
+            writer = new PcmJournalWriter(journal, seq, inputSampleRate,
+                    listener);
+            writer.start();
+            listener.onRecorderEvent("capture.writer_thread_started", seq,
+                    0L, 0L, "queue_unbounded=true, warn_blocks="
+                            + WRITER_QUEUE_WARN_BLOCKS
+                            + ", thread=reliable-audio-pcm-writer");
 
             stage = "start_audio_record";
             recorder.startRecording();
@@ -227,8 +238,6 @@ public final class JournaledMp3Recorder {
             long levelSampleCount = 0L;
             long levelTarget = Math.max(1L,
                     inputSampleRate / 10L);
-            long syncTarget = Math.max(1L,
-                    inputSampleRate * PCM_SYNC_MS / 1000L);
 
             while (recording.get()) {
                 stage = "read_microphone_samples";
@@ -243,10 +252,10 @@ public final class JournaledMp3Recorder {
                         if (absolute > levelPeak) levelPeak = absolute;
                         levelSquareSum += (double)value * (double)value;
                     }
-                    stage = "append_direct_pcm_journal";
-                    journal.append(readBuffer, read);
+                    stage = "enqueue_pcm_samples";
+                    writer.enqueue(readBuffer, read, capturedSamples);
+                    writer.throwIfFailed();
                     capturedSamples += read;
-                    samplesSinceSync += read;
                     levelSampleCount += read;
 
                     if (levelSampleCount >= levelTarget) {
@@ -262,23 +271,6 @@ public final class JournaledMp3Recorder {
                         levelSquareSum = 0.0;
                         levelPeak = 0;
                         levelSampleCount = 0L;
-                    }
-
-                    if (samplesSinceSync >= syncTarget) {
-                        stage = "sync_direct_pcm_journal";
-                        long syncMs = journal.sync();
-                        syncCount++;
-                        syncTotalMs += syncMs;
-                        syncMaxMs = Math.max(syncMaxMs, syncMs);
-                        samplesSinceSync = 0L;
-                        if (syncMs >= 1000L) {
-                            listener.onRecorderEvent(
-                                    "capture.slow_pcm_sync", seq,
-                                    capturedSamples * 2L,
-                                    capturedSamples * 1000L
-                                            / Math.max(1, inputSampleRate),
-                                    "sync_duration_ms=" + syncMs);
-                        }
                     }
                 } else if (!recording.get()) {
                     break;
@@ -314,7 +306,6 @@ public final class JournaledMp3Recorder {
                                 + problem.getClass().getName()
                                 + ", message="
                                 + String.valueOf(problem.getMessage()));
-                // Alarm/recovery is notified immediately, before final sync.
                 listener.onFailure(stage, problem.getClass().getName(),
                         problem.getMessage() == null
                                 ? "no exception message"
@@ -338,6 +329,22 @@ public final class JournaledMp3Recorder {
             }
             route.release();
 
+            if (writer != null) {
+                try {
+                    stage = "drain_pcm_writer";
+                    writerStats = writer.finishAndAwait(WRITER_JOIN_TIMEOUT_MS);
+                } catch (Throwable writerFailure) {
+                    if (!failureReported) {
+                        failureReported = true;
+                        listener.onFailure(stage,
+                                writerFailure.getClass().getName(),
+                                writerFailure.getMessage() == null
+                                        ? "no exception message"
+                                        : writerFailure.getMessage());
+                    }
+                }
+            }
+
             if (journal != null) {
                 try {
                     stage = "close_direct_pcm_journal";
@@ -355,9 +362,14 @@ public final class JournaledMp3Recorder {
                                 "capture.pcm_journal_closed", seq,
                                 capturedSamples * 2L, durationMs,
                                 "created_at_ms=" + createdAtMs
-                                        + ", sync_count=" + syncCount
-                                        + ", sync_total_ms=" + syncTotalMs
-                                        + ", sync_max_ms=" + syncMaxMs
+                                        + ", sync_count="
+                                        + writerStats.syncCount
+                                        + ", sync_total_ms="
+                                        + writerStats.syncTotalMs
+                                        + ", sync_max_ms="
+                                        + writerStats.syncMaxMs
+                                        + ", max_queue_depth="
+                                        + writerStats.maxQueueDepth
                                         + ", file="
                                         + closedFile.getName());
                     } else {
@@ -384,8 +396,12 @@ public final class JournaledMp3Recorder {
                     capturedSamples * 2L,
                     inputSampleRate <= 0 ? 0L
                             : capturedSamples * 1000L / inputSampleRate,
-                    "direct_pcm_journal=true, failure="
-                            + failureReported);
+                    "direct_pcm_journal=true, queue=true, failure="
+                            + failureReported
+                            + ", writer_samples="
+                            + writerStats.samplesWritten
+                            + ", max_queue_depth="
+                            + writerStats.maxQueueDepth);
             listener.onStopped(sessionId);
         }
     }
@@ -457,6 +473,166 @@ public final class JournaledMp3Recorder {
         RecordSetup(AudioRecord recorder, int sampleRate) {
             this.recorder = recorder;
             this.sampleRate = sampleRate;
+        }
+    }
+
+    private static final class PcmBlock {
+        static final PcmBlock END = new PcmBlock(new short[0], 0);
+        final short[] samples;
+        final int count;
+
+        private PcmBlock(short[] samples, int count) {
+            this.samples = samples;
+            this.count = count;
+        }
+
+        static PcmBlock copyOf(short[] source, int count) throws IOException {
+            if (source == null || count < 0 || count > source.length) {
+                throw new IOException("Invalid PCM queue block");
+            }
+            return new PcmBlock(Arrays.copyOf(source, count), count);
+        }
+    }
+
+    private static final class PcmJournalWriter {
+        private final LinkedBlockingQueue<PcmBlock> queue =
+                new LinkedBlockingQueue<>();
+        private final AtomicReference<Throwable> failure =
+                new AtomicReference<>();
+        private final DurablePcmJournal journal;
+        private final int sequence;
+        private final int sampleRate;
+        private final Listener listener;
+        private final long syncTargetSamples;
+        private final Thread thread;
+        private volatile long samplesWritten;
+        private volatile long samplesSinceSync;
+        private volatile long syncCount;
+        private volatile long syncTotalMs;
+        private volatile long syncMaxMs;
+        private volatile int maxQueueDepth;
+
+        PcmJournalWriter(DurablePcmJournal journal, int sequence,
+                         int sampleRate, Listener listener) {
+            this.journal = journal;
+            this.sequence = sequence;
+            this.sampleRate = sampleRate;
+            this.listener = listener;
+            this.syncTargetSamples = Math.max(1L,
+                    sampleRate * PCM_SYNC_MS / 1000L);
+            this.thread = new Thread(this::run, "reliable-audio-pcm-writer");
+        }
+
+        void start() {
+            thread.start();
+        }
+
+        void enqueue(short[] samples, int count, long capturedBefore)
+                throws IOException {
+            throwIfFailed();
+            PcmBlock block = PcmBlock.copyOf(samples, count);
+            queue.offer(block);
+            int depth = queue.size();
+            if (depth > maxQueueDepth) maxQueueDepth = depth;
+            if (depth >= WRITER_QUEUE_WARN_BLOCKS
+                    && depth % WRITER_QUEUE_WARN_BLOCKS == 0) {
+                listener.onRecorderEvent("capture.writer_queue_pressure",
+                        sequence, capturedBefore * 2L,
+                        sampleRate <= 0 ? 0L
+                                : capturedBefore * 1000L / sampleRate,
+                        "queue_depth_blocks=" + depth
+                                + ", queue_depth_ms="
+                                + (depth * BLOCK_MS));
+            }
+        }
+
+        Stats finishAndAwait(long timeoutMs) throws IOException {
+            queue.offer(PcmBlock.END);
+            long deadline = SystemClock.elapsedRealtime()
+                    + Math.max(0L, timeoutMs);
+            boolean interrupted = false;
+            while (thread.isAlive()) {
+                long remaining = deadline - SystemClock.elapsedRealtime();
+                if (remaining <= 0L) break;
+                try {
+                    thread.join(Math.min(remaining, 250L));
+                } catch (InterruptedException interruption) {
+                    interrupted = true;
+                    Thread.interrupted();
+                }
+            }
+            if (thread.isAlive()) {
+                thread.interrupt();
+                failure.compareAndSet(null, new IOException(
+                        "PCM writer did not drain within " + timeoutMs
+                                + " ms"));
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+            throwIfFailed();
+            return new Stats(samplesWritten, syncCount, syncTotalMs,
+                    syncMaxMs, maxQueueDepth);
+        }
+
+        void throwIfFailed() throws IOException {
+            Throwable value = failure.get();
+            if (value == null) return;
+            IOException wrapped = new IOException("PCM writer failed: "
+                    + value.getClass().getSimpleName() + ": "
+                    + value.getMessage());
+            wrapped.initCause(value);
+            throw wrapped;
+        }
+
+        private void run() {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_DEFAULT);
+            try {
+                while (true) {
+                    PcmBlock block = queue.take();
+                    if (block == PcmBlock.END) break;
+                    journal.append(block.samples, block.count);
+                    samplesWritten += block.count;
+                    samplesSinceSync += block.count;
+                    if (samplesSinceSync >= syncTargetSamples) {
+                        long syncMs = journal.sync();
+                        syncCount++;
+                        syncTotalMs += syncMs;
+                        syncMaxMs = Math.max(syncMaxMs, syncMs);
+                        samplesSinceSync = 0L;
+                        if (syncMs >= 1000L) {
+                            listener.onRecorderEvent(
+                                    "capture.slow_pcm_sync", sequence,
+                                    samplesWritten * 2L,
+                                    sampleRate <= 0 ? 0L
+                                            : samplesWritten * 1000L
+                                            / sampleRate,
+                                    "sync_duration_ms=" + syncMs
+                                            + ", queue_depth_blocks="
+                                            + queue.size());
+                        }
+                    }
+                }
+            } catch (Throwable problem) {
+                failure.compareAndSet(null, problem);
+            }
+        }
+
+        static final class Stats {
+            final long samplesWritten;
+            final long syncCount;
+            final long syncTotalMs;
+            final long syncMaxMs;
+            final int maxQueueDepth;
+
+            Stats(long samplesWritten, long syncCount, long syncTotalMs,
+                  long syncMaxMs, int maxQueueDepth) {
+                this.samplesWritten = samplesWritten;
+                this.syncCount = syncCount;
+                this.syncTotalMs = syncTotalMs;
+                this.syncMaxMs = syncMaxMs;
+                this.maxQueueDepth = maxQueueDepth;
+            }
+
+            static Stats empty() { return new Stats(0L, 0L, 0L, 0L, 0); }
         }
     }
 }
