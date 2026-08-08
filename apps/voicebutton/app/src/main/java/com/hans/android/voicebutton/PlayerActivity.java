@@ -82,6 +82,8 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
     private long waveformBitmapBytes;
     private long logicalDurationMs;
     private boolean userSeeking;
+    private boolean userPlaybackIntent;
+    private long userPlaybackIntentElapsedMs;
     private PlayerSource pendingExportSource;
     private final ServiceConnection playerConnection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -281,9 +283,13 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                     "service_has_source", player.hasSource(),
                     "pending_open", player.hasPendingOpen());
             if (player.isPlaying()) {
+                userPlaybackIntent = false;
+                userPlaybackIntentElapsedMs = 0L;
                 playButton.setText("Play");
                 stateText.setText("Pausing");
             } else {
+                userPlaybackIntent = true;
+                userPlaybackIntentElapsedMs = android.os.SystemClock.elapsedRealtime();
                 playButton.setText("Pause");
                 stateText.setText("Starting playback");
             }
@@ -696,9 +702,29 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                 loadWaveform(originalSource, generation);
             }
         }
-        String visibleState = value.error.isEmpty() ? value.state : value.error;
+        if (!value.error.isEmpty() || "stopped".equals(value.state)
+                || "ended".equals(value.state)) {
+            userPlaybackIntent = false;
+            userPlaybackIntentElapsedMs = 0L;
+        } else if (value.playing) {
+            userPlaybackIntent = true;
+            userPlaybackIntentElapsedMs = 0L;
+        } else if (userPlaybackIntent && userPlaybackIntentElapsedMs > 0L
+                && android.os.SystemClock.elapsedRealtime()
+                - userPlaybackIntentElapsedMs > 8000L) {
+            userPlaybackIntent = false;
+            userPlaybackIntentElapsedMs = 0L;
+        }
+        boolean optimisticPlayback = userPlaybackIntent
+                && value.error.isEmpty()
+                && (PlayerTerminalPolicy.startIsPending(value.state)
+                || "ready".equals(value.state)
+                || "paused".equals(value.state));
+        String visibleState = value.error.isEmpty()
+                ? optimisticPlayback ? "Starting playback" : value.state
+                : value.error;
         stateText.setText(visibleState);
-        playButton.setText(value.playing ? "Pause" : "Play");
+        playButton.setText((value.playing || optimisticPlayback) ? "Pause" : "Play");
         previousButton.setEnabled(value.queueIndex > 0);
         nextButton.setEnabled(value.queueIndex >= 0
                 && value.queueIndex + 1 < value.queueSize);
@@ -713,7 +739,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         updatePosition();
     }
 
-    private void updatePosition(){long logical=logicalPosition(),length=logicalDuration();timeText.setText(formatTime(logical)+" / "+formatTime(length));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));playButton.setText(player.isPlaying()?"Pause":"Play");}
+    private void updatePosition(){long logical=logicalPosition(),length=logicalDuration();timeText.setText(formatTime(logical)+" / "+formatTime(length));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));boolean optimistic=userPlaybackIntent&&playerSnapshot.error.isEmpty()&&(PlayerTerminalPolicy.startIsPending(playerSnapshot.state)||"ready".equals(playerSnapshot.state)||"paused".equals(playerSnapshot.state));playButton.setText(player.isPlaying()||optimistic?"Pause":"Play");}
     private long logicalPosition(){return playerSnapshot.logicalTimeMs();}
     private long logicalDuration(){long value=playerSnapshot.logicalLengthMs();return value>0?value:logicalDurationMs;}
     private void updateLabels(){speedText.setText(formatSpeed(settings.speed));backSkipButton.setText("−"+formatSeconds(settings.skipBack));forwardSkipButton.setText("+"+formatSeconds(settings.skipForward));}

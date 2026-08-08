@@ -317,8 +317,16 @@ final class VlcAudioPlayer {
                 break;
             case MediaPlayer.Event.Paused:
                 playing = false;
-                engineState = "paused";
-                notifyState("paused");
+                if (!pendingShouldPlay && cachedTimeMs <= 0L
+                        && ("buffering".equals(engineState)
+                        || "opening".equals(engineState)
+                        || "media-ready".equals(engineState))) {
+                    engineState = "ready";
+                    notifyState("ready");
+                } else {
+                    engineState = "paused";
+                    notifyState("paused");
+                }
                 break;
             case MediaPlayer.Event.Stopped:
                 playing = false;
@@ -332,11 +340,17 @@ final class VlcAudioPlayer {
                 notifyState("opening");
                 break;
             case MediaPlayer.Event.Buffering:
-                engineState = "buffering";
                 int percent = Math.round(event.getBuffering());
-                if (Math.abs(percent - lastBufferPercent) >= 10 || percent >= 100) {
-                    lastBufferPercent = percent;
-                    notifyState("buffering " + percent + "%");
+                if (!pendingShouldPlay && !playing && percent >= 100) {
+                    engineState = "ready";
+                    lastBufferPercent = 100;
+                    notifyState("ready");
+                } else {
+                    engineState = "buffering";
+                    if (Math.abs(percent - lastBufferPercent) >= 10 || percent >= 100) {
+                        lastBufferPercent = percent;
+                        notifyState("buffering " + percent + "%");
+                    }
                 }
                 break;
             case MediaPlayer.Event.TimeChanged:

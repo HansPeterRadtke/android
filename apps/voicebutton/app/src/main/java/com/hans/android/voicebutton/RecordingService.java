@@ -242,6 +242,8 @@ public final class RecordingService extends Service {
     private volatile float liveInputRmsDbfs = -120f;
     private volatile float liveInputPeakDbfs = -120f;
     private volatile long liveInputLevelAtElapsedMs;
+    private volatile String lastEnhancementSummary =
+            "live_platform_agc=unknown offline_enhancement=not_configured";
     private final RecordingFailureAlarm failureAlarm = new RecordingFailureAlarm(main);
     private volatile boolean recordingRecoveryPending;
     private volatile int recordingRecoveryAttempt;
@@ -1140,6 +1142,14 @@ public final class RecordingService extends Service {
                                               long bytes,
                                               long durationMs,
                                               String detail) {
+            if ("capture.automatic_gain_control".equals(event)) {
+                lastEnhancementSummary = "live_platform_agc=" + detail
+                        + "; offline_enhancement=not_configured"
+                        + "; finish_blocks_for_encoding_only=false";
+            } else if ("capture.pipeline_start".equals(event)) {
+                lastEnhancementSummary = "live_platform_agc=pending; offline_enhancement=not_configured"
+                        + "; capture_pipeline=" + detail;
+            }
             String level = event.endsWith("exception")
                     ? PhoneDiagnostics.ERROR : PhoneDiagnostics.DEBUG;
             diag(level, event, currentSessionId, detail,
