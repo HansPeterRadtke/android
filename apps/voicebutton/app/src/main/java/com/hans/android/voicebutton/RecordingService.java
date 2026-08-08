@@ -385,6 +385,9 @@ public final class RecordingService extends Service {
                     PhoneDiagnostics.fields("initialization_ms", Math.max(0L,
                                     SystemClock.elapsedRealtime() - started),
                             "thread", Thread.currentThread().getName()));
+            publishImmediateState("READY",
+                    "Ready to create a loss-protected recording",
+                    "service_fast_ready");
             refresh("READY", "Ready to create a loss-protected recording",
                     false, "Not recording");
             scheduleDeferredStartupRecovery("service_initialized");
@@ -1797,6 +1800,50 @@ public final class RecordingService extends Service {
         return backgroundWorkCached;
     }
 
+    private void publishImmediateState(String state, String explanation,
+                                       String reason) {
+        main.post(() -> {
+            snapshot = copySnapshotWithState(snapshot, state, explanation);
+            VoiceButtonLocalTrace.log(this, "recording.service.immediate_state",
+                    "reason", reason,
+                    "state", state,
+                    "explanation", explanation,
+                    "uploader", uploader == null ? "missing" : uploader.debugSummary());
+            publish();
+            updateNotification();
+        });
+    }
+
+    private static Snapshot copySnapshotWithState(Snapshot previous,
+                                                  String state,
+                                                  String explanation) {
+        if (previous == null) {
+            return new Snapshot(state, explanation, false, false,
+                    0L, 0L, -120f, -120f, 0, false,
+                    0L, 0L, 0L, 0, 0, 0,
+                    "idle", "", -1, 0L, 0L, 0, 0L,
+                    "Microphone unavailable", "Not recording",
+                    Collections.emptyList(), null, null, null,
+                    false, false, "", 0);
+        }
+        return new Snapshot(state, explanation, previous.recording,
+                previous.paused, previous.durationMs, previous.localBytes,
+                previous.inputRmsDbfs, previous.inputPeakDbfs,
+                previous.inputLevelPermille, previous.inputSignalDetected,
+                previous.uploadTotalBytes, previous.uploadDurableBytes,
+                previous.uploadPendingBytes, previous.uploadTotalChunks,
+                previous.uploadDurableChunks, previous.uploadProgressPermille,
+                previous.liveUploadOperation, previous.liveUploadSessionId,
+                previous.liveUploadSequence, previous.liveUploadDurableBytes,
+                previous.liveUploadTotalBytes, previous.liveUploadProgressPermille,
+                previous.liveUploadLastProgressWallMs,
+                previous.selectedInput, previous.routedInput,
+                previous.sessions, previous.interrupted, previous.openSession,
+                previous.currentSessionId, previous.recordingErrorActive,
+                previous.recordingErrorAlarmAudible,
+                previous.recordingErrorMessage, previous.recordingRecoveryAttempt);
+    }
+
     private void refreshFromWorker(String state, String explanation) {
         refresh(state, explanation, snapshot.recording, snapshot.routedInput);
     }
@@ -1821,8 +1868,26 @@ public final class RecordingService extends Service {
             while (!exitRequested.get()) {
                 RefreshRequest request = pendingRefresh.getAndSet(null);
                 if (request == null) break;
-                Snapshot built = buildSnapshot(request);
-                main.post(() -> applySnapshot(built, request));
+                try {
+                    Snapshot built = buildSnapshot(request);
+                    main.post(() -> applySnapshot(built, request));
+                } catch (Exception failure) {
+                    String message = "Status refresh failed; keeping last usable service state: "
+                            + failure.getClass().getSimpleName() + ": "
+                            + String.valueOf(failure.getMessage());
+                    diagError("service.refresh_failed", snapshot.currentSessionId,
+                            "Building service status snapshot", failure,
+                            PhoneDiagnostics.fields("requested_state", request.state,
+                                    "requested_explanation", request.explanation));
+                    main.post(() -> {
+                        String fallbackState = "STARTING".equals(snapshot.state)
+                                ? "READY" : snapshot.state;
+                        snapshot = copySnapshotWithState(snapshot, fallbackState,
+                                message);
+                        publish();
+                        if (shouldKeepServiceAlive()) updateNotification();
+                    });
+                }
             }
         } finally {
             refreshWorkerRunning.set(false);
@@ -1841,16 +1906,27 @@ public final class RecordingService extends Service {
                 && (lastSessionListScanElapsedMs <= 0L
                 || nowElapsed - lastSessionListScanElapsedMs
                 >= STATUS_SESSION_SCAN_INTERVAL_MS);
-        List<ReliableSessionManifest> sessions = store == null
-                ? Collections.emptyList()
-                : scanSessions ? store.list() : previous.sessions;
-        if (scanSessions) lastSessionListScanElapsedMs = nowElapsed;
-        ReliableSessionManifest open = captureState || !scanSessions
-                ? previous.openSession
-                : store == null ? null : store.latestUnfinished();
-        ReliableSessionManifest interrupted = captureState || !scanSessions
-                ? previous.interrupted
-                : store == null ? null : store.latestInterrupted();
+        List<ReliableSessionManifest> sessions = previous.sessions;
+        ReliableSessionManifest open = previous.openSession;
+        ReliableSessionManifest interrupted = previous.interrupted;
+        if (store == null) {
+            sessions = Collections.emptyList();
+            open = null;
+            interrupted = null;
+        } else if (scanSessions) {
+            try {
+                sessions = store.list();
+                open = store.latestUnfinished();
+                interrupted = store.latestInterrupted();
+                lastSessionListScanElapsedMs = nowElapsed;
+            } catch (Exception scanFailure) {
+                scanSessions = false;
+                diagError("service.status_scan_failed", previous.currentSessionId,
+                        "Scanning recording status", scanFailure,
+                        PhoneDiagnostics.fields("previous_state", previous.state,
+                                "session_count", previous.sessions.size()));
+            }
+        }
         boolean actualPaused = open != null && open.paused && !actualRecording;
         boolean actualInterrupted = open != null && open.isInterrupted() && !actualRecording;
         String state = RecordingStateResolver.normalize(request.state,
@@ -1914,14 +1990,32 @@ public final class RecordingService extends Service {
         float peakDbfs = actualRecording && levelAgeMs < 1500L ? liveInputPeakDbfs : -120f;
         int inputLevelPermille = RecordingFeedback.levelPermille(peakDbfs);
         boolean inputSignalDetected = actualRecording && levelAgeMs < 1500L && peakDbfs > -50f;
-        if (store != null && !actualRecording
-                && nowElapsed - lastLocalBytesScanElapsedMs >= 30000L) {
-            localBytesCached = store.localBytes();
-            lastLocalBytesScanElapsedMs = nowElapsed;
+        if (store != null && !actualRecording) {
+            if (lastLocalBytesScanElapsedMs <= 0L) {
+                lastLocalBytesScanElapsedMs = nowElapsed;
+            } else if (nowElapsed - lastLocalBytesScanElapsedMs >= 30000L) {
+                try {
+                    localBytesCached = store.localBytes();
+                    lastLocalBytesScanElapsedMs = nowElapsed;
+                } catch (Exception bytesFailure) {
+                    diagError("service.local_bytes_scan_failed",
+                            previous.currentSessionId,
+                            "Scanning local recording byte count", bytesFailure,
+                            PhoneDiagnostics.fields("previous_state", previous.state));
+                }
+            }
         }
         long localBytes = localBytesCached;
         if (store == null) pendingFolderSyncCached = false;
-        else if (scanSessions) pendingFolderSyncCached = store.hasPendingFolderSync();
+        else if (scanSessions) {
+            try { pendingFolderSyncCached = store.hasPendingFolderSync(); }
+            catch (Exception folderFailure) {
+                diagError("service.folder_sync_status_failed",
+                        previous.currentSessionId,
+                        "Scanning folder synchronization state", folderFailure,
+                        PhoneDiagnostics.fields("previous_state", previous.state));
+            }
+        }
         return new Snapshot(state, explanation, actualRecording, actualPaused,
                 duration, localBytes, rmsDbfs, peakDbfs,
                 inputLevelPermille, inputSignalDetected,
