@@ -635,6 +635,21 @@ public final class ReliableUploader {
                     segment.seq, status.serverId, status.manifestRevision,
                     remote.receivedAtMs, remote.durableAtMs));
         }
+        if (status.committed && remoteChunks.isEmpty()
+                && local.recordingFinished && local.conversionFinished
+                && !local.segments.isEmpty()) {
+            for (ReliableSessionManifest.Segment segment : local.orderedSegments()) {
+                remoteChunks.add(new ReliableSessionStore.RemoteChunkState(
+                        segment.seq, status.serverId, status.manifestRevision,
+                        0L, 0L));
+            }
+            listener.onDiagnostic("INFO", "upload.committed_without_segments",
+                    local.sessionId,
+                    "Jetson reports the recording committed without per-chunk rows; marking local chunks remote complete",
+                    fields("chunk_count", local.segments.size(),
+                            "server_id", status.serverId,
+                            "manifest_revision", status.manifestRevision), null);
+        }
         List<ReliableSessionStore.TranscriptState> transcripts = new ArrayList<>();
         for (ReliableUploadClient.Transcript transcript : status.transcripts.values()) {
             transcripts.add(new ReliableSessionStore.TranscriptState(
