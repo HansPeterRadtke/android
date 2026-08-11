@@ -5,14 +5,17 @@ final class MainScreenText {
 
     static String transfer(boolean recording, long totalBytes, long pendingBytes,
                            int progressPermille) {
-        return transfer(recording, totalBytes, pendingBytes, progressPermille,
-                "idle", -1, 0L, 0L);
+        return transfer("READY", recording, totalBytes, pendingBytes,
+                progressPermille, "idle", -1, 0L, 0L);
     }
 
-    static String transfer(boolean recording, long totalBytes, long pendingBytes,
-                           int progressPermille, String liveOperation,
-                           int liveSequence, long liveDurableBytes,
-                           long liveTotalBytes) {
+    static String transfer(String state, boolean recording, long totalBytes,
+                           long pendingBytes, int progressPermille,
+                           String liveOperation, int liveSequence,
+                           long liveDurableBytes, long liveTotalBytes) {
+        if ("STARTING".equals(state)) {
+            return "Server: checking protected storage";
+        }
         String live = "";
         if ("upload_chunk".equals(liveOperation) && liveTotalBytes > 0L) {
             live = String.format(java.util.Locale.US,
@@ -48,6 +51,7 @@ final class MainScreenText {
         if (alarmActive) return "NEEDS ATTENTION";
         if (recording) return "RECORDING";
         if (paused) return "PAUSED";
+        if ("STARTING".equals(state)) return "STARTING";
         if ("PREPARING".equals(state)) return "STARTING";
         if ("FINISHING".equals(state) || "PAUSING".equals(state)) return "SAVING";
         if ("FAILED".equals(state)) return "FAILED";
@@ -59,6 +63,7 @@ final class MainScreenText {
         if (alarmActive) return "Recording stopped unexpectedly. Recovery is active.";
         if (recording) return "Audio is being protected locally while server sync continues.";
         if (paused) return "Recording is paused and safe to resume.";
+        if ("STARTING".equals(state)) return "Opening protected recording storage and checking local sync state.";
         if ("PREPARING".equals(state)) return "Opening the selected microphone.";
         if ("FINISHING".equals(state) || "PAUSING".equals(state)) return "Saving the current audio safely.";
         if ("FAILED".equals(state)) return "An action failed. Open More for details and recovery.";

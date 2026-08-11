@@ -631,6 +631,12 @@ public final class RecordingService extends Service {
 
     public String buildSupportSummary() {
         Snapshot value = snapshot;
+        ReliableUploader uploaderValue = uploader;
+        if (("STARTING".equals(value.state) || uploaderValue == null)
+                && serviceInitialized && !serviceInitializing) {
+            value = copySnapshotWithState(value, "READY",
+                    "Ready to create a loss-protected recording");
+        }
         StringBuilder out = new StringBuilder(8192);
         out.append("Voice Button support summary\n");
         out.append("app_version=").append(BuildConfig.VERSION_NAME)
@@ -661,7 +667,8 @@ public final class RecordingService extends Service {
                 .append(FileNameParts.LAYOUT_ID).append('\n');
         out.append("player_lifecycle=foreground_service_atomic_checkpoint_v2\n");
         out.append("player=").append(limit(readLatestPlayerSummary(), 1000)).append('\n');
-        ReliableUploader uploaderValue = uploader;
+                out.append("storage_loaded=").append(serviceInitialized)
+                .append(" service_initializing=").append(serviceInitializing).append('\n');
         out.append("uploader=").append(uploaderValue == null
                 ? "unavailable" : limit(uploaderValue.debugSummary(), 1000)).append('\n');
         int start = Math.max(0, value.sessions.size() - 5);

@@ -732,8 +732,8 @@ public final class MainActivity extends Activity {
         if (value == null) {
             report = "Voice Button support summary\napp_version="
                     + BuildConfig.VERSION_NAME + " code=" + BuildConfig.VERSION_CODE
-                    + "\nservice=not_connected\nstate="
-                    + snapshot.state + "\nstatus=" + snapshot.explanation
+                    + "\nservice=not_connected\nsummary_reliability=stale_ui_snapshot"
+                    + "\nstate=" + snapshot.state + "\nstatus=" + snapshot.explanation
                     + "\nplayer=" + readLatestPlayerSummary()
                     + "\nlocal_trace_tail=\n"
                     + VoiceButtonLocalTrace.tail(this, 24000) + "\n";
@@ -780,6 +780,7 @@ public final class MainActivity extends Activity {
                         "service_bound", value != null,
                         "player", readLatestPlayerSummary());
                 String report = value == null ? "Recording service is not connected.\n"
+                        + "Summary reliability: stale UI snapshot only.\n"
                         + "Support summary:\n" + snapshot.state + "\n" + snapshot.explanation
                         + "\nPlayer:\n" + readLatestPlayerSummary()
                         + "\nLocal trace tail:\n" + VoiceButtonLocalTrace.tail(this, 48000) + "\n"
@@ -883,11 +884,11 @@ public final class MainActivity extends Activity {
         int level = snapshot.recording ? snapshot.inputLevelPermille : 0;
         if (Math.abs(micLevelBar.getProgress() - level) >= 8) micLevelBar.setProgress(level);
         micLevelBar.setContentDescription(micLevelText.getText());
-        setTextIfChanged(transferText, MainScreenText.transfer(snapshot.recording,
-                snapshot.uploadTotalBytes, snapshot.uploadPendingBytes,
-                snapshot.uploadProgressPermille, snapshot.liveUploadOperation,
-                snapshot.liveUploadSequence, snapshot.liveUploadDurableBytes,
-                snapshot.liveUploadTotalBytes));
+        setTextIfChanged(transferText, MainScreenText.transfer(snapshot.state,
+                snapshot.recording, snapshot.uploadTotalBytes,
+                snapshot.uploadPendingBytes, snapshot.uploadProgressPermille,
+                snapshot.liveUploadOperation, snapshot.liveUploadSequence,
+                snapshot.liveUploadDurableBytes, snapshot.liveUploadTotalBytes));
         if (progressBar.getProgress() != snapshot.uploadProgressPermille) {
             progressBar.setProgress(snapshot.uploadProgressPermille);
         }
