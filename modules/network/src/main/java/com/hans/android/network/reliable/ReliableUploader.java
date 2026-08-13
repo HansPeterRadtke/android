@@ -268,7 +268,7 @@ public final class ReliableUploader {
                             }
                         }
                     }
-                    List<ReliableSessionManifest> sessions = store.list();
+                    List<ReliableSessionManifest> sessions = prioritizeSessions(store.list());
                     for (ReliableSessionManifest manifest : sessions) {
                         if (!running.get()) break;
                         if (completedOnly && !manifest.recordingFinished) continue;
@@ -294,6 +294,11 @@ public final class ReliableUploader {
                             }
                             quarantineSession(manifest, failure);
                             quarantinedFound = true;
+                            currentOperation = "skipping_quarantined_recording";
+                            currentSessionId = "";
+                            currentSequence = -1;
+                            currentDurableBytes = 0L;
+                            currentTotalBytes = 0L;
                         }
                     }
                     retryAttempt = 0;
@@ -429,6 +434,21 @@ public final class ReliableUploader {
             if (!segment.remoteAccepted) return true;
         }
         return false;
+    }
+
+    private static List<ReliableSessionManifest> prioritizeSessions(
+            List<ReliableSessionManifest> sessions) {
+        List<ReliableSessionManifest> ordered = new ArrayList<>(sessions);
+        ordered.sort((left, right) -> {
+            int leftAudio = hasPendingAudio(left) ? 1 : 0;
+            int rightAudio = hasPendingAudio(right) ? 1 : 0;
+            if (leftAudio != rightAudio) return rightAudio - leftAudio;
+            int leftTransfer = needsTransferWork(left) ? 1 : 0;
+            int rightTransfer = needsTransferWork(right) ? 1 : 0;
+            if (leftTransfer != rightTransfer) return rightTransfer - leftTransfer;
+            return Long.compare(right.createdAt, left.createdAt);
+        });
+        return ordered;
     }
 
     private static boolean needsTransferWork(ReliableSessionManifest manifest) {
