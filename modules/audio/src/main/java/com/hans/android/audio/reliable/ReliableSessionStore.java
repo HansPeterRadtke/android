@@ -901,6 +901,56 @@ public final class ReliableSessionStore {
         return new File(sessionDir(sessionId), segment.mp3Name);
     }
 
+    public synchronized boolean trustLocalMp3SegmentFile(String sessionId, int seq) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
+        if (segment == null) return false;
+        File dir = sessionDir(sessionId);
+        File mp3 = segment.mp3Name == null || segment.mp3Name.isEmpty()
+                ? null : new File(dir, segment.mp3Name);
+        if (mp3 == null || !mp3.isFile() || mp3.length() <= 0L) {
+            File finalMp3 = finalMp3File(sessionId);
+            if (manifest.segments.size() == 1
+                    && finalMp3.isFile() && finalMp3.length() > 0L) {
+                mp3 = finalMp3;
+            }
+        }
+        if (mp3 == null || !mp3.isFile() || mp3.length() <= 0L) return false;
+        long localBytes = mp3.length();
+        String localSha = sha256File(mp3);
+        boolean changed = false;
+        if (!mp3.getName().equals(segment.mp3Name)) {
+            segment.mp3Name = mp3.getName();
+            changed = true;
+        }
+        if (segment.mp3Bytes != localBytes || !localSha.equals(segment.sha256)) {
+            segment.mp3Bytes = localBytes;
+            segment.sha256 = localSha;
+            segment.remoteAccepted = false;
+            segment.remotePartialBytes = 0L;
+            segment.remoteServerId = "";
+            segment.remoteManifestRevision = 0L;
+            segment.remoteReceivedAtMs = 0L;
+            segment.remoteDurableAtMs = 0L;
+            segment.lastSendError = "";
+            segment.transcriptState = "PENDING";
+            segment.transcriptText = "";
+            segment.transcriptEngine = "";
+            segment.transcriptCreatedAtMs = 0L;
+            segment.transcriptError = "";
+            manifest.remoteCommitted = false;
+            manifest.remoteManifestRevision = 0L;
+            manifest.error = "";
+            if (manifest.recordingFinished && manifest.conversionFinished) {
+                manifest.state = "READY";
+            }
+            recalculate(manifest);
+            changed = true;
+        }
+        if (changed) save(manifest);
+        return true;
+    }
+
     public synchronized File finalMp3File(String sessionId) throws IOException {
         ReliableSessionManifest manifest = load(sessionId);
         String name = RecordingFileNames.isLegacyGenericName(manifest.finalMp3Name)

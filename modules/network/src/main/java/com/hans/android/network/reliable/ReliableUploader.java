@@ -547,15 +547,39 @@ public final class ReliableUploader {
             if (segment.remoteAccepted) continue;
             File file = store.mp3File(sessionId, segment);
             if (!file.isFile() || file.length() != segment.mp3Bytes) {
-                throw new IllegalStateException("Local chunk " + segment.seq
-                        + " is missing or has the wrong byte length");
+                long manifestBytes = segment.mp3Bytes;
+                long localBytes = file.isFile() ? file.length() : -1L;
+                boolean repaired = store.trustLocalMp3SegmentFile(sessionId, segment.seq);
+                if (repaired) {
+                    manifest = store.load(sessionId);
+                    segment = manifest.findSegment(segment.seq);
+                    file = segment == null ? file : store.mp3File(sessionId, segment);
+                    listener.onDiagnostic("WARN", "upload.local_audio_source_of_truth",
+                            sessionId,
+                            "Local audio file bytes replaced stale metadata before upload",
+                            fields("seq", segment == null ? -1 : segment.seq,
+                                    "previous_manifest_bytes", manifestBytes,
+                                    "previous_file_bytes", localBytes,
+                                    "repaired_manifest_bytes",
+                                    segment == null ? -1L : segment.mp3Bytes,
+                                    "local_file_name",
+                                    segment == null ? "" : segment.mp3Name), null);
+                }
+                if (segment == null || !file.isFile()
+                        || file.length() != segment.mp3Bytes) {
+                    throw new IllegalStateException("Local chunk " + (segment == null ? -1 : segment.seq)
+                            + " has no readable phone audio file");
+                }
             }
+            final int uploadSeq = segment.seq;
+            final int chunkNumber = uploadSeq + 1;
+            final int chunkCount = manifest.segments.size();
             long attemptAt = System.currentTimeMillis();
-            store.markSendAttempt(sessionId, segment.seq, attemptAt, "");
-            listener.onState(sessionId, "Sending chunk " + (segment.seq + 1)
-                    + " of " + manifest.segments.size());
+            store.markSendAttempt(sessionId, uploadSeq, attemptAt, "");
+            listener.onState(sessionId, "Sending chunk " + chunkNumber
+                    + " of " + chunkCount);
             currentOperation = "upload_chunk";
-            currentSequence = segment.seq;
+            currentSequence = uploadSeq;
             currentDurableBytes = Math.max(0L, segment.remotePartialBytes);
             currentTotalBytes = segment.mp3Bytes;
             lastProgressWallMs = System.currentTimeMillis();
@@ -565,7 +589,7 @@ public final class ReliableUploader {
                         lastFailure = "Upload made no durable progress for two hours";
                         listener.onDiagnostic("WARN", "upload.no_progress_timeout",
                                 sessionId, lastFailure,
-                                fields("seq", segment.seq,
+                                fields("seq", uploadSeq,
                                         "durable_bytes", currentDurableBytes,
                                         "total_bytes", currentTotalBytes,
                                         "operation", currentOperation,
@@ -574,8 +598,6 @@ public final class ReliableUploader {
                         client.cancelActiveRequest();
                     });
             try {
-                final int chunkNumber = segment.seq + 1;
-                final int chunkCount = manifest.segments.size();
                 ReliableUploadClient.Ack ack = client.uploadSegment(
                         manifest, segment, file,
                         (durableBytes, totalBytes, serverId, revision) -> {
@@ -585,7 +607,7 @@ public final class ReliableUploader {
                             lastProgressWallMs = System.currentTimeMillis();
                             lastFailure = "";
                             retryAttempt = 0;
-                            store.markRemotePartProgress(sessionId, segment.seq,
+                            store.markRemotePartProgress(sessionId, uploadSeq,
                                     durableBytes, serverId, revision);
                             listener.onState(sessionId, "Sending chunk " + chunkNumber
                                     + " of " + chunkCount + " · " + durableBytes
