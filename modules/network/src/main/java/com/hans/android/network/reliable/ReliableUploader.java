@@ -274,16 +274,17 @@ public final class ReliableUploader {
                         for (ReliableSessionManifest manifest : sessions) {
                             if (!running.get()) break;
                             if (completedOnly && !manifest.recordingFinished) continue;
-                            boolean pendingAudio = hasPendingAudio(manifest);
-                            if (audioPass != pendingAudio) continue;
+                            boolean readablePendingAudio = hasReadablePendingAudio(manifest);
+                            if (audioPass != readablePendingAudio) continue;
                             if (!needsWork(manifest)) continue;
                             found = true;
                             if (quarantinedSessionIds.contains(manifest.sessionId)) {
                                 quarantinedFound = true;
                                 continue;
                             }
+                            if (audioPass) manifest = store.load(manifest.sessionId);
                             actionable = true;
-                            urgentAudio |= pendingAudio;
+                            urgentAudio |= readablePendingAudio;
                             if (!hasNetwork()) {
                                 networkUnavailable = true;
                                 listener.onState(manifest.sessionId,
@@ -441,12 +442,26 @@ public final class ReliableUploader {
         return false;
     }
 
-    private static List<ReliableSessionManifest> prioritizeSessions(
+    private boolean hasReadablePendingAudio(ReliableSessionManifest manifest) {
+        for (ReliableSessionManifest.Segment segment : manifest.segments) {
+            if (segment.remoteAccepted) continue;
+            try {
+                File file = store.mp3File(manifest.sessionId, segment);
+                if (file.isFile() && file.length() > 0L) return true;
+                if (store.trustLocalMp3SegmentFile(manifest.sessionId, segment.seq)) return true;
+            } catch (IOException ignored) {
+                // A bad old local record must not keep newer readable audio behind it.
+            }
+        }
+        return false;
+    }
+
+    private List<ReliableSessionManifest> prioritizeSessions(
             List<ReliableSessionManifest> sessions) {
         List<ReliableSessionManifest> ordered = new ArrayList<>(sessions);
         ordered.sort((left, right) -> {
-            int leftAudio = hasPendingAudio(left) ? 1 : 0;
-            int rightAudio = hasPendingAudio(right) ? 1 : 0;
+            int leftAudio = hasReadablePendingAudio(left) ? 1 : 0;
+            int rightAudio = hasReadablePendingAudio(right) ? 1 : 0;
             if (leftAudio != rightAudio) return rightAudio - leftAudio;
             int leftTransfer = needsTransferWork(left) ? 1 : 0;
             int rightTransfer = needsTransferWork(right) ? 1 : 0;
@@ -573,7 +588,7 @@ public final class ReliableUploader {
                 if (segment == null || !file.isFile()
                         || file.length() != segment.mp3Bytes) {
                     throw new IllegalStateException("Local chunk " + (segment == null ? -1 : segment.seq)
-                            + " has no readable phone audio file");
+                            + " has no readable phone audio file; skipping this old local record so readable phone audio can upload");
                 }
             }
             final int uploadSeq = segment.seq;
