@@ -269,36 +269,41 @@ public final class ReliableUploader {
                         }
                     }
                     List<ReliableSessionManifest> sessions = prioritizeSessions(store.list());
-                    for (ReliableSessionManifest manifest : sessions) {
-                        if (!running.get()) break;
-                        if (completedOnly && !manifest.recordingFinished) continue;
-                        if (!needsWork(manifest)) continue;
-                        found = true;
-                        if (quarantinedSessionIds.contains(manifest.sessionId)) {
-                            quarantinedFound = true;
-                            continue;
-                        }
-                        actionable = true;
-                        urgentAudio |= hasPendingAudio(manifest);
-                        if (!hasNetwork()) {
-                            networkUnavailable = true;
-                            listener.onState(manifest.sessionId,
-                                    "Waiting for network; every local chunk remains queued");
-                            break;
-                        }
-                        try {
-                            reconcile(manifest);
-                        } catch (Exception failure) {
-                            if (!running.get() || isRetryableFailure(failure)) {
-                                throw failure;
+                    for (int pass = 0; pass < 2 && running.get(); pass++) {
+                        boolean audioPass = pass == 0;
+                        for (ReliableSessionManifest manifest : sessions) {
+                            if (!running.get()) break;
+                            if (completedOnly && !manifest.recordingFinished) continue;
+                            boolean pendingAudio = hasPendingAudio(manifest);
+                            if (audioPass != pendingAudio) continue;
+                            if (!needsWork(manifest)) continue;
+                            found = true;
+                            if (quarantinedSessionIds.contains(manifest.sessionId)) {
+                                quarantinedFound = true;
+                                continue;
                             }
-                            quarantineSession(manifest, failure);
-                            quarantinedFound = true;
-                            currentOperation = "skipping_quarantined_recording";
-                            currentSessionId = "";
-                            currentSequence = -1;
-                            currentDurableBytes = 0L;
-                            currentTotalBytes = 0L;
+                            actionable = true;
+                            urgentAudio |= pendingAudio;
+                            if (!hasNetwork()) {
+                                networkUnavailable = true;
+                                listener.onState(manifest.sessionId,
+                                        "Waiting for network; every local chunk remains queued");
+                                break;
+                            }
+                            try {
+                                reconcile(manifest);
+                            } catch (Exception failure) {
+                                if (!running.get() || isRetryableFailure(failure)) {
+                                    throw failure;
+                                }
+                                quarantineSession(manifest, failure);
+                                quarantinedFound = true;
+                                currentOperation = "skipping_quarantined_recording";
+                                currentSessionId = "";
+                                currentSequence = -1;
+                                currentDurableBytes = 0L;
+                                currentTotalBytes = 0L;
+                            }
                         }
                     }
                     retryAttempt = 0;
