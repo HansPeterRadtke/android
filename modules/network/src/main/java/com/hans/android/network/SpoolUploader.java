@@ -100,14 +100,10 @@ public final class SpoolUploader {
         ConnectivityManager manager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
         if (manager == null) return true;
         try {
-            if (Build.VERSION.SDK_INT >= 23) {
-                Network active = manager.getActiveNetwork();
-                if (active == null) return false;
-                NetworkCapabilities caps = manager.getNetworkCapabilities(active);
-                return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
-            }
-            android.net.NetworkInfo info = manager.getActiveNetworkInfo();
-            return info != null && info.isConnected();
+            Network active = manager.getActiveNetwork();
+            if (active == null) return false;
+            NetworkCapabilities caps = manager.getNetworkCapabilities(active);
+            return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
         } catch (SecurityException ignored) {
             return true;
         }

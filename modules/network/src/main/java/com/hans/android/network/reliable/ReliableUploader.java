@@ -274,7 +274,7 @@ public final class ReliableUploader {
                         for (ReliableSessionManifest manifest : sessions) {
                             if (!running.get()) break;
                             if (completedOnly && !manifest.recordingFinished) continue;
-                            boolean readablePendingAudio = hasReadablePendingAudio(manifest);
+                            boolean readablePendingAudio = hasReadablePendingAudio(manifest, true);
                             if (audioPass != readablePendingAudio) continue;
                             if (!needsWork(manifest)) continue;
                             found = true;
@@ -442,13 +442,17 @@ public final class ReliableUploader {
         return false;
     }
 
-    private boolean hasReadablePendingAudio(ReliableSessionManifest manifest) {
+    private boolean hasReadablePendingAudio(ReliableSessionManifest manifest,
+                                            boolean repairMetadata) {
         for (ReliableSessionManifest.Segment segment : manifest.segments) {
             if (segment.remoteAccepted) continue;
             try {
                 File file = store.mp3File(manifest.sessionId, segment);
                 if (file.isFile() && file.length() > 0L) return true;
-                if (store.trustLocalMp3SegmentFile(manifest.sessionId, segment.seq)) return true;
+                if (repairMetadata
+                        && store.trustLocalMp3SegmentFile(manifest.sessionId, segment.seq)) {
+                    return true;
+                }
             } catch (IOException ignored) {
                 // A bad old local record must not keep newer readable audio behind it.
             }
@@ -460,8 +464,8 @@ public final class ReliableUploader {
             List<ReliableSessionManifest> sessions) {
         List<ReliableSessionManifest> ordered = new ArrayList<>(sessions);
         ordered.sort((left, right) -> {
-            int leftAudio = hasReadablePendingAudio(left) ? 1 : 0;
-            int rightAudio = hasReadablePendingAudio(right) ? 1 : 0;
+            int leftAudio = hasReadablePendingAudio(left, false) ? 1 : 0;
+            int rightAudio = hasReadablePendingAudio(right, false) ? 1 : 0;
             if (leftAudio != rightAudio) return rightAudio - leftAudio;
             int leftTransfer = needsTransferWork(left) ? 1 : 0;
             int rightTransfer = needsTransferWork(right) ? 1 : 0;

@@ -47,6 +47,7 @@ public final class ChunkedAudioRecorder {
 
     public boolean isRecording() { return recording.get(); }
 
+    @android.annotation.SuppressLint("MissingPermission")
     private void capture(Context context, AudioInputOption input, SpoolStore store,
                          String sessionId, Listener listener) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);

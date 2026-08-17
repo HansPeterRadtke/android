@@ -1573,8 +1573,10 @@ public final class ReliableSessionStore {
         fsyncDirectory(target.getParentFile());
     }
 
+    @android.annotation.TargetApi(26)
     private static void fsyncDirectory(File directory) {
         if (directory == null || !directory.isDirectory()) return;
+        if (android.os.Build.VERSION.SDK_INT < 26) return;
         try (FileChannel channel = FileChannel.open(directory.toPath(), StandardOpenOption.READ)) {
             channel.force(true);
         } catch (Exception ignored) {}

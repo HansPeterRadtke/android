@@ -51,6 +51,7 @@ public final class JournaledAudioRecorder {
         if (value != null) try { value.stop(); } catch (Exception ignored) {}
     }
 
+    @android.annotation.SuppressLint("MissingPermission")
     private void capture(Context context, AudioInputOption input, ReliableSessionStore store,
                          String sessionId, Listener listener) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);

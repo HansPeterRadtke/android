@@ -406,6 +406,7 @@ public final class JournaledMp3Recorder {
         }
     }
 
+    @android.annotation.SuppressLint("MissingPermission")
     private static RecordSetup createAudioRecord(AudioInputOption input,
                                                   Listener listener) {
         int source = input != null && input.isBluetooth()

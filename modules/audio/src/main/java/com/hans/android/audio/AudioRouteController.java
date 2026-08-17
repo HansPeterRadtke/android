@@ -176,7 +176,9 @@ public final class AudioRouteController {
         return best;
     }
 
+    @android.annotation.TargetApi(31)
     private AudioDeviceInfo waitForCommunicationDevice(AudioDeviceInfo requested, long timeoutMs) {
+        if (Build.VERSION.SDK_INT < 31) return null;
         long deadline = SystemClock.elapsedRealtime() + timeoutMs;
         AudioDeviceInfo current = manager.getCommunicationDevice();
         while (!sameDevice(requested, current) && SystemClock.elapsedRealtime() < deadline) {
@@ -307,6 +309,7 @@ public final class AudioRouteController {
     }
 
     private static String safeAddress(AudioDeviceInfo device) {
+        if (Build.VERSION.SDK_INT < 28) return "";
         try { return device == null || device.getAddress() == null ? "" : device.getAddress(); }
         catch (SecurityException denied) { return ""; }
     }

@@ -263,6 +263,7 @@ public final class AudioInputCatalog {
         }
     }
 
+    @android.annotation.SuppressLint("MissingPermission")
     private static boolean isBluetoothProfileConnected(Context context, int profile) {
         if (Build.VERSION.SDK_INT >= 31
                 && context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
@@ -273,7 +274,7 @@ public final class AudioInputCatalog {
         BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
         if (adapter == null || !adapter.isEnabled()) return false;
         try {
-            return adapter.getProfileConnectionState(profile) == BluetoothProfile.STATE_CONNECTED;
+            return adapter.getProfileConnectionState(profile) == BluetoothAdapter.STATE_CONNECTED;
         } catch (SecurityException denied) {
             return false;
         } catch (IllegalArgumentException unsupportedProfile) {
@@ -302,6 +303,7 @@ public final class AudioInputCatalog {
     }
 
     private static String safeAddress(AudioDeviceInfo device) {
+        if (Build.VERSION.SDK_INT < 28) return "";
         try {
             String value = device.getAddress();
             return value == null ? "" : value;
