@@ -481,8 +481,10 @@ public final class ReliableUploader {
     }
 
     private static boolean needsWork(ReliableSessionManifest manifest) {
-        if (needsTransferWork(manifest)) return true;
-        return manifest.transcriptChunkCount() < manifest.segments.size();
+        // Jetson now treats final STT as the canonical transcript after commit.
+        // Provisional per-chunk transcript gaps must not keep the Android
+        // uploader in SYNCHRONIZING after all phone audio bytes are durable.
+        return needsTransferWork(manifest);
     }
 
     private void reconcile(ReliableSessionManifest snapshot) throws Exception {
