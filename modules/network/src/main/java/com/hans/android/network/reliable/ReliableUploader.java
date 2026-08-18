@@ -276,6 +276,19 @@ public final class ReliableUploader {
                             if (completedOnly && !manifest.recordingFinished) continue;
                             boolean readablePendingAudio = hasReadablePendingAudio(manifest, true);
                             if (audioPass != readablePendingAudio) continue;
+                            boolean unreadablePendingAudio = !readablePendingAudio
+                                    && hasPendingAudio(manifest);
+                            if (unreadablePendingAudio) {
+                                found = true;
+                                if (quarantinedSessionIds.contains(manifest.sessionId)) {
+                                    quarantinedFound = true;
+                                    continue;
+                                }
+                                quarantineSession(manifest, new IllegalStateException(
+                                        "Pending local audio has no readable phone MP3; skipping this old record so readable phone audio can upload"));
+                                quarantinedFound = true;
+                                continue;
+                            }
                             if (!needsWork(manifest)) continue;
                             found = true;
                             if (quarantinedSessionIds.contains(manifest.sessionId)) {
