@@ -2001,6 +2001,28 @@ public final class RecordingService extends Service {
         long uploadPendingBytes = Math.max(0L, uploadTotalBytes - uploadDurableBytes);
         int uploadProgressPermille = RecordingFeedback.uploadPermille(
                 uploadDurableBytes, uploadTotalBytes);
+        ReliableSessionManifest finalizing = latestFinalizingSession(sessions);
+        if (!actualRecording && !actualPaused && !actualInterrupted && finalizing != null) {
+            state = "COMPRESSING";
+            explanation = "Finalizing the local MP3 before server upload";
+            if (liveSessionId == null || liveSessionId.isEmpty()) {
+                liveSessionId = finalizing.sessionId;
+            }
+            if ("idle".equals(liveOperation)
+                    || "idle_ignored_unreadable_records".equals(liveOperation)
+                    || "waiting_quarantined_recordings".equals(liveOperation)) {
+                liveOperation = "local_finalizing";
+            }
+        } else if (!actualRecording && "SYNCHRONIZING".equals(state)
+                && uploadPendingBytes <= 0L
+                && (liveOperation == null
+                || liveOperation.isEmpty()
+                || "idle".equals(liveOperation)
+                || "idle_ignored_unreadable_records".equals(liveOperation)
+                || "waiting_quarantined_recordings".equals(liveOperation))) {
+            state = "READY";
+            explanation = "Server upload is complete; old unreadable local records are ignored";
+        }
         long levelAgeMs = liveInputLevelAtElapsedMs <= 0L ? Long.MAX_VALUE
                 : Math.max(0L, SystemClock.elapsedRealtime() - liveInputLevelAtElapsedMs);
         float rmsDbfs = actualRecording && levelAgeMs < 1500L ? liveInputRmsDbfs : -120f;
@@ -2043,6 +2065,21 @@ public final class RecordingService extends Service {
                 selected, routedInput, sessions, interrupted, open, resolvedSessionId,
                 failureAlarm.isActive(), failureAlarm.isAudible(),
                 failureAlarm.getMessage(), recordingRecoveryAttempt);
+    }
+
+    private static ReliableSessionManifest latestFinalizingSession(
+            List<ReliableSessionManifest> sessions) {
+        ReliableSessionManifest latest = null;
+        if (sessions == null) return null;
+        for (ReliableSessionManifest manifest : sessions) {
+            if (manifest == null) continue;
+            if (manifest.recordingFinished && !manifest.conversionFinished) {
+                if (latest == null || manifest.createdAt > latest.createdAt) {
+                    latest = manifest;
+                }
+            }
+        }
+        return latest;
     }
 
     private static long persistedUploadBytes(List<ReliableSessionManifest> sessions,

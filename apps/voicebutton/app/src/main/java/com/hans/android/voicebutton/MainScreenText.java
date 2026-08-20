@@ -53,7 +53,8 @@ final class MainScreenText {
         if (paused) return "PAUSED";
         if ("STARTING".equals(state)) return "STARTING";
         if ("PREPARING".equals(state)) return "STARTING";
-        if ("FINISHING".equals(state) || "PAUSING".equals(state)) return "SAVING";
+        if ("FINISHING".equals(state) || "PAUSING".equals(state)
+                || "COMPRESSING".equals(state)) return "SAVING";
         if ("FAILED".equals(state)) return "FAILED";
         return "READY";
     }
@@ -66,6 +67,7 @@ final class MainScreenText {
         if ("STARTING".equals(state)) return "Opening protected recording storage and checking local sync state.";
         if ("PREPARING".equals(state)) return "Opening the selected microphone.";
         if ("FINISHING".equals(state) || "PAUSING".equals(state)) return "Saving the current audio safely.";
+        if ("COMPRESSING".equals(state)) return "Finalizing the local MP3 before server upload.";
         if ("FAILED".equals(state)) return "An action failed. Open More for details and recovery.";
         if (openRecording) return "An unfinished recording is safe on this phone.";
         return "Ready to start a protected recording.";

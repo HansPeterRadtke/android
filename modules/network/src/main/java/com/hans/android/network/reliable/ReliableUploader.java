@@ -277,6 +277,7 @@ public final class ReliableUploader {
                             boolean readablePendingAudio = hasReadablePendingAudio(manifest, true);
                             if (audioPass != readablePendingAudio) continue;
                             boolean unreadablePendingAudio = !readablePendingAudio
+                                    && manifest.isLocallyReady()
                                     && hasPendingAudio(manifest);
                             if (unreadablePendingAudio) {
                                 found = true;
@@ -324,7 +325,14 @@ public final class ReliableUploader {
                     if (!quarantinedFound) lastFailureRetryable = true;
                     if (!found) currentOperation = "idle";
                     else if (!actionable && quarantinedFound) {
-                        currentOperation = "waiting_quarantined_recordings";
+                        currentOperation = "idle_ignored_unreadable_records";
+                        currentSessionId = "";
+                        currentSequence = -1;
+                        currentDurableBytes = 0L;
+                        currentTotalBytes = 0L;
+                        lastFailureRetryable = true;
+                        lastFailure = "";
+                        listener.onState("", "Stored completely; old unreadable local records ignored");
                     }
                     waitForSignal(networkUnavailable ? 60_000L
                             : urgentAudio ? 250L
@@ -450,7 +458,7 @@ public final class ReliableUploader {
 
     private static boolean hasPendingAudio(ReliableSessionManifest manifest) {
         for (ReliableSessionManifest.Segment segment : manifest.segments) {
-            if (!segment.remoteAccepted) return true;
+            if (!segment.remoteAccepted && segment.mp3Bytes > 0L) return true;
         }
         return false;
     }
@@ -489,8 +497,9 @@ public final class ReliableUploader {
     }
 
     private static boolean needsTransferWork(ReliableSessionManifest manifest) {
+        if (manifest.recordingFinished && !manifest.conversionFinished) return false;
         if (manifest.hasPendingMetadata() || hasPendingAudio(manifest)) return true;
-        return manifest.recordingFinished && !manifest.remoteCommitted;
+        return manifest.isLocallyReady() && !manifest.remoteCommitted;
     }
 
     private static boolean needsWork(ReliableSessionManifest manifest) {
