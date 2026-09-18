@@ -1,0 +1,22 @@
+<resources>
+    <item name="voice_status" type="id"/>
+    <item name="voice_status_detail" type="id"/>
+    <item name="voice_worker_status" type="id"/>
+    <item name="voice_conversation" type="id"/>
+    <item name="voice_transcript_panel" type="id"/>
+    <item name="voice_replay_row" type="id"/>
+    <item name="voice_start_stop" type="id"/>
+    <item name="voice_settings" type="id"/>
+    <item name="voice_diagnostics" type="id"/>
+    <item name="voice_draft" type="id"/>
+    <item name="voice_transcribe" type="id"/>
+    <item name="voice_send" type="id"/>
+    <item name="voice_user_player" type="id"/>
+    <item name="voice_assistant_player" type="id"/>
+    <item name="voice_component_health" type="id"/>
+    <item name="voice_version" type="id"/>
+    <item name="voice_auto_transcribe" type="id"/>
+    <item name="voice_auto_send" type="id"/>
+    <item name="voice_vocabulary" type="id"/>
+    <item name="voice_save_vocabulary" type="id"/>
+</resources>
