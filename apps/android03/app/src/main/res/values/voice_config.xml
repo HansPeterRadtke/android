@@ -1,0 +1,25 @@
+<resources>
+    <string name="app_name">Voice Agent</string>
+    <string name="voice_ws_url">wss://jetson-fdx.jimmyandjonny.work/ws</string>
+    <string name="voice_health_url">https://jetson-fdx.jimmyandjonny.work/health</string>
+    <integer name="voice_sample_rate">16000</integer>
+    <integer name="voice_frame_ms">60</integer>
+    <integer name="voice_max_queued_audio_bytes">16000</integer>
+    <integer name="voice_connect_timeout_ms">10000</integer>
+    <integer name="voice_reconnect_base_ms">250</integer>
+    <integer name="voice_reconnect_max_ms">8000</integer>
+    <integer name="voice_reconnect_jitter_ms">250</integer>
+    <integer name="voice_reconnect_max_exponent">6</integer>
+    <integer name="voice_stop_timeout_ms">10000</integer>
+    <integer name="voice_diagnostics_max_chars">16000</integer>
+    <integer name="voice_history_cache_max_chars">64000</integer>
+    <integer name="voice_worker_preview_max_chars">320</integer>
+    <integer name="voice_heartbeat_stale_ms">20000</integer>
+    <integer name="voice_media_ack_stale_ms">12000</integer>
+    <integer name="voice_playback_queue_chunks">128</integer>
+    <integer name="voice_playback_startup_chunks">4</integer>
+    <integer name="voice_heartbeat_check_ms">5000</integer>
+    <integer name="voice_level_update_ms">100</integer>
+    <integer name="voice_player_max_bytes">33554432</integer>
+    <integer name="voice_manual_recording_max_bytes">19200000</integer>
+</resources>
