@@ -296,7 +296,11 @@ public class MainActivity extends Activity {
     userPlayer.setId(R.id.voice_user_player);
     assistantPlayer = new VoicePcmPlayerView(this, appConfig.sampleRate, appConfig.playerMaxBytes, getString(R.string.assistant_audio));
     assistantPlayer.setId(R.id.voice_assistant_player);
-    assistantPlayer.setRemoteStopListener(() -> sendControl("cancel", "user_stopped_playback", -1, 0.0, 0.0));
+    assistantPlayer.setRemoteStopListener(() -> {
+      activePcmPlayer = null;
+      sendControl("cancel", "user_stopped_playback", -1, 0.0, 0.0);
+      showListeningState();
+    });
     LinearLayout audioContext = new LinearLayout(this);
     audioContext.setOrientation(LinearLayout.VERTICAL);
     audioContext.addView(userPlayer, fullWrap());
@@ -315,7 +319,11 @@ public class MainActivity extends Activity {
     draftEdit.setHint(R.string.transcript_hint);
     draftEdit.setTextSize(17);
     draftEdit.setMinLines(1);
-    draftEdit.setMaxLines(5);
+    draftEdit.setMaxLines(useWideShortLayout() ? 1 : 5);
+    if (useWideShortLayout()) {
+      draftEdit.setMinHeight(dp(48));
+      draftEdit.setMaxHeight(dp(56));
+    }
     draftEdit.setInputType(InputType.TYPE_CLASS_TEXT
         | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
@@ -345,6 +353,14 @@ public class MainActivity extends Activity {
     sendDraftButton.setId(R.id.voice_send);
     sendDraftButton.setText(R.string.send);
     sendDraftButton.setMinHeight(dp(48));
+    if (useWideShortLayout()) {
+      transcribeButton.setText(R.string.transcribe_wide);
+      for (MaterialButton button : new MaterialButton[] {transcribeButton, startButton, sendDraftButton}) {
+        button.setTextSize(12);
+        button.setSingleLine(true);
+        button.setMaxHeight(dp(56));
+      }
+    }
     messageActions.addView(transcribeButton, weightedWrap());
     messageActions.addView(startButton, weightedWrap());
     messageActions.addView(sendDraftButton, weightedWrap());
@@ -364,22 +380,18 @@ public class MainActivity extends Activity {
       body.addView(conversationScrollView, new LinearLayout.LayoutParams(
           0, ViewGroup.LayoutParams.MATCH_PARENT, 3f));
 
-      // In a short landscape window the complete contextual player plus the
-      // composer cannot all be fully visible at large font scales. Put both in
-      // one right-hand scroll region so every control stays reachable instead
-      // of giving the player a zero-height weighted viewport.
-      audioScroll.removeView(audioContext);
-      LinearLayout rightContent = new LinearLayout(this);
-      rightContent.setOrientation(LinearLayout.VERTICAL);
-      rightContent.addView(audioContext, fullWrap());
-      rightContent.addView(transcriptPanel, fullWrap());
-      ScrollView rightScroll = new ScrollView(this);
-      rightScroll.setFillViewport(true);
-      rightScroll.addView(rightContent, fullWrap());
+      // Conversation-first landscape hierarchy: the editable current message
+      // and its primary actions are pinned and never scroll away. Contextual
+      // audio is secondary and scrolls only inside the remaining space above.
+      LinearLayout right = new LinearLayout(this);
+      right.setOrientation(LinearLayout.VERTICAL);
       LinearLayout.LayoutParams rightParams = new LinearLayout.LayoutParams(
           0, ViewGroup.LayoutParams.MATCH_PARENT, 2f);
       rightParams.setMarginStart(dp(14));
-      body.addView(rightScroll, rightParams);
+      right.addView(audioScroll, new LinearLayout.LayoutParams(
+          ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+      right.addView(transcriptPanel, fullWrap());
+      body.addView(right, rightParams);
       root.addView(body, bodyParams);
     } else {
       root.addView(conversationScrollView, new LinearLayout.LayoutParams(
@@ -1657,8 +1669,9 @@ public class MainActivity extends Activity {
     boolean user = "replay".equals(type) && "user".equals(kind);
     VoicePcmPlayerView player = user ? userPlayer : assistantPlayer;
     activePcmPlayer = player;
-    player.startStream(true, !user && "audio".equals(type));
-    if (!user && "audio".equals(type)) setForegroundMode(ForegroundMode.BUFFERING, null);
+    boolean liveAssistant = !user && "audio".equals(type);
+    player.startStream(true, liveAssistant, liveAssistant);
+    if (liveAssistant) setForegroundMode(ForegroundMode.BUFFERING, null);
     else setPrimaryStatus(getString(R.string.loading_replay), "");
   }
 
@@ -1930,17 +1943,15 @@ public class MainActivity extends Activity {
   private void setPrimaryStatus(String title, String detail) {
     runOnUiThread(() -> {
       String clean = detail == null ? "" : detail.trim();
-      boolean healthyReady = foregroundMode == ForegroundMode.READY
-          && hasRequiredAudioPermissions()
-          && connectionTracker.isOpen()
-          && serverHelloReady
-          && serverReady
-          && serverSttReady
-          && serverAgentReady
-          && serverTtsReady;
+      boolean actionableDetail = foregroundMode == ForegroundMode.CONNECTING
+          || foregroundMode == ForegroundMode.VERIFYING
+          || foregroundMode == ForegroundMode.RECONNECTING
+          || foregroundMode == ForegroundMode.UNAVAILABLE
+          || foregroundMode == ForegroundMode.PERMISSION
+          || foregroundMode == ForegroundMode.MICROPHONE_ERROR;
       statusView.setText(title);
-      statusDetailView.setText(healthyReady ? "" : clean);
-      statusDetailView.setVisibility(healthyReady || clean.isEmpty() ? View.GONE : View.VISIBLE);
+      statusDetailView.setText(actionableDetail ? clean : "");
+      statusDetailView.setVisibility(actionableDetail && !clean.isEmpty() ? View.VISIBLE : View.GONE);
     });
   }
 

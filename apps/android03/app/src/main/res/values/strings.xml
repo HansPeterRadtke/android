@@ -85,6 +85,7 @@
     <string name="start_recording">Mic</string>
     <string name="stop_recording">Stop</string>
     <string name="transcribe">Transcribe</string>
+    <string name="transcribe_wide">To text</string>
 <string name="automatic_transcription">Transcribe speech automatically</string>
     <string name="automatic_transcription_detail">Off: recordings stay on the phone until you press Transcribe.</string>
     <string name="version_label">Installed version: %1$s</string>

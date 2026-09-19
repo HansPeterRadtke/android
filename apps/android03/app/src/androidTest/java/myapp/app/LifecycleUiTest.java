@@ -62,8 +62,7 @@ public class LifecycleUiTest {
           android.content.res.Configuration config = activity.getResources().getConfiguration();
           wide[0] = config.screenWidthDp >= 600 && config.screenWidthDp > config.screenHeightDp;
         });
-        if (wide[0]) onView(withId(R.id.voice_transcribe)).perform(scrollTo()).check(matches(isDisplayed()));
-        else onView(withId(R.id.voice_transcribe)).check(matches(isDisplayed()));
+        onView(withId(R.id.voice_transcribe)).check(matches(isDisplayed()));
       } finally {
         scenario.onActivity(activity -> {
           activity.deleteFile("voice_unsent_manual.pcm");

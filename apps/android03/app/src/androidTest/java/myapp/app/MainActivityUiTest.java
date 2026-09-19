@@ -51,7 +51,7 @@ public class MainActivityUiTest {
     onView(withId(R.id.voice_settings)).perform(click());
     onView(withText(R.string.settings_title)).check(matches(isDisplayed()));
     onView(withId(R.id.voice_version)).check(matches(isDisplayed()));
-    onView(withText(containsString("Voice Agent 1.4.0"))).check(matches(isDisplayed()));
+    onView(withText(containsString("Voice Agent 1.5.0"))).check(matches(isDisplayed()));
     onView(withId(R.id.voice_auto_transcribe)).perform(scrollTo()).check(matches(isDisplayed()));
     onView(withId(R.id.voice_auto_send)).perform(scrollTo()).check(matches(isDisplayed()));
     onView(withId(R.id.voice_vocabulary)).perform(scrollTo()).check(matches(isDisplayed()));

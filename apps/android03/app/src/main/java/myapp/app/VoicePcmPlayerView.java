@@ -65,6 +65,8 @@ final class VoicePcmPlayerView extends LinearLayout {
   private volatile boolean playing;
   private volatile boolean streamOpen;
   private volatile boolean remoteCancelable;
+  private volatile boolean autoHideAfterNaturalFinish;
+  private VoiceStreamingPlaybackPolicy autoStartPolicy = new VoiceStreamingPlaybackPolicy(false);
   private volatile int positionBytes;
   private volatile long serial;
   private Runnable remoteStopListener;
@@ -81,13 +83,13 @@ final class VoicePcmPlayerView extends LinearLayout {
 
     title = new TextView(context);
     title.setText(label);
-    title.setTextSize(14);
+    title.setTextSize(12);
     addView(title, matchWrap());
 
     LinearLayout transportRow = new LinearLayout(context);
     transportRow.setOrientation(HORIZONTAL);
-    LinearLayout seekRow = new LinearLayout(context);
-    seekRow.setOrientation(HORIZONTAL);
+    LinearLayout seekControlsRow = new LinearLayout(context);
+    seekControlsRow.setOrientation(HORIZONTAL);
     playPause = button(context, R.string.play);
     playPause.setId(R.id.voice_player_play_pause);
     stop = button(context, R.string.stop_audio);
@@ -98,10 +100,10 @@ final class VoicePcmPlayerView extends LinearLayout {
     forward.setId(R.id.voice_player_forward);
     transportRow.addView(playPause, weighted());
     transportRow.addView(stop, weighted());
-    seekRow.addView(back, weighted());
-    seekRow.addView(forward, weighted());
+    seekControlsRow.addView(back, weighted());
+    seekControlsRow.addView(forward, weighted());
     addView(transportRow, matchWrap());
-    addView(seekRow, matchWrap());
+    addView(seekControlsRow, matchWrap());
 
     seek = new SeekBar(context);
     seek.setId(R.id.voice_player_seek);
@@ -136,7 +138,7 @@ final class VoicePcmPlayerView extends LinearLayout {
 
   void setRemoteStopListener(Runnable listener) { remoteStopListener = listener; }
 
-  boolean startStream(boolean autoPlay, boolean cancelable) {
+  boolean startStream(boolean autoPlay, boolean cancelable, boolean autoHideAfterFinish) {
     synchronized (lock) {
       serial++;
       stopTrackLocked();
@@ -144,18 +146,28 @@ final class VoicePcmPlayerView extends LinearLayout {
       positionBytes = 0;
       streamOpen = true;
       remoteCancelable = cancelable;
+      autoHideAfterNaturalFinish = autoHideAfterFinish;
+      autoStartPolicy = new VoiceStreamingPlaybackPolicy(autoPlay);
       playing = false;
     }
     setVisibility(VISIBLE);
-    if (autoPlay) startPlaying();
     updateUi();
     return true;
   }
 
   boolean append(byte[] pcm) {
     boolean ok;
-    synchronized (lock) { ok = buffer.appendBounded(pcm, maxBytes); }
-    if (ok) post(this::updateUi);
+    boolean autoStart;
+    synchronized (lock) {
+      ok = buffer.appendBounded(pcm, maxBytes);
+      autoStart = ok && autoStartPolicy.shouldStart(buffer.bytes() > 0);
+    }
+    if (ok) {
+      post(() -> {
+        if (autoStart) startPlaying();
+        else updateUi();
+      });
+    }
     return ok;
   }
 
@@ -165,13 +177,17 @@ final class VoicePcmPlayerView extends LinearLayout {
   }
 
   void cancelStream() {
+    boolean hide;
     synchronized (lock) {
+      hide = autoHideAfterNaturalFinish;
       streamOpen = false;
       playing = false;
+      remoteCancelable = false;
+      autoStartPolicy = new VoiceStreamingPlaybackPolicy(false);
       serial++;
       stopTrackLocked();
     }
-    post(this::updateUi);
+    post(() -> { if (hide) setVisibility(GONE); updateUi(); });
   }
 
   void setStaticPcm(byte[] pcm) {
@@ -180,6 +196,8 @@ final class VoicePcmPlayerView extends LinearLayout {
       playing = false;
       streamOpen = false;
       remoteCancelable = false;
+      autoHideAfterNaturalFinish = false;
+      autoStartPolicy = new VoiceStreamingPlaybackPolicy(false);
       stopTrackLocked();
       buffer.replace(pcm);
       positionBytes = 0;
@@ -224,13 +242,20 @@ final class VoicePcmPlayerView extends LinearLayout {
   }
 
   private void stopFromUser() {
-    boolean notify = remoteCancelable && streamOpen;
+    boolean notify;
+    boolean hide;
     synchronized (lock) {
+      notify = remoteCancelable && streamOpen;
+      hide = autoHideAfterNaturalFinish;
+      streamOpen = false;
       playing = false;
+      remoteCancelable = false;
+      autoStartPolicy = new VoiceStreamingPlaybackPolicy(false);
       serial++;
       positionBytes = 0;
       stopTrackLocked();
     }
+    if (hide) setVisibility(GONE);
     if (notify && remoteStopListener != null) remoteStopListener.run();
     updateUi();
   }
@@ -256,28 +281,42 @@ final class VoicePcmPlayerView extends LinearLayout {
 
   private void playbackLoop(long mine) {
     byte[] chunk = new byte[Math.max(960, sampleRate * SAMPLE_WIDTH / 20)];
+    boolean naturalFinish = false;
     try {
       while (playing && serial == mine) {
         int got;
         synchronized (lock) { got = buffer.copyFrom(positionBytes, chunk); }
         if (got > 0) {
-          int written;
+          AudioTrack target;
           synchronized (lock) {
             if (!playing || serial != mine || track == null) break;
-            written = track.write(chunk, 0, got, AudioTrack.WRITE_BLOCKING);
+            target = track;
           }
-          if (written > 0) positionBytes += written;
+          int written;
+          try {
+            written = target.write(chunk, 0, got, AudioTrack.WRITE_BLOCKING);
+          } catch (IllegalStateException failure) {
+            // Stop/pause may release the AudioTrack while a write is in flight.
+            // That is an expected cancellation race, not a player failure.
+            written = 0;
+          }
+          synchronized (lock) {
+            if (serial != mine || target != track || !playing) break;
+            if (written > 0) positionBytes += written;
+          }
         } else if (streamOpen) {
           Thread.sleep(15L);
         } else {
           playing = false;
+          naturalFinish = true;
           break;
         }
       }
     } catch (InterruptedException ignored) {
       Thread.currentThread().interrupt();
     } finally {
-      post(this::updateUi);
+      final boolean hide = naturalFinish && autoHideAfterNaturalFinish;
+      post(() -> { if (hide) setVisibility(GONE); updateUi(); });
     }
   }
 
@@ -312,6 +351,14 @@ final class VoicePcmPlayerView extends LinearLayout {
     if (getVisibility() != VISIBLE) return;
     int available = availableMs();
     int current = Math.min(currentMs(), available);
+    boolean compactLive = autoHideAfterNaturalFinish;
+    title.setVisibility(compactLive ? GONE : VISIBLE);
+    back.setVisibility(compactLive ? GONE : VISIBLE);
+    forward.setVisibility(compactLive ? GONE : VISIBLE);
+    seek.setVisibility(compactLive ? GONE : VISIBLE);
+    currentTime.setVisibility(compactLive ? GONE : VISIBLE);
+    remainingTime.setVisibility(compactLive ? GONE : VISIBLE);
+    totalTime.setVisibility(compactLive ? GONE : VISIBLE);
     seek.setMax(Math.max(1, available));
     if (!userSeeking) seek.setProgress(current);
     playPause.setText(playing ? R.string.pause : R.string.play);
@@ -343,7 +390,7 @@ final class VoicePcmPlayerView extends LinearLayout {
     value.setTextSize(13);
     value.setTypeface(android.graphics.Typeface.MONOSPACE);
     value.setGravity(gravity);
-    value.setMinHeight(dp(48));
+    value.setMinHeight(dp(24));
     value.setGravity(gravity | Gravity.CENTER_VERTICAL);
     return value;
   }
