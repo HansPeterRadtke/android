@@ -35,4 +35,18 @@ public class Mp3FramesTest {
             file.delete();
         }
     }
+    @Test
+    public void copyFramesDoesNotReadWholeLargeFileIntoHeap() throws Exception {
+        File file = File.createTempFile("mp3frames-large-", ".mp3");
+        file.deleteOnExit();
+        try (java.io.RandomAccessFile out = new java.io.RandomAccessFile(file, "rw")) {
+            out.write(new byte[]{(byte) 0xff, (byte) 0xf3, (byte) 0x88, (byte) 0x00});
+            out.setLength(180L * 1024L * 1024L);
+        }
+        java.io.ByteArrayOutputStream copied = new java.io.ByteArrayOutputStream();
+        Mp3Frames.Stats stats = Mp3Frames.copyFrames(file, copied);
+        org.junit.Assert.assertTrue(stats.frames >= 1L);
+        org.junit.Assert.assertTrue(copied.size() < 4096);
+    }
+
 }

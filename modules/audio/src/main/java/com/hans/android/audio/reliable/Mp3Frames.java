@@ -2,7 +2,6 @@ package com.hans.android.audio.reliable;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -50,47 +49,78 @@ public final class Mp3Frames {
     }
 
     public static Stats copyFrames(File file, OutputStream output) throws IOException {
-        byte[] data = readAll(file);
-        int position = skipId3v2(data);
-        long bytes = 0L;
-        long frames = 0L;
-        long samples = 0L;
-        boolean started = false;
-        while (position + 4 <= data.length) {
-            Header header = parseHeader(data, position);
-            if (header == null) {
-                if (started) break;
-                position++;
+        try (BufferedInputStream in = new BufferedInputStream(new FileInputStream(file), 64 * 1024)) {
+            skipId3v2(in);
+            long bytes = 0L;
+            long frames = 0L;
+            long samples = 0L;
+            boolean started = false;
+            byte[] headerBytes = new byte[4];
+            int headerCount = 0;
+            while (true) {
+                int next = in.read();
+                if (next < 0) break;
+                if (headerCount < 4) {
+                    headerBytes[headerCount++] = (byte) next;
+                    if (headerCount < 4) continue;
+                } else {
+                    headerBytes[0] = headerBytes[1];
+                    headerBytes[1] = headerBytes[2];
+                    headerBytes[2] = headerBytes[3];
+                    headerBytes[3] = (byte) next;
+                }
+                Header header = parseHeader(headerBytes, 0);
+                if (header == null) {
+                    if (started) break;
+                    continue;
+                }
+                byte[] frame = new byte[header.frameBytes];
+                System.arraycopy(headerBytes, 0, frame, 0, 4);
+                int remaining = header.frameBytes - 4;
+                int offset = 4;
+                while (remaining > 0) {
+                    int read = in.read(frame, offset, remaining);
+                    if (read < 0) return new Stats(bytes, frames, samples <= 0L ? 0L : samples * 1000L / 16000L);
+                    offset += read;
+                    remaining -= read;
+                }
+                output.write(frame);
+                bytes += header.frameBytes;
+                frames++;
+                samples += header.samplesPerFrame;
+                started = true;
+                headerCount = 0;
+            }
+            long durationMs = samples <= 0L ? 0L : samples * 1000L / 16000L;
+            return new Stats(bytes, frames, durationMs);
+        }
+    }
+
+    private static void skipId3v2(BufferedInputStream in) throws IOException {
+        in.mark(10);
+        byte[] header = new byte[10];
+        int count = 0;
+        while (count < header.length) {
+            int read = in.read(header, count, header.length - count);
+            if (read < 0) break;
+            count += read;
+        }
+        if (count < 10 || header[0] != 'I' || header[1] != 'D' || header[2] != '3') {
+            in.reset();
+            return;
+        }
+        int size = ((header[6] & 0x7f) << 21) | ((header[7] & 0x7f) << 14)
+                | ((header[8] & 0x7f) << 7) | (header[9] & 0x7f);
+        long remaining = (long) size + ((header[5] & 0x10) != 0 ? 10L : 0L);
+        while (remaining > 0L) {
+            long skipped = in.skip(remaining);
+            if (skipped > 0L) {
+                remaining -= skipped;
                 continue;
             }
-            if (position + header.frameBytes > data.length) break;
-            output.write(data, position, header.frameBytes);
-            bytes += header.frameBytes;
-            frames++;
-            samples += header.samplesPerFrame;
-            position += header.frameBytes;
-            started = true;
+            if (in.read() < 0) break;
+            remaining--;
         }
-        long durationMs = samples <= 0L ? 0L : samples * 1000L / 16000L;
-        return new Stats(bytes, frames, durationMs);
-    }
-
-    private static byte[] readAll(File file) throws IOException {
-        try (BufferedInputStream in = new BufferedInputStream(new FileInputStream(file));
-             ByteArrayOutputStream out = new ByteArrayOutputStream((int)Math.min(Integer.MAX_VALUE, Math.max(8192L, file.length())))) {
-            byte[] buffer = new byte[16384];
-            int read;
-            while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
-            return out.toByteArray();
-        }
-    }
-
-    private static int skipId3v2(byte[] data) {
-        if (data.length < 10 || data[0] != 'I' || data[1] != 'D' || data[2] != '3') return 0;
-        int size = ((data[6] & 0x7f) << 21) | ((data[7] & 0x7f) << 14)
-                | ((data[8] & 0x7f) << 7) | (data[9] & 0x7f);
-        int footer = (data[5] & 0x10) != 0 ? 10 : 0;
-        return Math.min(data.length, 10 + size + footer);
     }
 
     private static Header parseHeader(byte[] data, int offset) {
