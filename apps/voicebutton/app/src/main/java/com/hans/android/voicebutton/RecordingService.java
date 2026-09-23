@@ -847,6 +847,12 @@ public final class RecordingService extends Service {
         }
         signalUploader(reason);
         ExecutorService current = conversion;
+        if (!DeferredWorkPolicy.maySubmit(current)) {
+            diag(PhoneDiagnostics.INFO, "recording.deferred_work_resume_skipped", null,
+                    "Deferred conversion work was not queued because the service executor is shutting down",
+                    PhoneDiagnostics.fields("reason", reason));
+            return;
+        }
         try {
             current.execute(() -> {
                 synchronized (fileMaintenanceLock) {
