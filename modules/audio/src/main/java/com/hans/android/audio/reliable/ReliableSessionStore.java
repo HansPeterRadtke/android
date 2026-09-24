@@ -1357,13 +1357,22 @@ public final class ReliableSessionStore {
             Matcher mp3 = MP3_PATTERN.matcher(name);
             if (mp3.matches()) {
                 int seq = Integer.parseInt(mp3.group(1));
-                Mp3Frames.Stats stats = Mp3Frames.normalizeInPlace(file);
                 ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
-                if (segment == null) { segment = new ReliableSessionManifest.Segment(); segment.seq = seq; manifest.segments.add(segment); }
-                segment.mp3Name = file.getName();
-                segment.mp3Bytes = file.length();
-                segment.sha256 = sha256File(file);
-                segment.durationMs = stats.durationMs;
+                boolean normalize = shouldNormalizeRecoveredMp3(
+                        segment, file.getName(), file.length());
+                Mp3Frames.Stats stats = normalize
+                        ? Mp3Frames.normalizeInPlace(file) : null;
+                if (segment == null) {
+                    segment = new ReliableSessionManifest.Segment();
+                    segment.seq = seq;
+                    manifest.segments.add(segment);
+                }
+                if (normalize) {
+                    segment.mp3Name = file.getName();
+                    segment.mp3Bytes = file.length();
+                    segment.sha256 = sha256File(file);
+                    segment.durationMs = stats.durationMs;
+                }
                 manifest.nextSeq = Math.max(manifest.nextSeq, seq + 1);
             }
         }
@@ -1395,6 +1404,21 @@ public final class ReliableSessionStore {
         else manifest.state = "READY";
         recalculate(manifest);
         save(manifest);
+    }
+
+
+    static boolean shouldNormalizeRecoveredMp3(
+            ReliableSessionManifest.Segment segment,
+            String fileName, long fileBytes) {
+        if (segment == null) return true;
+        if (segment.remoteAccepted || segment.remotePartialBytes > 0L) return false;
+        String recordedName = segment.mp3Name == null ? "" : segment.mp3Name;
+        String recordedSha = segment.sha256 == null ? "" : segment.sha256;
+        boolean published = !recordedName.isEmpty()
+                && recordedName.equals(fileName)
+                && segment.mp3Bytes == fileBytes
+                && !recordedSha.isEmpty();
+        return !published;
     }
 
     private ReliableSessionManifest recoveredManifest(String sessionId) {

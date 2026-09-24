@@ -46,4 +46,28 @@ public class ReliableSessionMetadataRecoveryTest {
 
         assertEquals("survivor", recovered.sessionId);
     }
+    @Test public void publishedMp3IsImmutableDuringRecovery() {
+        ReliableSessionManifest.Segment segment = new ReliableSessionManifest.Segment();
+        segment.mp3Name = "segment_000000.mp3";
+        segment.mp3Bytes = 12345L;
+        segment.sha256 = "abc";
+        assertTrue(!ReliableSessionStore.shouldNormalizeRecoveredMp3(
+                segment, "segment_000000.mp3", 12345L));
+    }
+
+    @Test public void partiallyUploadedMp3IsNeverRewrittenDuringRecovery() {
+        ReliableSessionManifest.Segment segment = new ReliableSessionManifest.Segment();
+        segment.mp3Name = "segment_000000.mp3";
+        segment.mp3Bytes = 12345L;
+        segment.sha256 = "abc";
+        segment.remotePartialBytes = 4096L;
+        assertTrue(!ReliableSessionStore.shouldNormalizeRecoveredMp3(
+                segment, "segment_000000.mp3", 9999L));
+    }
+
+    @Test public void untrackedMp3MayBeNormalizedDuringRecovery() {
+        assertTrue(ReliableSessionStore.shouldNormalizeRecoveredMp3(
+                null, "segment_000000.mp3", 12345L));
+    }
+
 }
