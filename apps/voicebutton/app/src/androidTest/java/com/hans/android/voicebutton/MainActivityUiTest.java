@@ -2,7 +2,6 @@ package com.hans.android.voicebutton;
 
 import static androidx.test.espresso.Espresso.onView;
 import static androidx.test.espresso.assertion.ViewAssertions.matches;
-import static androidx.test.espresso.assertion.ViewAssertions.doesNotExist;
 import static androidx.test.espresso.matcher.ViewMatchers.Visibility.GONE;
 import static androidx.test.espresso.matcher.ViewMatchers.isDisplayed;
 import static androidx.test.espresso.matcher.ViewMatchers.withEffectiveVisibility;
@@ -55,10 +54,10 @@ public class MainActivityUiTest {
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             awaitText(R.id.voicebutton_status_title, "Ready to record");
             onView(withId(R.id.voicebutton_backup_text)).check(matches(isDisplayed()));
-            onView(withId(R.id.voicebutton_upload_current)).check(doesNotExist());
-            onView(withId(R.id.voicebutton_transcription_summary)).check(doesNotExist());
-            onView(withId(R.id.voicebutton_transcription_progress)).check(doesNotExist());
-            onView(withId(R.id.voicebutton_transcription_current)).check(doesNotExist());
+            onView(withId(R.id.voicebutton_upload_current)).check(matches(isDisplayed()));
+            onView(withId(R.id.voicebutton_transcription_summary)).check(matches(isDisplayed()));
+            onView(withId(R.id.voicebutton_transcription_progress)).check(matches(isDisplayed()));
+            onView(withId(R.id.voicebutton_transcription_current)).check(matches(isDisplayed()));
             scenario.onActivity(activity -> {
                 View backupBar = activity.findViewById(R.id.voicebutton_backup_progress);
                 boolean compact = activity.getResources().getConfiguration().screenHeightDp < 520;

@@ -293,6 +293,7 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         uploadCurrentParams.setMargins(AndroidUi.dp(this, 18), 0,
                 AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
+        root.addView(uploadCurrentText, uploadCurrentParams);
 
         transcriptionSummaryText = AndroidUi.text(this,
                 "Transcription overall: checking…", 14, false, AndroidUi.INK);
@@ -303,6 +304,7 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         transcriptionSummaryParams.setMargins(AndroidUi.dp(this, 18), 0,
                 AndroidUi.dp(this, 18), AndroidUi.dp(this, 4));
+        root.addView(transcriptionSummaryText, transcriptionSummaryParams);
 
         transcriptionProgressBar = new ProgressBar(this, null,
                 android.R.attr.progressBarStyleHorizontal);
@@ -314,6 +316,7 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 10));
         transcriptionProgressParams.setMargins(AndroidUi.dp(this, 18), 0,
                 AndroidUi.dp(this, 18), AndroidUi.dp(this, 4));
+        root.addView(transcriptionProgressBar, transcriptionProgressParams);
 
         transcriptionCurrentText = AndroidUi.small(this,
                 "Transcription current file: checking…");
@@ -324,6 +327,7 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         transcriptionCurrentParams.setMargins(AndroidUi.dp(this, 18), 0,
                 AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
+        root.addView(transcriptionCurrentText, transcriptionCurrentParams);
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
