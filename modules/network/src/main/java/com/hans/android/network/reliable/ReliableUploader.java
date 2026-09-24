@@ -56,6 +56,7 @@ public final class ReliableUploader {
     private volatile boolean lastFailureRetryable = true;
     private volatile int watchdogTrips;
     private volatile int retryAttempt;
+    private volatile boolean remoteFoldersReconciled;
 
     public static final class LiveProgress {
         public final String operation;
@@ -175,6 +176,7 @@ public final class ReliableUploader {
     public void signal() { synchronized (wake) { wake.notifyAll(); } }
 
     public void onNetworkChanged() {
+        remoteFoldersReconciled = false;
         client.cancelActiveRequest();
         ensureRunning();
         signal();
@@ -234,6 +236,23 @@ public final class ReliableUploader {
                 boolean urgentAudio = false;
                 boolean networkUnavailable = false;
                 try {
+                    if (!remoteFoldersReconciled && hasNetwork()) {
+                        try {
+                            boolean changed = store.reconcileRemoteFolders(client.listFolders());
+                            remoteFoldersReconciled = true;
+                            if (changed) {
+                                listener.onDiagnostic("INFO", "upload.folder_tree_recovered", "",
+                                        "Recovered the local folder tree from Jetson", fields(), null);
+                                listener.onChanged();
+                            }
+                        } catch (Exception folderPullFailure) {
+                            listener.onDiagnostic("WARN", "upload.folder_tree_pull_deferred", "",
+                                    "Could not refresh the local folder tree from Jetson yet",
+                                    fields("exception_class", folderPullFailure.getClass().getName(),
+                                            "exception_message", String.valueOf(folderPullFailure.getMessage())),
+                                    folderPullFailure);
+                        }
+                    }
                     List<ReliableSessionStore.Folder> pendingFolders =
                             store.foldersNeedingSync();
                     if (!pendingFolders.isEmpty()) {
@@ -456,6 +475,53 @@ public final class ReliableUploader {
         return root == null ? failure : root;
     }
 
+    static long resumeDurableFloor(String previousSessionId, int previousSequence,
+                                   long previousDurableBytes, String sessionId,
+                                   int sequence, long persistedDurableBytes) {
+        long persisted = Math.max(0L, persistedDurableBytes);
+        if (sessionId != null && sessionId.equals(previousSessionId)
+                && sequence == previousSequence) {
+            return Math.max(persisted, Math.max(0L, previousDurableBytes));
+        }
+        return persisted;
+    }
+
+    static long requireNonRegressingDurable(long currentDurableBytes,
+                                             long serverDurableBytes)
+            throws ReliableUploadClient.ProtocolException {
+        long current = Math.max(0L, currentDurableBytes);
+        long server = Math.max(0L, serverDurableBytes);
+        if (server < current) {
+            throw new ReliableUploadClient.ProtocolException(409,
+                    "Jetson durable offset regressed from " + current + " to " + server);
+        }
+        return server;
+    }
+
+    static boolean isPendingLocalEncoding(
+            ReliableSessionManifest.Segment segment,
+            boolean pcmFileReadable) {
+        if (segment == null || segment.remoteAccepted) return false;
+        boolean mp3NotReady = segment.mp3Name == null || segment.mp3Name.isEmpty()
+                || segment.mp3Bytes <= 0L;
+        boolean pcmRecorded = segment.pcmJournalName != null
+                && !segment.pcmJournalName.isEmpty();
+        return mp3NotReady && pcmRecorded && pcmFileReadable;
+    }
+
+    private boolean hasReadablePcmAwaitingEncoding(
+            String sessionId, ReliableSessionManifest.Segment segment) {
+        if (segment == null || segment.pcmJournalName == null
+                || segment.pcmJournalName.isEmpty()) return false;
+        try {
+            File pcm = store.pcmJournalFile(sessionId, segment);
+            return isPendingLocalEncoding(segment,
+                    pcm.isFile() && pcm.length() > 0L);
+        } catch (IOException ignored) {
+            return false;
+        }
+    }
+
     private static boolean hasPendingAudio(ReliableSessionManifest manifest) {
         for (ReliableSessionManifest.Segment segment : manifest.segments) {
             if (!segment.remoteAccepted && segment.mp3Bytes > 0L) return true;
@@ -511,6 +577,9 @@ public final class ReliableUploader {
 
     private void reconcile(ReliableSessionManifest snapshot) throws Exception {
         String sessionId = snapshot.sessionId;
+        String previousSessionId = currentSessionId;
+        int previousSequence = currentSequence;
+        long previousDurableBytes = currentDurableBytes;
         currentSessionId = sessionId;
         currentOperation = "reconcile";
         lastProgressWallMs = System.currentTimeMillis();
@@ -613,6 +682,22 @@ public final class ReliableUploader {
                                     "local_file_name",
                                     segment == null ? "" : segment.mp3Name), null);
                 }
+                if (segment != null
+                        && hasReadablePcmAwaitingEncoding(sessionId, segment)) {
+                    currentOperation = "waiting_local_encoding";
+                    currentSequence = segment.seq;
+                    currentDurableBytes = 0L;
+                    currentTotalBytes = 0L;
+                    lastProgressWallMs = System.currentTimeMillis();
+                    listener.onState(sessionId,
+                            "Waiting for local MP3 encoding before backup");
+                    listener.onDiagnostic("INFO", "upload.local_encoding_pending",
+                            sessionId,
+                            "Durable PCM exists and is waiting for local MP3 encoding; upload remains queued",
+                            fields("seq", segment.seq,
+                                    "pcm_file_name", segment.pcmJournalName), null);
+                    return;
+                }
                 if (segment == null || !file.isFile()
                         || file.length() != segment.mp3Bytes) {
                     throw new IllegalStateException("Local chunk " + (segment == null ? -1 : segment.seq)
@@ -627,14 +712,16 @@ public final class ReliableUploader {
             listener.onState(sessionId, "Sending chunk " + chunkNumber
                     + " of " + chunkCount);
             currentOperation = "upload_chunk";
+            currentDurableBytes = resumeDurableFloor(previousSessionId,
+                    previousSequence, previousDurableBytes,
+                    sessionId, uploadSeq, segment.remotePartialBytes);
             currentSequence = uploadSeq;
-            currentDurableBytes = Math.max(0L, segment.remotePartialBytes);
             currentTotalBytes = segment.mp3Bytes;
             lastProgressWallMs = System.currentTimeMillis();
             UploadStallWatchdog watchdog = new UploadStallWatchdog(
                     UploadStallWatchdog.DEFAULT_TIMEOUT_MS, () -> {
                         watchdogTrips++;
-                        lastFailure = "Upload made no durable progress for two hours";
+                        lastFailure = "Upload made no durable progress before the watchdog deadline";
                         listener.onDiagnostic("WARN", "upload.no_progress_timeout",
                                 sessionId, lastFailure,
                                 fields("seq", uploadSeq,
@@ -642,6 +729,7 @@ public final class ReliableUploader {
                                         "total_bytes", currentTotalBytes,
                                         "operation", currentOperation,
                                         "adaptive_part_bytes", client.currentPartBytes(),
+                                        "watchdog_timeout_ms", UploadStallWatchdog.DEFAULT_TIMEOUT_MS,
                                         "watchdog_trips", watchdogTrips), null);
                         client.cancelActiveRequest();
                     });
@@ -650,15 +738,17 @@ public final class ReliableUploader {
                         manifest, segment, file,
                         (durableBytes, totalBytes, serverId, revision) -> {
                             watchdog.heartbeat();
-                            currentDurableBytes = durableBytes;
+                            long acceptedDurable = requireNonRegressingDurable(
+                                    currentDurableBytes, durableBytes);
+                            currentDurableBytes = acceptedDurable;
                             currentTotalBytes = totalBytes;
                             lastProgressWallMs = System.currentTimeMillis();
                             lastFailure = "";
                             retryAttempt = 0;
                             store.markRemotePartProgress(sessionId, uploadSeq,
-                                    durableBytes, serverId, revision);
+                                    acceptedDurable, serverId, revision);
                             listener.onState(sessionId, "Sending chunk " + chunkNumber
-                                    + " of " + chunkCount + " · " + durableBytes
+                                    + " of " + chunkCount + " · " + acceptedDurable
                                     + " of " + totalBytes + " bytes durable");
                         });
                 store.markRemoteAccepted(sessionId, segment.seq, ack.serverId,

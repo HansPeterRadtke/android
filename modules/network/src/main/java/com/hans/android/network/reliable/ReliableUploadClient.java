@@ -1,6 +1,7 @@
 package com.hans.android.network.reliable;
 
 import com.hans.android.audio.reliable.ReliableSessionManifest;
+import com.hans.android.audio.reliable.ReliableSessionStore;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -33,8 +34,8 @@ public final class ReliableUploadClient {
     public static final int MIN_UPLOAD_PART_BYTES = AdaptiveUploadPolicy.MIN_PART_BYTES;
     public static final int INITIAL_UPLOAD_PART_BYTES = AdaptiveUploadPolicy.INITIAL_PART_BYTES;
     public static final int MAX_UPLOAD_PART_BYTES = AdaptiveUploadPolicy.MAX_PART_BYTES;
-    public static final int CONNECT_TIMEOUT_MS = 0;
-    public static final int READ_TIMEOUT_MS = 0;
+    public static final int CONNECT_TIMEOUT_MS = 2_500;
+    public static final int READ_TIMEOUT_MS = 6_000;
 
     public interface ProgressListener {
         void onProgress(long durableBytes, long totalBytes,
@@ -96,6 +97,51 @@ public final class ReliableUploadClient {
         }
     }
 
+    public static final class TranscriptionStatus {
+        public final int totalCommittedCount;
+        public final int completeCount;
+        public final int notTranscribedCount;
+        public final int overallPercent;
+        public final CurrentTranscription current;
+
+        TranscriptionStatus(int totalCommittedCount, int completeCount,
+                            int notTranscribedCount, int overallPercent,
+                            CurrentTranscription current) {
+            this.totalCommittedCount = Math.max(0, totalCommittedCount);
+            this.completeCount = Math.max(0, completeCount);
+            this.notTranscribedCount = Math.max(0, notTranscribedCount);
+            this.overallPercent = Math.max(0, Math.min(100, overallPercent));
+            this.current = current;
+        }
+    }
+
+    public static final class CurrentTranscription {
+        public final String sessionId;
+        public final String displayName;
+        public final String folderName;
+        public final String state;
+        public final String engine;
+        public final String phase;
+        public final int percent;
+        public final long durationMs;
+        public final long updatedAtMs;
+
+        CurrentTranscription(String sessionId, String displayName,
+                             String folderName, String state, String engine,
+                             String phase, int percent, long durationMs,
+                             long updatedAtMs) {
+            this.sessionId = sessionId == null ? "" : sessionId;
+            this.displayName = displayName == null ? "" : displayName;
+            this.folderName = folderName == null ? "" : folderName;
+            this.state = state == null ? "" : state;
+            this.engine = engine == null ? "" : engine;
+            this.phase = phase == null ? "" : phase;
+            this.percent = Math.max(0, Math.min(100, percent));
+            this.durationMs = Math.max(0L, durationMs);
+            this.updatedAtMs = Math.max(0L, updatedAtMs);
+        }
+    }
+
     public static final class Ack {
         public final String serverId;
         public final long manifestRevision;
@@ -144,6 +190,53 @@ public final class ReliableUploadClient {
         this.baseUrls = Collections.unmodifiableList(urls);
         this.baseUrl = urls.get(0);
         this.userAgent = userAgent;
+    }
+
+    public TranscriptionStatus transcriptionStatus() throws Exception {
+        return parseTranscriptionStatus(getJson("/audio/v2/transcription-status"));
+    }
+
+    static TranscriptionStatus parseTranscriptionStatus(JSONObject response) {
+        JSONObject currentObject = response == null ? null : response.optJSONObject("current");
+        CurrentTranscription current = null;
+        if (currentObject != null) {
+            current = new CurrentTranscription(
+                    currentObject.optString("session_id", ""),
+                    currentObject.optString("display_name", ""),
+                    currentObject.optString("folder_name", ""),
+                    currentObject.optString("state", ""),
+                    currentObject.optString("engine", ""),
+                    currentObject.optString("phase", ""),
+                    currentObject.optInt("percent", 0),
+                    currentObject.optLong("duration_ms", 0L),
+                    currentObject.optLong("updated_at_ms", 0L));
+        }
+        int total = response == null ? 0 : response.optInt("total_committed_count", 0);
+        int complete = response == null ? 0 : response.optInt("complete_count", 0);
+        int pending = response == null ? 0 : response.optInt("not_transcribed_count",
+                Math.max(0, total - complete));
+        int overall = response == null ? 0 : response.optInt("overall_percent",
+                total <= 0 ? 100 : (complete * 100) / total);
+        return new TranscriptionStatus(total, complete, pending, overall, current);
+    }
+
+    public List<ReliableSessionStore.Folder> listFolders() throws Exception {
+        JSONObject response = getJson("/audio/v2/folders");
+        JSONArray array = response.optJSONArray("folders");
+        ArrayList<ReliableSessionStore.Folder> folders = new ArrayList<>();
+        if (array == null) return folders;
+        for (int i = 0; i < array.length(); i++) {
+            JSONObject item = array.optJSONObject(i);
+            if (item == null) continue;
+            String id = item.optString("folder_id", "");
+            String name = item.optString("name", "");
+            String parent = item.optString("parent_folder_id", "");
+            if (id.isEmpty() || name.isEmpty()) continue;
+            folders.add(new ReliableSessionStore.Folder(id, name, parent,
+                    item.optLong("created_at_ms", 0L), name, parent,
+                    item.optString("path", name)));
+        }
+        return folders;
     }
 
     public void createFolder(String folderId, String name) throws Exception {
@@ -457,13 +550,9 @@ public final class ReliableUploadClient {
     private HttpURLConnection open(String endpoint, String path, String method) throws Exception {
         checkInterrupted();
         HttpURLConnection connection = (HttpURLConnection) new URL(endpoint + path).openConnection();
-        // No fixed connect or response deadline: a very slow but progressing
-        // mobile request remains valid. The uploader's long no-progress watchdog
-        // and network callbacks cancel genuinely stuck or obsolete connections.
+        // A dead mobile path must not pin the single upload worker indefinitely.
+        // Parts are resumable, so bounded deadlines are safer than waiting forever.
         connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
-        // No fixed response deadline: a very slow but progressing mobile upload
-        // remains valid. The uploader's long no-progress watchdog and network
-        // callbacks cancel genuinely stuck or obsolete connections.
         connection.setReadTimeout(READ_TIMEOUT_MS);
         connection.setUseCaches(false);
         connection.setRequestMethod(method);

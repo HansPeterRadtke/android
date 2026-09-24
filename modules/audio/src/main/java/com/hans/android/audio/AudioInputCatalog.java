@@ -219,6 +219,42 @@ public final class AudioInputCatalog {
         return result;
     }
 
+    public static AudioInputOption resolveFreshSelection(
+            List<AudioInputOption> currentInputs, int preferredDeviceId,
+            AudioInputOption previousSelection) {
+        if (currentInputs == null || currentInputs.isEmpty()) return null;
+        for (AudioInputOption input : currentInputs) {
+            if (input.getDeviceId() == preferredDeviceId) return input;
+        }
+        if (previousSelection != null) {
+            for (AudioInputOption input : currentInputs) {
+                if (input.getDeviceType() == previousSelection.getDeviceType()
+                        && input.getLabel().equalsIgnoreCase(previousSelection.getLabel())) {
+                    return input;
+                }
+            }
+            AudioInputOption sameType = null;
+            int sameTypeCount = 0;
+            for (AudioInputOption input : currentInputs) {
+                if (input.getDeviceType() == previousSelection.getDeviceType()) {
+                    sameType = input;
+                    sameTypeCount++;
+                }
+            }
+            if (sameTypeCount == 1) return sameType;
+            AudioInputOption sameCategory = null;
+            int sameCategoryCount = 0;
+            for (AudioInputOption input : currentInputs) {
+                if (input.getCategory() == previousSelection.getCategory()) {
+                    sameCategory = input;
+                    sameCategoryCount++;
+                }
+            }
+            if (sameCategoryCount == 1) return sameCategory;
+        }
+        return currentInputs.get(0);
+    }
+
     public static AudioDeviceInfo resolve(Context context, int deviceId) {
         if (deviceId == AudioInputOption.DEFAULT_DEVICE_ID) return null;
         AudioManager manager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);

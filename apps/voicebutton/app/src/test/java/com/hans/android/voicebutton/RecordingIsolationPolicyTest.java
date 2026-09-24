@@ -20,4 +20,15 @@ public class RecordingIsolationPolicyTest {
         assertFalse(RecordingIsolationPolicy.resumeCaptureBeforeDeferredWork(
                 false, true));
     }
+
+    @Test public void queuedStartPreemptsDeferredRecovery() {
+        assertFalse(RecordingIsolationPolicy.mayRunDeferredRecovery(
+                false, true, false));
+        assertFalse(RecordingIsolationPolicy.mayRunDeferredRecovery(
+                true, false, false));
+        assertFalse(RecordingIsolationPolicy.mayRunDeferredRecovery(
+                false, false, true));
+        assertTrue(RecordingIsolationPolicy.mayRunDeferredRecovery(
+                false, false, false));
+    }
 }

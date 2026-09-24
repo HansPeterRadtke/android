@@ -48,4 +48,44 @@ public class AudioInputCatalogTest {
         org.junit.Assert.assertEquals(AudioInputOption.Category.USB, result.get(1).getCategory());
     }
 
+
+    @Test public void reResolvesSameLogicalMicrophoneWhenAndroidDeviceIdChanges() {
+        AudioInputOption previous = new AudioInputOption(35,
+                AudioDeviceInfo.TYPE_USB_HEADSET, "USB microphone — Recorder",
+                AudioInputOption.Category.USB);
+        java.util.List<AudioInputOption> current = new java.util.ArrayList<>();
+        current.add(new AudioInputOption(3, AudioDeviceInfo.TYPE_BUILTIN_MIC,
+                "Built-in microphone", AudioInputOption.Category.BUILT_IN));
+        current.add(new AudioInputOption(91, AudioDeviceInfo.TYPE_USB_HEADSET,
+                "USB microphone — Recorder", AudioInputOption.Category.USB));
+        AudioInputOption resolved = AudioInputCatalog.resolveFreshSelection(
+                current, 35, previous);
+        org.junit.Assert.assertEquals(91, resolved.getDeviceId());
+    }
+
+    @Test public void staleMicrophoneFallsBackToCurrentPhysicalInput() {
+        AudioInputOption previous = new AudioInputOption(35,
+                AudioDeviceInfo.TYPE_USB_HEADSET, "USB microphone — Gone",
+                AudioInputOption.Category.USB);
+        java.util.List<AudioInputOption> current = new java.util.ArrayList<>();
+        current.add(new AudioInputOption(7, AudioDeviceInfo.TYPE_BUILTIN_MIC,
+                "Built-in microphone", AudioInputOption.Category.BUILT_IN));
+        AudioInputOption resolved = AudioInputCatalog.resolveFreshSelection(
+                current, 35, previous);
+        org.junit.Assert.assertEquals(7, resolved.getDeviceId());
+    }
+
+    @Test public void exactCurrentMicrophoneIdWins() {
+        AudioInputOption previous = new AudioInputOption(35,
+                AudioDeviceInfo.TYPE_USB_HEADSET, "Old label",
+                AudioInputOption.Category.USB);
+        java.util.List<AudioInputOption> current = new java.util.ArrayList<>();
+        current.add(new AudioInputOption(35, AudioDeviceInfo.TYPE_USB_HEADSET,
+                "New label", AudioInputOption.Category.USB));
+        current.add(new AudioInputOption(7, AudioDeviceInfo.TYPE_BUILTIN_MIC,
+                "Built-in microphone", AudioInputOption.Category.BUILT_IN));
+        AudioInputOption resolved = AudioInputCatalog.resolveFreshSelection(
+                current, 35, previous);
+        org.junit.Assert.assertEquals(35, resolved.getDeviceId());
+    }
 }

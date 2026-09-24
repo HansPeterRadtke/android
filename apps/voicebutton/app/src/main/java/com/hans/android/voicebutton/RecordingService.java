@@ -208,11 +208,13 @@ public final class RecordingService extends Service {
     });
     private final AtomicReference<RefreshRequest> pendingRefresh = new AtomicReference<>();
     private final AtomicBoolean refreshWorkerRunning = new AtomicBoolean(false);
+    private final AtomicBoolean startActionQueued = new AtomicBoolean(false);
     private final Object fileMaintenanceLock = new Object();
     private final JournaledMp3Recorder recorder = new JournaledMp3Recorder();
     private final Mp3Converter mp3 = new Mp3Converter();
 
     private ReliableSessionStore store;
+    private ReliableSessionStore statusStore;
     private ReliableUploader uploader;
     private PhoneDiagnostics diagnostics;
     private volatile Snapshot snapshot = Snapshot.initial();
@@ -232,6 +234,7 @@ public final class RecordingService extends Service {
     private volatile long localBytesCached;
     private volatile long lastLocalBytesScanElapsedMs;
     private volatile long lastSessionListScanElapsedMs;
+    private final AtomicBoolean sessionListDirty = new AtomicBoolean(true);
     private final AtomicReference<RefreshRequest> pendingUploaderRefresh = new AtomicReference<>();
     private volatile String lastLoggedState = "";
     private volatile String lastLoggedExplanation = "";
@@ -255,10 +258,15 @@ public final class RecordingService extends Service {
     private final Runnable continuityTicker = new Runnable() {
         @Override public void run() {
             boolean keep = shouldKeepServiceAlive();
+            boolean holdWakeLock = shouldHoldWakeLock();
             if (keep) {
                 ensureForeground();
-                acquireCaptureWakeLock();
-                signalUploader("queued_work");
+                if (holdWakeLock) {
+                    acquireCaptureWakeLock();
+                    signalUploader("queued_work");
+                } else {
+                    releaseCaptureWakeLock();
+                }
                 main.postDelayed(this, CONTINUITY_TICK_MS);
             } else {
                 releaseCaptureWakeLock();
@@ -377,21 +385,32 @@ public final class RecordingService extends Service {
         try {
             UploadWorkCoordinator.awaitServiceOwnership();
             store = ReliableSessionStore.openForBrowsing(this);
+            statusStore = ReliableSessionStore.openForBrowsing(this);
             uploader = new ReliableUploader(this, store,
                     BuildConfig.VOICE_BASE_URL, uploaderListener);
             registerNetworkCallback();
+            ReliableSessionManifest durableOpen = store.latestUnfinished();
+            if (durableOpen != null) currentSessionId = durableOpen.sessionId;
+            String startupState = RecordingStartupPolicy.requestedState(durableOpen);
+            String startupExplanation = RecordingStartupPolicy.explanation(durableOpen);
+            lastSessionListScanElapsedMs = 0L;
+            RefreshRequest startupRequest = new RefreshRequest(startupState,
+                    startupExplanation, "Not recording");
+            Snapshot startupSnapshot = buildSnapshot(startupRequest);
+            snapshot = startupSnapshot;
+            currentSessionId = startupSnapshot.currentSessionId;
             serviceInitialized = true;
             serviceInitializing = false;
-            diag(PhoneDiagnostics.INFO, "service.fast_ready", null,
-                    "RecordingService is ready for capture before backlog recovery",
+            diag(PhoneDiagnostics.INFO, "service.initial_state_resolved",
+                    currentSessionId,
+                    "RecordingService resolved durable recording state before becoming ready",
                     PhoneDiagnostics.fields("initialization_ms", Math.max(0L,
                                     SystemClock.elapsedRealtime() - started),
-                            "thread", Thread.currentThread().getName()));
-            publishImmediateState("READY",
-                    "Ready to create a loss-protected recording",
-                    "service_fast_ready");
-            refresh("READY", "Ready to create a loss-protected recording",
-                    false, "Not recording");
+                            "thread", Thread.currentThread().getName(),
+                            "state", startupSnapshot.state,
+                            "paused", startupSnapshot.paused,
+                            "has_open_session", startupSnapshot.openSession != null));
+            main.post(() -> applySnapshot(startupSnapshot, startupRequest));
             scheduleDeferredStartupRecovery("service_initialized");
         } catch (Exception failure) {
             serviceInitialized = false;
@@ -437,10 +456,28 @@ public final class RecordingService extends Service {
                 || ACTION_RECOVER_AFTER_BOOT.equals(action)
                 || ACTION_PREPARE_PLAYBACK.equals(action);
         if (foregroundLaunch) ensureForeground();
+        if (ACTION_START.equals(action)) {
+            if (recorder.isRecording()) {
+                diag(PhoneDiagnostics.INFO, "recording.duplicate_start_ignored",
+                        currentSessionId,
+                        "A duplicate Start request was ignored because capture is already starting or active",
+                        PhoneDiagnostics.fields("snapshot_state", snapshot.state,
+                                "device_id", deviceId));
+                return START_STICKY;
+            }
+            if (!startActionQueued.compareAndSet(false, true)) {
+                publishImmediateState("STARTING", "Starting recording",
+                        "duplicate_start_already_queued");
+                return START_STICKY;
+            }
+            publishImmediateState("STARTING", "Starting recording",
+                    "start_action_queued");
+        }
         try {
             serviceExecutor.execute(() -> executeServiceAction(action, deviceId,
                     sessionId, folderId, folderName, startId, flags));
         } catch (RuntimeException failure) {
+            if (ACTION_START.equals(action)) startActionQueued.set(false);
             refresh("FAILED", PhoneDiagnostics.exactFailure(
                     "Queueing the recording action", failure),
                     snapshot.recording, snapshot.routedInput);
@@ -491,6 +528,8 @@ public final class RecordingService extends Service {
                             "thread", Thread.currentThread().getName()));
             refresh("FAILED", exact, snapshot.recording, snapshot.routedInput);
             if (!recorder.isRecording()) main.post(this::leaveForegroundIfIdle);
+        } finally {
+            if (ACTION_START.equals(action)) startActionQueued.set(false);
         }
     }
 
@@ -632,8 +671,9 @@ public final class RecordingService extends Service {
     public String buildSupportSummary() {
         Snapshot value = snapshot;
         ReliableUploader uploaderValue = uploader;
-        if (("STARTING".equals(value.state) || uploaderValue == null)
-                && serviceInitialized && !serviceInitializing) {
+        if (uploaderValue == null
+                && serviceInitialized && !serviceInitializing
+                && !"STARTING".equals(value.state)) {
             value = copySnapshotWithState(value, "READY",
                     "Ready to create a loss-protected recording");
         }
@@ -657,10 +697,20 @@ public final class RecordingService extends Service {
                 .append(" signal=").append(value.inputSignalDetected).append('\n');
         out.append("duration_ms=").append(value.durationMs)
                 .append(" local_bytes=").append(value.localBytes).append('\n');
+        boolean supportUploadUnmeasured = isUploadProgressUnmeasured(value);
         out.append("sync_bytes=").append(value.uploadDurableBytes).append('/')
-                .append(value.uploadTotalBytes)
-                .append(" pending=").append(value.uploadPendingBytes)
-                .append(" progress_permille=").append(value.uploadProgressPermille).append('\n');
+                .append(value.uploadTotalBytes);
+        if (supportUploadUnmeasured) {
+            out.append(" pending=unknown progress_permille=-1")
+                    .append(" progress_scope=closed_segments_only")
+                    .append(" current_recording_upload_complete=false");
+        } else {
+            out.append(" pending=").append(value.uploadPendingBytes)
+                    .append(" progress_permille=").append(value.uploadProgressPermille)
+                    .append(" progress_scope=all_finalized_segments")
+                    .append(" current_recording_upload_complete=true");
+        }
+        out.append('\n');
         out.append("sessions=").append(value.sessions.size())
                 .append(" current_session=").append(value.currentSessionId).append('\n');
         out.append("library_filename_layout=")
@@ -674,13 +724,16 @@ public final class RecordingService extends Service {
         int start = Math.max(0, value.sessions.size() - 5);
         for (int i = start; i < value.sessions.size(); i++) {
             ReliableSessionManifest session = value.sessions.get(i);
+            boolean pendingUnknown = hasUnmeasuredPendingSegment(session);
             out.append("session ").append(session.sessionId)
                     .append(" folder=").append(limit(session.folderName, 120))
                     .append(" state=").append(session.state)
                     .append(" chunks=").append(session.segments.size())
                     .append(" remote=").append(session.durableRemoteChunkCount())
-                    .append(" pending_bytes=").append(session.pendingRemoteBytes())
-                    .append(" error=").append(limit(session.error, 300)).append('\n');
+                    .append(" pending_bytes=");
+            if (pendingUnknown) out.append("unknown");
+            else out.append(session.pendingRemoteBytes());
+            out.append(" error=").append(limit(session.error, 300)).append('\n');
         }
         if (out.length() > 24000) return out.substring(0, 24000) + "\n[summary truncated]\n";
         return out.toString();
@@ -701,6 +754,20 @@ public final class RecordingService extends Service {
             return "unreadable: " + failure.getClass().getSimpleName()
                     + ": " + failure.getMessage();
         }
+    }
+
+    private static boolean isUploadProgressUnmeasured(Snapshot value) {
+        return value != null && (value.recording
+                || MainScreenText.isCurrentRecordingUnmeasured(
+                        value.state, value.liveUploadOperation));
+    }
+
+    private static boolean hasUnmeasuredPendingSegment(ReliableSessionManifest session) {
+        if (session == null) return false;
+        for (ReliableSessionManifest.Segment segment : session.orderedSegments()) {
+            if (!segment.remoteAccepted && segment.mp3Bytes <= 0L) return true;
+        }
+        return false;
     }
 
     private static String limit(String value, int maximum) {
@@ -734,10 +801,20 @@ public final class RecordingService extends Service {
                 .append(" input_peak_dbfs=").append(value.inputPeakDbfs)
                 .append(" input_level_permille=").append(value.inputLevelPermille)
                 .append(" signal_detected=").append(value.inputSignalDetected).append('\n');
+        boolean debugUploadUnmeasured = isUploadProgressUnmeasured(value);
         out.append("upload_bytes=").append(value.uploadDurableBytes).append('/')
-                .append(value.uploadTotalBytes)
-                .append(" pending=").append(value.uploadPendingBytes)
-                .append(" progress_permille=").append(value.uploadProgressPermille).append('\n');
+                .append(value.uploadTotalBytes);
+        if (debugUploadUnmeasured) {
+            out.append(" pending=unknown progress_permille=-1")
+                    .append(" progress_scope=closed_segments_only")
+                    .append(" current_recording_upload_complete=false");
+        } else {
+            out.append(" pending=").append(value.uploadPendingBytes)
+                    .append(" progress_permille=").append(value.uploadProgressPermille)
+                    .append(" progress_scope=all_finalized_segments")
+                    .append(" current_recording_upload_complete=true");
+        }
+        out.append('\n');
         out.append("upload_chunks=").append(value.uploadDurableChunks).append('/')
                 .append(value.uploadTotalChunks).append('\n');
         ReliableUploader uploaderValue = uploader;
@@ -894,8 +971,17 @@ public final class RecordingService extends Service {
     private void startNew(int deviceId, String folderId, String folderName) throws Exception {
         diag(PhoneDiagnostics.INFO, "recording.start_requested", null,
                 "A new recording was requested", PhoneDiagnostics.fields("device_id", deviceId));
-        if (recorder.isRecording()) throw new IOException("A recording is already active");
-        ReliableSessionManifest unfinished = snapshot.openSession;
+        if (recorder.isRecording()) {
+            diag(PhoneDiagnostics.INFO, "recording.duplicate_start_ignored",
+                    currentSessionId,
+                    "A duplicate Start request reached the service executor after capture had already begun",
+                    PhoneDiagnostics.fields("snapshot_state", snapshot.state,
+                            "device_id", deviceId));
+            refresh("PREPARING", "Recording is already starting or active",
+                    true, snapshot.routedInput);
+            return;
+        }
+        ReliableSessionManifest unfinished = store.latestUnfinished();
         if (unfinished == null && currentSessionId != null && !currentSessionId.isEmpty()) {
             try { unfinished = store.load(currentSessionId); }
             catch (Exception ignored) { unfinished = null; }
@@ -1398,7 +1484,10 @@ public final class RecordingService extends Service {
 
     private void schedulePreview(String sessionId) {
         if (exitRequested.get()) return;
-        conversion.execute(() -> {
+        ExecutorService current = conversion;
+        if (!DeferredWorkPolicy.maySubmit(current)) return;
+        try {
+        current.execute(() -> {
             synchronized (fileMaintenanceLock) {
                 long operationStarted = SystemClock.elapsedRealtime();
                 diag(PhoneDiagnostics.INFO, "recording.preview_start", sessionId,
@@ -1462,10 +1551,20 @@ public final class RecordingService extends Service {
                 }
             }
         });
+        } catch (RuntimeException failure) {
+            if (!exitRequested.get() && DeferredWorkPolicy.maySubmit(current)) {
+                diagError("recording.preview_queue_failed", sessionId,
+                        "Queueing playable preview assembly", failure,
+                        PhoneDiagnostics.fields());
+            }
+        }
     }
 
     private void scheduleSegmentEncoding(String sessionId, int seq) {
-        conversion.execute(() -> {
+        ExecutorService current = conversion;
+        if (!DeferredWorkPolicy.maySubmit(current) || exitRequested.get()) return;
+        try {
+        current.execute(() -> {
             synchronized (fileMaintenanceLock) {
             try {
                 ReliableSessionManifest manifest = store.load(sessionId);
@@ -1488,11 +1587,21 @@ public final class RecordingService extends Service {
             }
             }
         });
+        } catch (RuntimeException failure) {
+            if (!exitRequested.get() && DeferredWorkPolicy.maySubmit(current)) {
+                diagError("recording.segment_encoding_queue_failed", sessionId,
+                        "Queueing MP3 segment encoding", failure,
+                        PhoneDiagnostics.fields("seq", seq));
+            }
+        }
     }
 
     private void scheduleFinalization(String sessionId) {
         if (!exitRequested.get()) ensureForeground();
-        conversion.execute(() -> {
+        ExecutorService current = conversion;
+        if (!DeferredWorkPolicy.maySubmit(current) || exitRequested.get()) return;
+        try {
+        current.execute(() -> {
             synchronized (fileMaintenanceLock) {
             long operationStarted = SystemClock.elapsedRealtime();
             diag(PhoneDiagnostics.INFO, "recording.finalization_start", sessionId,
@@ -1545,6 +1654,13 @@ public final class RecordingService extends Service {
             }
             }
         });
+        } catch (RuntimeException failure) {
+            if (!exitRequested.get() && DeferredWorkPolicy.maySubmit(current)) {
+                diagError("recording.finalization_queue_failed", sessionId,
+                        "Queueing final MP3 assembly", failure,
+                        PhoneDiagnostics.fields());
+            }
+        }
     }
 
     private void recoverPcmJournals() {
@@ -1655,57 +1771,98 @@ public final class RecordingService extends Service {
         }
     }
 
+    private void refreshDurableIdleState(String reason) {
+        if (recorder.isRecording() || startActionQueued.get()) return;
+        ReliableSessionManifest open = store == null ? null : store.latestUnfinished();
+        currentSessionId = open == null ? null : open.sessionId;
+        lastSessionListScanElapsedMs = 0L;
+        sessionListDirty.set(true);
+        String state = RecordingStartupPolicy.requestedState(open);
+        String explanation = RecordingStartupPolicy.explanation(open);
+        diag(PhoneDiagnostics.INFO, "service.durable_idle_state_resolved",
+                currentSessionId,
+                "Durable recording state was re-resolved",
+                PhoneDiagnostics.fields("reason", reason,
+                        "state", state,
+                        "paused", open != null && open.paused,
+                        "has_open_session", open != null));
+        refresh(state, explanation, false, "Not recording");
+    }
+
     private void scheduleDeferredStartupRecovery(String reason) {
         main.postDelayed(() -> {
-            if (exitRequested.get() || recorder.isRecording() || store == null) return;
+            if (!RecordingIsolationPolicy.mayRunDeferredRecovery(
+                    recorder.isRecording(), startActionQueued.get(), exitRequested.get())
+                    || store == null) return;
             ExecutorService current = conversion;
+            if (!DeferredWorkPolicy.maySubmit(current)) return;
             try {
                 current.execute(() -> {
-                    if (exitRequested.get() || recorder.isRecording() || store == null) return;
-                    synchronized (fileMaintenanceLock) {
-                        if (exitRequested.get() || recorder.isRecording()) return;
-                        try {
-                            long started = SystemClock.elapsedRealtime();
-                            store.recoverAll();
-                            normalizeInterruptedSessions();
-                            localBytesCached = store.localBytes();
-                            lastLocalBytesScanElapsedMs = SystemClock.elapsedRealtime();
+                    if (!RecordingIsolationPolicy.mayRunDeferredRecovery(
+                            recorder.isRecording(), startActionQueued.get(), exitRequested.get())
+                            || store == null) return;
+                    try {
+                        long started = SystemClock.elapsedRealtime();
+                        ReliableSessionStore maintenanceStore =
+                                ReliableSessionStore.openForBrowsing(this);
+                        boolean completed = maintenanceStore.recoverAll(() ->
+                                !RecordingIsolationPolicy.mayRunDeferredRecovery(
+                                        recorder.isRecording(), startActionQueued.get(),
+                                        exitRequested.get()));
+                        if (!completed) {
                             diag(PhoneDiagnostics.INFO,
-                                    "service.deferred_recovery_scan", currentSessionId,
-                                    "Private recording storage recovery completed after capture became available",
+                                    "service.deferred_recovery_preempted", currentSessionId,
+                                    "Storage recovery yielded to microphone capture",
                                     PhoneDiagnostics.fields("reason", reason,
-                                            "local_bytes", localBytesCached,
                                             "duration_ms", Math.max(0L,
                                                     SystemClock.elapsedRealtime() - started)));
-                            if (!recorder.isRecording()) {
-                                resumeDeferredWork("deferred_recovery_complete");
-                                refresh("READY",
-                                        "Ready to create a loss-protected recording",
-                                        false, "Not recording");
-                            }
-                        } catch (Exception failure) {
-                            diagError("service.deferred_recovery_failed",
-                                    currentSessionId,
-                                    "Deferred storage recovery", failure,
-                                    PhoneDiagnostics.fields("reason", reason));
+                            return;
                         }
+                        normalizeInterruptedSessions(maintenanceStore);
+                        if (RecordingIsolationPolicy.mayRunDeferredRecovery(
+                                recorder.isRecording(), startActionQueued.get(),
+                                exitRequested.get())) {
+                            localBytesCached = maintenanceStore.localBytes();
+                            lastLocalBytesScanElapsedMs = SystemClock.elapsedRealtime();
+                        }
+                        diag(PhoneDiagnostics.INFO,
+                                "service.deferred_recovery_scan", currentSessionId,
+                                "Private recording storage recovery completed on an isolated maintenance store",
+                                PhoneDiagnostics.fields("reason", reason,
+                                        "local_bytes", localBytesCached,
+                                        "duration_ms", Math.max(0L,
+                                                SystemClock.elapsedRealtime() - started)));
+                        if (!recorder.isRecording() && !startActionQueued.get()) {
+                            resumeDeferredWork("deferred_recovery_complete");
+                            refreshDurableIdleState("deferred_recovery_complete");
+                        }
+                    } catch (Exception failure) {
+                        diagError("service.deferred_recovery_failed",
+                                currentSessionId,
+                                "Deferred storage recovery", failure,
+                                PhoneDiagnostics.fields("reason", reason));
                     }
                 });
             } catch (RuntimeException failure) {
-                diagError("service.deferred_recovery_queue_failed", currentSessionId,
-                        "Queueing deferred storage recovery", failure,
-                        PhoneDiagnostics.fields("reason", reason));
+                if (!exitRequested.get() && DeferredWorkPolicy.maySubmit(current)) {
+                    diagError("service.deferred_recovery_queue_failed", currentSessionId,
+                            "Queueing deferred storage recovery", failure,
+                            PhoneDiagnostics.fields("reason", reason));
+                }
             }
-        }, 5000L);
+        }, 30000L);
     }
 
-    private void normalizeInterruptedSessions() {
+    private void normalizeInterruptedSessions(ReliableSessionStore maintenanceStore) {
         List<ReliableSessionManifest> interrupted = new ArrayList<>();
-        for (ReliableSessionManifest manifest : store.list()) if (!manifest.recordingFinished) interrupted.add(manifest);
+        for (ReliableSessionManifest manifest : maintenanceStore.list()) {
+            if (!manifest.recordingFinished) interrupted.add(manifest);
+        }
         interrupted.sort(Comparator.comparingLong(value -> value.createdAt));
         for (int i = 0; i + 1 < interrupted.size(); i++) {
             try {
-                store.markRecordingFinished(interrupted.get(i).sessionId, "older_interrupted_session");
+                maintenanceStore.markRecordingFinished(
+                        interrupted.get(i).sessionId, "older_interrupted_session");
             } catch (Exception ignored) {}
         }
     }
@@ -1718,6 +1875,7 @@ public final class RecordingService extends Service {
                     || humanState.startsWith("Reconciling");
             long now = SystemClock.elapsedRealtime();
             if (terminal || now - lastUploaderRefreshElapsedMs >= 500L) {
+                if (terminal) sessionListDirty.set(true);
                 String requested = humanState.startsWith("Stored completely")
                         ? "READY" : "SYNCHRONIZING";
                 pendingUploaderRefresh.set(new RefreshRequest(
@@ -1731,6 +1889,7 @@ public final class RecordingService extends Service {
         }
 
         @Override public void onChanged() {
+            sessionListDirty.set(true);
             pendingUploaderRefresh.set(new RefreshRequest(
                     snapshot.state, snapshot.explanation, snapshot.routedInput));
             main.removeCallbacks(uploaderRefresh);
@@ -1783,6 +1942,7 @@ public final class RecordingService extends Service {
                     if (externalCache != null) deleteTree(externalCache);
                     checkMaintenanceInterrupted();
                     store = new ReliableSessionStore(this);
+                    statusStore = ReliableSessionStore.openForBrowsing(this);
                     conversion = Executors.newSingleThreadExecutor();
                     uploader = new ReliableUploader(this, store, BuildConfig.VOICE_BASE_URL, uploaderListener);
                     uploader.start();
@@ -1796,6 +1956,7 @@ public final class RecordingService extends Service {
                 if (!success) {
                     try {
                         store = new ReliableSessionStore(this);
+                        statusStore = ReliableSessionStore.openForBrowsing(this);
                         conversion = Executors.newSingleThreadExecutor();
                         uploader = new ReliableUploader(this, store, BuildConfig.VOICE_BASE_URL, uploaderListener);
                         uploader.start();
@@ -1921,27 +2082,32 @@ public final class RecordingService extends Service {
     private Snapshot buildSnapshot(RefreshRequest request) {
         Snapshot previous = snapshot;
         boolean actualRecording = recorder.isRecording();
-        boolean captureState = actualRecording
-                || "RECORDING".equals(request.state)
-                || "PREPARING".equals(request.state);
+        boolean queuedStart = startActionQueued.get() && !actualRecording;
+        String requestedState = queuedStart ? "STARTING" : request.state;
+        boolean captureState = actualRecording || queuedStart
+                || "RECORDING".equals(requestedState)
+                || "PREPARING".equals(requestedState);
         long nowElapsed = SystemClock.elapsedRealtime();
-        boolean scanSessions = store != null && !captureState
-                && (lastSessionListScanElapsedMs <= 0L
+        ReliableSessionStore scanStore = statusStore != null ? statusStore : store;
+        boolean scanSessions = scanStore != null && !captureState
+                && (sessionListDirty.get()
+                || lastSessionListScanElapsedMs <= 0L
                 || nowElapsed - lastSessionListScanElapsedMs
                 >= STATUS_SESSION_SCAN_INTERVAL_MS);
         List<ReliableSessionManifest> sessions = previous.sessions;
         ReliableSessionManifest open = previous.openSession;
         ReliableSessionManifest interrupted = previous.interrupted;
-        if (store == null) {
+        if (scanStore == null) {
             sessions = Collections.emptyList();
             open = null;
             interrupted = null;
         } else if (scanSessions) {
             try {
-                sessions = store.list();
-                open = store.latestUnfinished();
-                interrupted = store.latestInterrupted();
+                sessions = scanStore.list();
+                open = scanStore.latestUnfinished();
+                interrupted = scanStore.latestInterrupted();
                 lastSessionListScanElapsedMs = nowElapsed;
+                sessionListDirty.set(false);
             } catch (Exception scanFailure) {
                 scanSessions = false;
                 diagError("service.status_scan_failed", previous.currentSessionId,
@@ -1950,16 +2116,34 @@ public final class RecordingService extends Service {
                                 "session_count", previous.sessions.size()));
             }
         }
+        // A status snapshot may be built before the previously built snapshot reaches
+        // the main thread. Never let a cached PAUSED/INTERRUPTED manifest override a
+        // newer live manifest that has already been resumed or finished.
+        if (!actualRecording && open != null && store != null) {
+            try {
+                ReliableSessionManifest liveOpen = store.load(open.sessionId);
+                open = RecordingStateResolver.authoritativeOpenSession(open, liveOpen);
+            } catch (Exception liveStateFailure) {
+                diagError("service.open_session_revalidation_failed",
+                        open.sessionId,
+                        "Revalidating cached open recording state",
+                        liveStateFailure,
+                        PhoneDiagnostics.fields("requested_state", requestedState,
+                                "cached_paused", open.paused,
+                                "cached_recording_finished", open.recordingFinished));
+            }
+        }
         boolean actualPaused = open != null && open.paused && !actualRecording;
         boolean actualInterrupted = open != null && open.isInterrupted() && !actualRecording;
-        String state = RecordingStateResolver.normalize(request.state,
+        String state = RecordingStateResolver.normalize(requestedState,
                 actualRecording, actualPaused, actualInterrupted);
-        String explanation = RecordingStateResolver.explanation(state, request.explanation);
+        String requestedExplanation = queuedStart ? "Starting recording" : request.explanation;
+        String explanation = RecordingStateResolver.explanation(state, requestedExplanation);
         String resolvedSessionId = open != null ? open.sessionId
                 : actualRecording ? currentSessionId : null;
         String selected = previous.selectedInput;
-        if (resolvedSessionId != null && store != null && !actualRecording) {
-            try { selected = store.load(resolvedSessionId).selectedInput; }
+        if (resolvedSessionId != null && scanStore != null && !actualRecording) {
+            try { selected = scanStore.load(resolvedSessionId).selectedInput; }
             catch (Exception ignored) {}
         }
         long duration = actualRecording
@@ -2035,12 +2219,12 @@ public final class RecordingService extends Service {
         float peakDbfs = actualRecording && levelAgeMs < 1500L ? liveInputPeakDbfs : -120f;
         int inputLevelPermille = RecordingFeedback.levelPermille(peakDbfs);
         boolean inputSignalDetected = actualRecording && levelAgeMs < 1500L && peakDbfs > -50f;
-        if (store != null && !actualRecording) {
+        if (scanStore != null && !captureState) {
             if (lastLocalBytesScanElapsedMs <= 0L) {
                 lastLocalBytesScanElapsedMs = nowElapsed;
             } else if (nowElapsed - lastLocalBytesScanElapsedMs >= 30000L) {
                 try {
-                    localBytesCached = store.localBytes();
+                    localBytesCached = scanStore.localBytes();
                     lastLocalBytesScanElapsedMs = nowElapsed;
                 } catch (Exception bytesFailure) {
                     diagError("service.local_bytes_scan_failed",
@@ -2051,9 +2235,9 @@ public final class RecordingService extends Service {
             }
         }
         long localBytes = localBytesCached;
-        if (store == null) pendingFolderSyncCached = false;
+        if (scanStore == null) pendingFolderSyncCached = false;
         else if (scanSessions) {
-            try { pendingFolderSyncCached = store.hasPendingFolderSync(); }
+            try { pendingFolderSyncCached = scanStore.hasPendingFolderSync(); }
             catch (Exception folderFailure) {
                 diagError("service.folder_sync_status_failed",
                         previous.currentSessionId,
@@ -2167,14 +2351,12 @@ public final class RecordingService extends Service {
     private static boolean computeBackgroundWork(List<ReliableSessionManifest> sessions) {
         for (ReliableSessionManifest manifest : sessions) {
             boolean pendingAudio = false;
-            boolean pendingTranscript = false;
             for (ReliableSessionManifest.Segment segment : manifest.orderedSegments()) {
                 if (!segment.remoteAccepted) pendingAudio = true;
-                if (!"COMPLETE".equals(segment.transcriptState)) pendingTranscript = true;
             }
             if (RecordingContinuityPolicy.sessionNeedsSynchronization(
                     manifest.recordingFinished, manifest.conversionFinished,
-                    manifest.remoteCommitted, pendingAudio, pendingTranscript)) return true;
+                    manifest.remoteCommitted, pendingAudio)) return true;
         }
         return false;
     }
@@ -2195,6 +2377,12 @@ public final class RecordingService extends Service {
 
     private boolean shouldKeepServiceAlive() {
         return serviceInitializing || RecordingContinuityPolicy.keepServiceAlive(
+                recorder.isRecording(), snapshot.paused, hasBackgroundWork(),
+                recordingRecoveryPending, failureAlarm.isActive());
+    }
+
+    private boolean shouldHoldWakeLock() {
+        return serviceInitializing || RecordingContinuityPolicy.holdWakeLock(
                 recorder.isRecording(), hasBackgroundWork(),
                 recordingRecoveryPending, failureAlarm.isActive());
     }
@@ -2238,7 +2426,7 @@ public final class RecordingService extends Service {
         recordingRecoveryDetail = "";
         recordingRecoveryAttempt = 0;
         if (resolved) failureAlarm.resolve();
-        if (!shouldKeepServiceAlive()) releaseCaptureWakeLock();
+        if (!shouldHoldWakeLock()) releaseCaptureWakeLock();
         updateNotification();
     }
 
@@ -2251,10 +2439,9 @@ public final class RecordingService extends Service {
                 ReliableUploader value = uploader;
                 if (value != null) value.onNetworkChanged();
                 signalUploader("network_available");
-                if (shouldKeepServiceAlive()) {
-                    ensureForeground();
-                    acquireCaptureWakeLock();
-                }
+                if (shouldKeepServiceAlive()) ensureForeground();
+                if (shouldHoldWakeLock()) acquireCaptureWakeLock();
+                else releaseCaptureWakeLock();
                 diag(PhoneDiagnostics.INFO, "network.available", null,
                         "A network became available; queued chunks were signaled immediately",
                         PhoneDiagnostics.fields());
@@ -2346,6 +2533,7 @@ public final class RecordingService extends Service {
     private static boolean isCriticalForegroundState(String state) {
         return "PREPARING".equals(state)
                 || "PAUSING".equals(state)
+                || "PAUSED".equals(state)
                 || "FINISHING".equals(state)
                 || "COMPRESSING".equals(state)
                 || "CLEANING".equals(state);

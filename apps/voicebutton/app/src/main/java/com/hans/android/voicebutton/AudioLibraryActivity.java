@@ -2,7 +2,6 @@ package com.hans.android.voicebutton;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -28,6 +27,10 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.core.content.ContextCompat;
+import androidx.appcompat.app.AlertDialog;
+
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.google.android.material.textfield.TextInputEditText;
 import androidx.documentfile.provider.DocumentFile;
 
 import com.hans.android.audio.reliable.ReliableSessionManifest;
@@ -93,11 +96,11 @@ public final class AudioLibraryActivity extends Activity {
         super.onCreate(state);
         preferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         recordingsMode = preferences.getBoolean(MODE, true);
-        String folderId = preferences.getString(APP_FOLDER_ID, "");
-        if (folderId != null && !folderId.isEmpty()) {
-            appFolderFilter = new ReliableSessionStore.Folder(folderId,
-                    preferences.getString(APP_FOLDER_NAME, "App folder"), 0L);
-        }
+        // A fresh Library launch always answers the root recordings question.
+        // Do not restore a previously visited leaf folder and make the hierarchy
+        // appear to have disappeared after an app/process restart.
+        appFolderFilter = null;
+        preferences.edit().remove(APP_FOLDER_ID).remove(APP_FOLDER_NAME).apply();
         restoreScrollFirst = preferences.getInt(SCROLL_FIRST, 0);
         restoreScrollTop = preferences.getInt(SCROLL_TOP, 0);
         buildScreen();
@@ -129,9 +132,9 @@ public final class AudioLibraryActivity extends Activity {
         root.setBackgroundColor(AndroidUi.BG);
 
         LinearLayout toolbar = row();
-        Button back = AndroidUi.toolbarButton(this, "Back");
+        Button back = VoiceButtonMaterial.toolbarButton(this, "Back");
         back.setOnClickListener(v -> navigateBack());
-        Button home = AndroidUi.toolbarButton(this, "Home");
+        Button home = VoiceButtonMaterial.toolbarButton(this, "Home");
         home.setOnClickListener(v -> home());
         toolbar.addView(back, half());
         toolbar.addView(home, half());
@@ -157,7 +160,7 @@ public final class AudioLibraryActivity extends Activity {
         root.addView(modes);
 
         LinearLayout navigation = row();
-        upButton = AndroidUi.toolbarButton(this, "Up");
+        upButton = VoiceButtonMaterial.toolbarButton(this, "Up");
         upButton.setOnClickListener(v -> up());
         pathText = AndroidUi.body(this, "App recording folders");
         AndroidUi.stableLine(this, pathText, 46);
@@ -188,7 +191,7 @@ public final class AudioLibraryActivity extends Activity {
         root.addView(list, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        Button more = AndroidUi.toolbarButton(this, "More");
+        Button more = VoiceButtonMaterial.toolbarButton(this, "More");
         more.setOnClickListener(v -> showLibraryMenu());
         root.addView(more, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 48)));
@@ -201,7 +204,7 @@ public final class AudioLibraryActivity extends Activity {
                         "Open any phone file", "About library"}
                 : new String[]{"Choose phone folder", "Open any phone file",
                         "App recordings", "About library"};
-        new AlertDialog.Builder(this).setTitle("More")
+        new MaterialAlertDialogBuilder(this).setTitle("More")
                 .setItems(actions, (dialog, which) -> {
                     if (recordingsMode) {
                         if (which == 0) manageAppFolders();
@@ -220,7 +223,7 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     private void showLibraryAbout() {
-        new AlertDialog.Builder(this).setTitle("Library")
+        new MaterialAlertDialogBuilder(this).setTitle("Library")
                 .setMessage("Tap an item to open it. Long-press an item for rename, move, or delete actions. Folder management and phone-file import stay in More so navigation remains clear.")
                 .setPositiveButton("Back", null).show();
     }
@@ -241,7 +244,15 @@ public final class AudioLibraryActivity extends Activity {
                     store = ReliableSessionStore.openForBrowsing(this);
                 }
                 ReliableSessionStore.Folder current = requested;
-                if (current != null) current = store.getFolder(current.id);
+                if (current != null) {
+                    try {
+                        current = store.getFolder(current.id);
+                    } catch (Exception staleFolder) {
+                        // A stale navigation target must never blank the Library.
+                        // Returning to root exposes the authoritative hierarchy.
+                        current = null;
+                    }
+                }
                 final ReliableSessionStore.Folder currentFolder = current;
                 appFolderFilter = currentFolder;
                 List<ReliableSessionManifest> manifests = store.list();
@@ -536,17 +547,18 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     private void manageRecording(LibraryItem item) {
-        String[] actions = {"Rename recording", "Move to app folder", "Open in player"};
-        new AlertDialog.Builder(this).setTitle(item.title).setItems(actions, (d, which) -> {
-            if (which == 0) renameRecording(item);
-            else if (which == 1) moveRecording(item);
-            else open(item, adapter.position(item));
+        String[] actions = {"Open in player", "Rename recording", "Move to app folder", "Delete local recording"};
+        new MaterialAlertDialogBuilder(this).setTitle(item.title).setItems(actions, (d, which) -> {
+            if (which == 0) open(item, adapter.position(item));
+            else if (which == 1) renameRecording(item);
+            else if (which == 2) moveRecording(item);
+            else confirmDeleteRecording(item);
         }).setNegativeButton("Back", null).show();
     }
 
     private void renameRecording(LibraryItem item) {
         EditText input = nameInput(item.title);
-        new AlertDialog.Builder(this).setTitle("Rename recording").setView(input)
+        new MaterialAlertDialogBuilder(this).setTitle("Rename recording").setView(input)
                 .setNegativeButton("Back", null).setPositiveButton("Rename", (d,w) -> worker.execute(() -> {
                     try { store.renameSession(item.recording.sessionId, input.getText().toString()); runOnUiThread(this::showRecordings); }
                     catch (Exception failure) { error(failure); }
@@ -561,7 +573,7 @@ public final class AudioLibraryActivity extends Activity {
                 for (int i = 0; i < names.length; i++) {
                     names[i] = folders.get(i).path;
                 }
-                runOnUiThread(() -> new AlertDialog.Builder(this).setTitle("Move recording").setItems(names, (d,w) -> worker.execute(() -> {
+                runOnUiThread(() -> new MaterialAlertDialogBuilder(this).setTitle("Move recording").setItems(names, (d,w) -> worker.execute(() -> {
                     try { store.moveSession(item.recording.sessionId, folders.get(w).id); runOnUiThread(this::showRecordings); }
                     catch (Exception failure) { error(failure); }
                 })).setNegativeButton("Back", null).show());
@@ -569,27 +581,43 @@ public final class AudioLibraryActivity extends Activity {
         });
     }
 
+    private void confirmDeleteRecording(LibraryItem item) {
+        if (item == null || item.recording == null) return;
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("Delete local recording?")
+                .setMessage("This removes the phone copy only. The completed Jetson recording and transcript remain on the server.")
+                .setNegativeButton("Back", null)
+                .setPositiveButton("Delete local copy", (dialog, which) -> worker.execute(() -> {
+                    try {
+                        store.deleteFinishedSession(item.recording.sessionId);
+                        runOnUiThread(this::showRecordings);
+                    } catch (Exception failure) {
+                        error(failure);
+                    }
+                })).show();
+    }
+
     private void manageDocument(LibraryItem item) {
         if (item.directory) {
-            new AlertDialog.Builder(this).setTitle(item.title).setItems(new String[]{"Open folder", "Rename folder"}, (d,w) -> {
+            new MaterialAlertDialogBuilder(this).setTitle(item.title).setItems(new String[]{"Open folder", "Rename folder"}, (d,w) -> {
                 if (w==0) open(item,adapter.position(item)); else renameDocument(item);
             }).setNegativeButton("Back",null).show();
             return;
         }
-        new AlertDialog.Builder(this).setTitle(item.title).setItems(new String[]{"Open in player","Rename","Move","Delete"},(d,w)->{
+        new MaterialAlertDialogBuilder(this).setTitle(item.title).setItems(new String[]{"Open in player","Rename","Move","Delete"},(d,w)->{
             if(w==0)open(item,adapter.position(item));else if(w==1)renameDocument(item);else if(w==2){pendingMove=item.document;Intent move=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);move.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);startActivityForResult(move,REQUEST_MOVE);}else confirmDelete(item);
         }).setNegativeButton("Back",null).show();
     }
 
     private void renameDocument(LibraryItem item) {
         EditText input=nameInput(item.title);
-        new AlertDialog.Builder(this).setTitle(item.directory?"Rename folder":"Rename file").setView(input).setNegativeButton("Back",null).setPositiveButton("Rename",(d,w)->worker.execute(()->{
+        new MaterialAlertDialogBuilder(this).setTitle(item.directory?"Rename folder":"Rename file").setView(input).setNegativeButton("Back",null).setPositiveButton("Rename",(d,w)->worker.execute(()->{
             try{FileOperations.rename(this,item.document.getUri(),input.getText().toString());runOnUiThread(this::refreshFiles);}catch(Exception failure){error(failure);}
         })).show();
     }
 
     private void confirmDelete(LibraryItem item) {
-        new AlertDialog.Builder(this).setTitle("Delete file?").setMessage(item.title+" will be removed from this phone provider.").setNegativeButton("Cancel",null).setPositiveButton("Delete",(d,w)->worker.execute(()->{
+        new MaterialAlertDialogBuilder(this).setTitle("Delete file?").setMessage(item.title+" will be removed from this phone provider.").setNegativeButton("Cancel",null).setPositiveButton("Delete",(d,w)->worker.execute(()->{
             try{if(!item.document.delete())throw new java.io.IOException("The provider rejected deletion");runOnUiThread(this::refreshFiles);}catch(Exception failure){error(failure);}
         })).show();
     }
@@ -601,7 +629,7 @@ public final class AudioLibraryActivity extends Activity {
                 ? new String[]{"Create root folder"}
                 : new String[]{"Create subfolder", "Rename this folder",
                         "Move this folder"};
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(current == null ? "Recordings folders"
                         : current.path)
                 .setItems(actions, (dialog, which) -> {
@@ -621,7 +649,7 @@ public final class AudioLibraryActivity extends Activity {
         EditText input = nameInput("");
         String location = parentFolderId == null || parentFolderId.isEmpty()
                 ? "Recordings" : appFolderFilter.path;
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Create folder in " + location)
                 .setView(input)
                 .setNegativeButton("Back", null)
@@ -644,7 +672,7 @@ public final class AudioLibraryActivity extends Activity {
 
     private void renameFolder(ReliableSessionStore.Folder folder) {
         EditText input = nameInput(folder.name);
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Rename folder")
                 .setView(input)
                 .setNegativeButton("Back", null)
@@ -680,7 +708,7 @@ public final class AudioLibraryActivity extends Activity {
                     destinations.add(candidate);
                     labels.add(candidate.path);
                 }
-                runOnUiThread(() -> new AlertDialog.Builder(this)
+                runOnUiThread(() -> new MaterialAlertDialogBuilder(this)
                         .setTitle("Move " + folder.path)
                         .setItems(labels.toArray(new String[0]),
                                 (dialog, which) -> worker.execute(() -> {
@@ -748,7 +776,7 @@ public final class AudioLibraryActivity extends Activity {
     private void navigateBack(){if(!recordingsMode&&directoryStack.size()>1)up();else finish();}
     private void home(){Intent intent=new Intent(this,MainActivity.class);intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP|Intent.FLAG_ACTIVITY_SINGLE_TOP);startActivity(intent);}
     private void updateModeButtons(){recordingsModeButton.setText(recordingsMode?"App recordings ✓":"App recordings");filesModeButton.setText(recordingsMode?"Phone files":"Phone files ✓");}
-    private EditText nameInput(String value){EditText input=new EditText(this);input.setSingleLine(true);input.setText(value);input.selectAll();return input;}
+    private EditText nameInput(String value){EditText input=new TextInputEditText(this);input.setSingleLine(true);input.setText(value);input.selectAll();return input;}
     private void error(Exception failure){runOnUiThread(()->Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show());}
 
     private void saveLibraryState() {

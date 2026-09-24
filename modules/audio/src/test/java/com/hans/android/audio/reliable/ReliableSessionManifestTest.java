@@ -158,4 +158,27 @@ public class ReliableSessionManifestTest {
         for (int i = 0; i < 64; i++) out.append(value);
         return out.toString();
     }
+
+    @Test public void canonicalSegmentFileRecoversStaleManifestName() throws Exception {
+        java.io.File dir = java.nio.file.Files.createTempDirectory("voicebutton-segment").toFile();
+        ReliableSessionManifest.Segment segment = new ReliableSessionManifest.Segment();
+        segment.seq = 7;
+        segment.mp3Name = "stale-name.mp3";
+        java.io.File canonical = new java.io.File(dir, "segment_000007.mp3");
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(canonical)) {
+            out.write(new byte[] {1, 2, 3, 4});
+        }
+        assertEquals(canonical.getCanonicalPath(),
+                ReliableSessionStore.readableSegmentFile(dir, segment).getCanonicalPath());
+    }
+
+    @Test public void missingServerChunkClearsOnlyUncommittedAcceptedState() {
+        assertTrue(ReliableSessionStore.remoteAcceptedMustBeCleared(false, true, false));
+        org.junit.Assert.assertFalse(
+                ReliableSessionStore.remoteAcceptedMustBeCleared(false, true, true));
+        org.junit.Assert.assertFalse(
+                ReliableSessionStore.remoteAcceptedMustBeCleared(true, true, false));
+        org.junit.Assert.assertFalse(
+                ReliableSessionStore.remoteAcceptedMustBeCleared(false, false, false));
+    }
 }

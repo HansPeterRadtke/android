@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.VoiceButton" parent="Theme.Material3.Light.NoActionBar">
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.Material3.MaterialAlertDialog</item>
+    </style>
+</resources>

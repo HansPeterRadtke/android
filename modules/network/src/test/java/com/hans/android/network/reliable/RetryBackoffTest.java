@@ -17,4 +17,11 @@ public class RetryBackoffTest {
         assertEquals(90_000L,
                 RetryBackoff.fullJitterDelayMs(1, 90_000L, 0d));
     }
+
+    @Test public void contractStartsAtQuarterSecondAndCapsAtFiveSeconds() {
+        assertEquals(250L, RetryBackoff.BASE_DELAY_MS);
+        assertEquals(5_000L, RetryBackoff.MAX_DELAY_MS);
+        assertTrue(RetryBackoff.fullJitterDelayMs(1, 0L, 0.999d) <= 250L);
+        assertTrue(RetryBackoff.fullJitterDelayMs(30, 0L, 0.999d) <= 5_000L);
+    }
 }

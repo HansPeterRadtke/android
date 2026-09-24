@@ -10,6 +10,7 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.FileNotFoundException;
 import java.io.InputStream;
+import java.io.IOException;
 import java.io.OutputStream;
 
 final class FileOperations {
@@ -103,5 +104,15 @@ final class FileOperations {
             }
         }
         return name;
+    }
+
+    static void delete(Context context, Uri source) throws IOException {
+        DocumentFile file = DocumentFile.fromSingleUri(context, source);
+        if (file == null || !file.exists()) {
+            throw new IOException("The selected file is no longer available");
+        }
+        if (!file.delete()) {
+            throw new IOException("The Android storage provider rejected deletion");
+        }
     }
 }

@@ -116,6 +116,7 @@ final class VlcAudioPlayer {
 
     void playPause() { if (playing) pause(); else play(); }
     void play() {
+        pendingShouldPlay = true;
         VoiceButtonLocalTrace.log(app, "player.vlc.play_request",
                 "engine_state", engineState,
                 "playing", playing,
@@ -126,7 +127,10 @@ final class VlcAudioPlayer {
         notifyState("starting playback");
         post(this::playOnEngine);
     }
-    void pause() { post(() -> { if (player != null) player.pause(); }); }
+    void pause() {
+        pendingShouldPlay = false;
+        post(() -> { if (player != null) player.pause(); });
+    }
     void stop() { post(() -> { if (player != null) player.stop(); abandonAudioFocus(); }); }
     boolean isPlaying() { return playing; }
     boolean isSeekable() { return seekable; }
@@ -195,7 +199,7 @@ final class VlcAudioPlayer {
             List<String> options = new ArrayList<>();
             options.add("--audio-time-stretch");
             options.add("--no-video-title-show");
-            options.add("--file-caching=1000");
+            options.add("--file-caching=150");
             options.add("--network-caching=1500");
             options.add("--clock-jitter=0");
             libVLC = new LibVLC(app, options);

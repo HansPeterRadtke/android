@@ -9,16 +9,22 @@ final class RecordingContinuityPolicy {
         return Math.min(30000L, delay);
     }
 
-    static boolean keepServiceAlive(boolean recording, boolean backgroundWork,
+    static boolean keepServiceAlive(boolean recording, boolean paused,
+                                    boolean backgroundWork,
                                     boolean recoveryPending, boolean alarmActive) {
+        return paused || holdWakeLock(recording, backgroundWork,
+                recoveryPending, alarmActive);
+    }
+
+    static boolean holdWakeLock(boolean recording, boolean backgroundWork,
+                                boolean recoveryPending, boolean alarmActive) {
         return recording || backgroundWork || recoveryPending || alarmActive;
     }
     static boolean sessionNeedsSynchronization(boolean recordingFinished,
                                                boolean conversionFinished,
                                                boolean remoteCommitted,
-                                               boolean pendingAudio,
-                                               boolean pendingTranscript) {
-        if (pendingAudio || pendingTranscript) return true;
+                                               boolean pendingAudio) {
+        if (pendingAudio) return true;
         return recordingFinished && (!conversionFinished || !remoteCommitted);
     }
 

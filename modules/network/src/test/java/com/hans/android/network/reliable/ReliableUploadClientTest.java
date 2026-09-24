@@ -21,9 +21,9 @@ public class ReliableUploadClientTest {
                 ReliableUploadClient.nextPartLength(49152L, 49152L, 65536));
     }
 
-    @Test public void responseReadHasNoFixedDeadline() {
-        assertEquals(0, ReliableUploadClient.CONNECT_TIMEOUT_MS);
-        assertEquals(0, ReliableUploadClient.READ_TIMEOUT_MS);
+    @Test public void uploadRequestsHaveBoundedMobileDeadlines() {
+        assertEquals(2_500, ReliableUploadClient.CONNECT_TIMEOUT_MS);
+        assertEquals(6_000, ReliableUploadClient.READ_TIMEOUT_MS);
     }
 
     @Test public void parsesRetryAfterSeconds() {
@@ -74,5 +74,44 @@ public class ReliableUploadClientTest {
                 ReliableUploadClient.parseStatus(response);
         assertFalse(status.transcripts.containsKey(0));
         assertEquals("RETRY", status.finalTranscriptState);
+    }
+
+    @Test public void parsesAggregateTranscriptionProgress() throws Exception {
+        JSONObject response = new JSONObject()
+                .put("total_committed_count", 84)
+                .put("complete_count", 83)
+                .put("not_transcribed_count", 1)
+                .put("overall_percent", 98)
+                .put("current", new JSONObject()
+                        .put("session_id", "session-1")
+                        .put("display_name", "Recording example")
+                        .put("folder_name", "agents")
+                        .put("state", "RUNNING")
+                        .put("engine", "openai-whisper-large-v3")
+                        .put("phase", "transcribing")
+                        .put("percent", 42)
+                        .put("duration_ms", 123000L)
+                        .put("updated_at_ms", 456L));
+        ReliableUploadClient.TranscriptionStatus status =
+                ReliableUploadClient.parseTranscriptionStatus(response);
+        assertEquals(84, status.totalCommittedCount);
+        assertEquals(83, status.completeCount);
+        assertEquals(1, status.notTranscribedCount);
+        assertEquals(98, status.overallPercent);
+        assertEquals("session-1", status.current.sessionId);
+        assertEquals("Recording example", status.current.displayName);
+        assertEquals(42, status.current.percent);
+        assertEquals("transcribing", status.current.phase);
+    }
+
+    @Test public void parsesIdleTranscriptionStatusWithoutCurrentFile() throws Exception {
+        ReliableUploadClient.TranscriptionStatus status =
+                ReliableUploadClient.parseTranscriptionStatus(new JSONObject()
+                        .put("total_committed_count", 10)
+                        .put("complete_count", 10)
+                        .put("not_transcribed_count", 0)
+                        .put("overall_percent", 100));
+        assertEquals(100, status.overallPercent);
+        assertTrue(status.current == null);
     }
 }

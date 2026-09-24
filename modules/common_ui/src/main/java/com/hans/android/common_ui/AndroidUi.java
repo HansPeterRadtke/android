@@ -85,7 +85,7 @@ public final class AndroidUi {
         button.setTextColor(textStates(INK, Color.BLACK,
                 Color.rgb(145, 150, 158)));
         button.setTextSize(13);
-        button.setMinHeight(dp(c, 44));
+        button.setMinHeight(dp(c, 48));
         button.setBackground(buttonStates(c, Color.TRANSPARENT,
                 Color.rgb(232, 235, 240), Color.rgb(238, 240, 243),
                 Color.rgb(218, 224, 232), dp(c, 12)));
@@ -114,6 +114,19 @@ public final class AndroidUi {
         view.setMinHeight(stableHeight);
         view.setMaxHeight(stableHeight);
         view.setGravity(android.view.Gravity.CENTER_VERTICAL);
+    }
+
+    public static void readableLine(Context c, TextView view, int minimumHeightDp,
+                                    int maxLines) {
+        view.setSingleLine(false);
+        view.setMaxLines(Math.max(1, maxLines));
+        view.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        view.setMinHeight(dp(c, minimumHeightDp));
+        view.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        if (Build.VERSION.SDK_INT >= 23) {
+            view.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_HIGH_QUALITY);
+            view.setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NORMAL);
+        }
     }
 
     public static Button modeButton(Context c, String text, boolean selected) {

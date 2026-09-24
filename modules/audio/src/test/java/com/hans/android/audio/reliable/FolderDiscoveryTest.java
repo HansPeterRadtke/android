@@ -35,4 +35,17 @@ public class FolderDiscoveryTest {
                 .findFirst().orElseThrow(AssertionError::new);
         assertEquals("agents", agents.name);
     }
+
+    @Test public void physicalFolderWithoutSessionsStillHasReadableName()
+            throws Exception {
+        File root = Files.createTempDirectory("folders-empty").toFile();
+        File trading = new File(root, "trading-5d124daa");
+        assertTrue(trading.mkdirs());
+        List<ReliableSessionStore.Folder> folders =
+                ReliableSessionStore.discoverFoldersFromDisk(root);
+        ReliableSessionStore.Folder value = folders.stream()
+                .filter(folder -> "trading-5d124daa".equals(folder.id))
+                .findFirst().orElseThrow(AssertionError::new);
+        assertEquals("trading", value.name);
+    }
 }

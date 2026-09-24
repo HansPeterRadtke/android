@@ -2,6 +2,8 @@ package com.hans.android.audio.reliable;
 
 import android.content.Context;
 import android.os.StatFs;
+import android.system.ErrnoException;
+import android.system.Os;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -26,6 +28,7 @@ import java.util.Locale;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.function.BooleanSupplier;
 
 public final class ReliableSessionStore {
     public static final class RemoteChunkState {
@@ -108,6 +111,8 @@ public final class ReliableSessionStore {
     private static final Pattern OPEN_MP3_PATTERN = Pattern.compile("^segment_(\\d{6})\\.open\\.mp3$");
     private static final Pattern PCM_PATTERN = Pattern.compile("^segment_(\\d{6})_(\\d{5})(?:\\.open)?\\.pcm$");
     private static final long MIN_FREE_BYTES = 256L * 1024L * 1024L;
+    private static final Object FOLDER_INDEX_LOCK = new Object();
+    private static final Object SESSION_METADATA_LOCK = new Object();
 
     private final File root;
     private final File foldersRoot;
@@ -124,8 +129,10 @@ public final class ReliableSessionStore {
         folderIndex = new File(root, "folders.json");
         ensureDirectory(root);
         ensureDirectory(foldersRoot);
-        ensureDefaultFolder();
-        repairFolderIndexFromDisk();
+        synchronized (FOLDER_INDEX_LOCK) {
+            ensureDefaultFolder();
+            repairFolderIndexFromDisk();
+        }
         conversationId = loadOrCreateConversationId();
         if (recover) {
             migrateLegacySessions();
@@ -150,40 +157,51 @@ public final class ReliableSessionStore {
     }
 
     public synchronized List<Folder> listFolders() {
-        List<Folder> result = new ArrayList<>();
-        try {
-            JSONObject index = readFolderIndex();
-            JSONArray array = index.optJSONArray("folders");
-            Map<String, Folder> raw = new LinkedHashMap<>();
-            if (array != null) for (int i = 0; i < array.length(); i++) {
-                JSONObject item = array.optJSONObject(i);
-                if (item == null) continue;
-                String id = item.optString("folder_id", "default");
-                String name = item.optString("name", "Default");
-                String parentId = item.optString("parent_folder_id", "");
-                String remoteName = item.has("remote_name")
-                        ? item.optString("remote_name", "") : name;
-                String remoteParentId = item.has("remote_parent_folder_id")
-                        ? item.optString("remote_parent_folder_id", "")
-                        : parentId;
-                raw.put(id, new Folder(id, name, parentId,
-                        item.optLong("created_at_ms", 0L), remoteName,
-                        remoteParentId, name));
+        synchronized (FOLDER_INDEX_LOCK) {
+            List<Folder> result = new ArrayList<>();
+            try {
+                JSONObject index = readFolderIndex();
+                JSONArray array = index.optJSONArray("folders");
+                Map<String, Folder> raw = new LinkedHashMap<>();
+                if (array != null) for (int i = 0; i < array.length(); i++) {
+                    JSONObject item = array.optJSONObject(i);
+                    if (item == null) continue;
+                    String id = item.optString("folder_id", "default");
+                    String name = item.optString("name", "Default");
+                    String parentId = item.optString("parent_folder_id", "");
+                    String remoteName = item.has("remote_name")
+                            ? item.optString("remote_name", "") : name;
+                    String remoteParentId = item.has("remote_parent_folder_id")
+                            ? item.optString("remote_parent_folder_id", "")
+                            : parentId;
+                    raw.put(id, new Folder(id, name, parentId,
+                            item.optLong("created_at_ms", 0L), remoteName,
+                            remoteParentId, name));
+                }
+                for (Folder value : raw.values()) {
+                    result.add(new Folder(value.id, value.name, value.parentId,
+                            value.createdAtMs, value.remoteName,
+                            value.remoteParentId,
+                            buildFolderPath(value.id, raw)));
+                }
+            } catch (Exception failure) {
+                // Never turn a transient/corrupt index read into a fake
+                // "Default only" library. The physical folder layout and
+                // surviving session manifests are the local loss-protection
+                // fallback until Jetson reconciliation restores hierarchy.
+                result.addAll(discoverFoldersFromDisk(foldersRoot));
             }
-            for (Folder value : raw.values()) {
-                result.add(new Folder(value.id, value.name, value.parentId,
-                        value.createdAtMs, value.remoteName,
-                        value.remoteParentId,
-                        buildFolderPath(value.id, raw)));
+            if (result.isEmpty()) {
+                result.addAll(discoverFoldersFromDisk(foldersRoot));
             }
-        } catch (Exception ignored) {}
-        if (result.isEmpty()) {
-            result.add(new Folder("default", "Default", "", 0L,
-                    "Default", "", "Default"));
+            if (result.isEmpty()) {
+                result.add(new Folder("default", "Default", "", 0L,
+                        "Default", "", "Default"));
+            }
+            result.sort(Comparator.comparing(folder ->
+                    folder.path.toLowerCase(Locale.US)));
+            return result;
         }
-        result.sort(Comparator.comparing(folder ->
-                folder.path.toLowerCase(Locale.US)));
-        return result;
     }
 
     private static String buildFolderPath(String folderId,
@@ -224,6 +242,7 @@ public final class ReliableSessionStore {
     public synchronized Folder createFolder(String requestedName,
                                              String parentFolderId)
             throws IOException {
+        synchronized (FOLDER_INDEX_LOCK) {
         String name = requestedName == null ? ""
                 : requestedName.trim().replaceAll("\s+", " ");
         if (name.isEmpty() || name.length() > 96) {
@@ -266,6 +285,7 @@ public final class ReliableSessionStore {
         fsyncDirectory(foldersRoot);
         String path = parent == null ? name : parent.path + "/" + name;
         return new Folder(id, name, parentId, now, "", "", path);
+        }
     }
 
     public synchronized Folder getFolder(String folderId) throws IOException {
@@ -297,6 +317,7 @@ public final class ReliableSessionStore {
                                               String remoteName,
                                               String remoteParentFolderId)
             throws IOException {
+        synchronized (FOLDER_INDEX_LOCK) {
         validateId(folderId);
         JSONObject index = readFolderIndex();
         JSONArray array = index.optJSONArray("folders");
@@ -324,6 +345,7 @@ public final class ReliableSessionStore {
                     failure);
         }
         durableJson(folderIndex, index);
+        }
     }
 
     public synchronized ReliableSessionManifest createSession(String selectedInput, int selectedDeviceId) throws IOException {
@@ -356,13 +378,10 @@ public final class ReliableSessionStore {
     }
 
     public synchronized ReliableSessionManifest load(String sessionId) throws IOException {
-        validateId(sessionId);
-        File file = manifestFile(sessionId);
-        if (!file.isFile()) throw new IOException("Missing session metadata");
-        try {
-            return ReliableSessionManifest.fromJson(new JSONObject(readText(file)));
-        } catch (Exception failure) {
-            throw new IOException("Could not parse session metadata", failure);
+        synchronized (SESSION_METADATA_LOCK) {
+            validateId(sessionId);
+            File file = manifestFile(sessionId);
+            return readManifestRecoveringBackup(file);
         }
     }
 
@@ -376,8 +395,9 @@ public final class ReliableSessionStore {
             if (dirs == null) continue;
             for (File dir : dirs) {
                 File metadata = new File(dir, "manifest.json");
-                if (!metadata.isFile()) continue;
-                try { result.add(ReliableSessionManifest.fromJson(new JSONObject(readText(metadata)))); }
+                File backup = new File(metadata.getAbsolutePath() + ".bak");
+                if (!metadata.isFile() && !backup.isFile()) continue;
+                try { result.add(readManifestRecoveringBackup(metadata)); }
                 catch (Exception ignored) {}
             }
         }
@@ -399,6 +419,20 @@ public final class ReliableSessionStore {
             if (!manifest.recordingFinished && (latest == null || manifest.createdAt > latest.createdAt)) latest = manifest;
         }
         return latest == null ? null : latest.copy();
+    }
+
+    public synchronized void deleteFinishedSession(String sessionId) throws IOException {
+        ReliableSessionManifest manifest = load(sessionId);
+        if (!manifest.recordingFinished) {
+            throw new IOException("Pause or finish this recording before deleting it");
+        }
+        if (!manifest.remoteCommitted) {
+            throw new IOException("Wait until this recording is complete on Jetson before deleting the phone copy");
+        }
+        File directory = sessionDir(sessionId);
+        File parent = directory.getParentFile();
+        deleteRecursively(directory);
+        fsyncDirectory(parent);
     }
 
     public synchronized boolean discardIfEmpty(String sessionId) throws IOException {
@@ -770,6 +804,24 @@ public final class ReliableSessionStore {
         ReliableSessionManifest manifest = load(sessionId);
         boolean changed = false;
         boolean transcriptChanged = false;
+        if (!committed && remoteChunks != null) {
+            java.util.HashSet<Integer> serverSequences = new java.util.HashSet<>();
+            for (RemoteChunkState remote : remoteChunks) serverSequences.add(remote.seq);
+            for (ReliableSessionManifest.Segment segment : manifest.segments) {
+                if (remoteAcceptedMustBeCleared(false, segment.remoteAccepted,
+                        serverSequences.contains(segment.seq))) {
+                    segment.remoteAccepted = false;
+                    segment.remotePartialBytes = 0L;
+                    segment.remoteServerId = "";
+                    segment.remoteManifestRevision = 0L;
+                    segment.remoteReceivedAtMs = 0L;
+                    segment.remoteDurableAtMs = 0L;
+                    segment.lastSendError = "";
+                    manifest.remoteCommitted = false;
+                    changed = true;
+                }
+            }
+        }
         if (remoteChunks != null) for (RemoteChunkState remote : remoteChunks) {
             ReliableSessionManifest.Segment segment = manifest.findSegment(remote.seq);
             if (segment == null) continue;
@@ -906,8 +958,7 @@ public final class ReliableSessionStore {
         ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
         if (segment == null) return false;
         File dir = sessionDir(sessionId);
-        File mp3 = segment.mp3Name == null || segment.mp3Name.isEmpty()
-                ? null : new File(dir, segment.mp3Name);
+        File mp3 = readableSegmentFile(dir, segment);
         if (mp3 == null || !mp3.isFile() || mp3.length() <= 0L) {
             File finalMp3 = finalMp3File(sessionId);
             if (manifest.segments.size() == 1
@@ -951,6 +1002,24 @@ public final class ReliableSessionStore {
         return true;
     }
 
+
+    static File readableSegmentFile(File dir, ReliableSessionManifest.Segment segment) {
+        if (dir == null || segment == null) return null;
+        if (segment.mp3Name != null && !segment.mp3Name.isEmpty()) {
+            File recorded = new File(dir, segment.mp3Name);
+            if (recorded.isFile() && recorded.length() > 0L) return recorded;
+        }
+        File canonical = new File(dir, String.format(Locale.US,
+                "segment_%06d.mp3", segment.seq));
+        return canonical.isFile() && canonical.length() > 0L ? canonical : null;
+    }
+
+    static boolean remoteAcceptedMustBeCleared(boolean committed,
+                                                boolean localAccepted,
+                                                boolean serverHasChunk) {
+        return !committed && localAccepted && !serverHasChunk;
+    }
+
     public synchronized File finalMp3File(String sessionId) throws IOException {
         ReliableSessionManifest manifest = load(sessionId);
         String name = RecordingFileNames.isLegacyGenericName(manifest.finalMp3Name)
@@ -961,6 +1030,7 @@ public final class ReliableSessionStore {
     }
 
     public synchronized Folder renameFolder(String folderId, String requestedName) throws IOException {
+        synchronized (FOLDER_INDEX_LOCK) {
         Folder existing = getFolder(folderId);
         String name = cleanDisplayName(requestedName, "Folder name");
         JSONObject index = readFolderIndex();
@@ -990,11 +1060,13 @@ public final class ReliableSessionStore {
             save(manifest);
         }
         return getFolder(existing.id);
+        }
     }
 
     public synchronized Folder moveFolder(String folderId,
                                           String parentFolderId)
             throws IOException {
+        synchronized (FOLDER_INDEX_LOCK) {
         Folder existing = getFolder(folderId);
         String parentId = parentFolderId == null ? "" : parentFolderId;
         if (folderId.equals(parentId)) throw new IOException(
@@ -1031,6 +1103,7 @@ public final class ReliableSessionStore {
         }
         durableJson(folderIndex, index);
         return getFolder(existing.id);
+        }
     }
 
     public synchronized ReliableSessionManifest renameSession(String sessionId,
@@ -1163,14 +1236,24 @@ public final class ReliableSessionStore {
     }
 
     public synchronized void recoverAll() throws IOException {
+        recoverAll(null);
+    }
+
+    public synchronized boolean recoverAll(BooleanSupplier shouldAbort)
+            throws IOException {
         File[] folders = foldersRoot.listFiles(File::isDirectory);
-        if (folders == null) return;
+        if (folders == null) return true;
         for (File folder : folders) {
+            if (shouldAbort != null && shouldAbort.getAsBoolean()) return false;
             File sessions = new File(folder, "sessions");
             File[] dirs = sessions.listFiles(File::isDirectory);
             if (dirs == null) continue;
-            for (File dir : dirs) recoverDirectory(dir);
+            for (File dir : dirs) {
+                if (shouldAbort != null && shouldAbort.getAsBoolean()) return false;
+                recoverDirectory(dir);
+            }
         }
+        return true;
     }
 
     private void recoverDirectory(File dir) throws IOException {
@@ -1344,25 +1427,91 @@ public final class ReliableSessionStore {
     }
 
     private void save(ReliableSessionManifest manifest) throws IOException {
-        manifest.updatedAt = System.currentTimeMillis();
-        File file = new File(sessionDir(manifest.folderId, manifest.sessionId), "manifest.json");
-        File temp = new File(file.getAbsolutePath() + ".tmp");
+        synchronized (SESSION_METADATA_LOCK) {
+            manifest.updatedAt = System.currentTimeMillis();
+            File directory = sessionDir(manifest.folderId, manifest.sessionId);
+            File file = new File(directory, "manifest.json");
+            File backup = new File(file.getAbsolutePath() + ".bak");
+            File temp = new File(file.getAbsolutePath() + ".tmp-" + UUID.randomUUID());
+            byte[] bytes;
+            try { bytes = manifest.toJson().toString(2).getBytes(StandardCharsets.UTF_8); }
+            catch (Exception failure) { throw new IOException("Could not serialize session metadata", failure); }
+            try {
+                try (FileOutputStream out = new FileOutputStream(temp)) {
+                    out.write(bytes); out.flush(); out.getFD().sync();
+                }
+                if (file.isFile()) copyDurably(file, backup);
+                try {
+                    Os.rename(temp.getAbsolutePath(), file.getAbsolutePath());
+                } catch (ErrnoException failure) {
+                    throw new IOException("Could not atomically publish session metadata", failure);
+                }
+                fsyncDirectory(directory);
+                if (backup.exists()) backup.delete();
+            } finally {
+                if (temp.exists()) temp.delete();
+            }
+        }
+    }
+
+    private static void copyDurably(File source, File target) throws IOException {
+        byte[] buffer = new byte[64 * 1024];
+        try (FileInputStream in = new FileInputStream(source);
+             FileOutputStream out = new FileOutputStream(target, false)) {
+            int read;
+            while ((read = in.read(buffer)) >= 0) {
+                if (read > 0) out.write(buffer, 0, read);
+            }
+            out.flush();
+            out.getFD().sync();
+        }
+    }
+
+    static ReliableSessionManifest readManifestRecoveringBackup(File file)
+            throws IOException {
+        Exception primaryFailure = null;
+        if (file != null && file.isFile()) {
+            try {
+                return ReliableSessionManifest.fromJson(
+                        new JSONObject(readText(file)));
+            } catch (Exception failure) {
+                primaryFailure = failure;
+            }
+        }
+        File backup = file == null ? null
+                : new File(file.getAbsolutePath() + ".bak");
+        if (backup != null && backup.isFile()) {
+            try {
+                return ReliableSessionManifest.fromJson(
+                        new JSONObject(readText(backup)));
+            } catch (Exception backupFailure) {
+                IOException out = new IOException(
+                        "Could not parse session metadata backup", backupFailure);
+                if (primaryFailure != null) out.addSuppressed(primaryFailure);
+                throw out;
+            }
+        }
+        if (primaryFailure != null) {
+            throw new IOException("Could not parse session metadata", primaryFailure);
+        }
+        throw new IOException("Missing session metadata");
+    }
+
+    private static void restoreManifestBackup(File file) throws IOException {
         File backup = new File(file.getAbsolutePath() + ".bak");
-        byte[] bytes;
-        try { bytes = manifest.toJson().toString(2).getBytes(StandardCharsets.UTF_8); }
-        catch (Exception failure) { throw new IOException("Could not serialize session metadata", failure); }
-        try (FileOutputStream out = new FileOutputStream(temp)) {
-            out.write(bytes); out.flush(); out.getFD().sync();
+        if (!backup.isFile()) return;
+        File temp = new File(file.getAbsolutePath() + ".restore-" + UUID.randomUUID());
+        try {
+            copyDurably(backup, temp);
+            try {
+                Os.rename(temp.getAbsolutePath(), file.getAbsolutePath());
+            } catch (ErrnoException failure) {
+                throw new IOException("Could not restore session metadata backup", failure);
+            }
+            fsyncDirectory(file.getParentFile());
+        } finally {
+            if (temp.exists()) temp.delete();
         }
-        if (backup.exists() && !backup.delete()) throw new IOException("Could not replace metadata backup");
-        boolean had = file.exists();
-        if (had && !file.renameTo(backup)) throw new IOException("Could not preserve metadata backup");
-        if (!temp.renameTo(file)) {
-            if (had) backup.renameTo(file);
-            throw new IOException("Could not publish session metadata");
-        }
-        backup.delete();
-        fsyncDirectory(file.getParentFile());
     }
 
     private File sessionDir(String folderId, String sessionId) throws IOException {
@@ -1379,7 +1528,10 @@ public final class ReliableSessionStore {
         File[] folders = foldersRoot.listFiles(File::isDirectory);
         if (folders != null) for (File folder : folders) {
             File candidate = new File(new File(folder, "sessions"), sessionId);
-            if (new File(candidate, "manifest.json").isFile()) return candidate;
+            File manifest = new File(candidate, "manifest.json");
+            if (manifest.isFile() || new File(manifest.getAbsolutePath() + ".bak").isFile()) {
+                return candidate;
+            }
         }
         return null;
     }
@@ -1396,6 +1548,15 @@ public final class ReliableSessionStore {
 
     private void ensureDefaultFolder() throws IOException {
         if (!folderIndex.isFile()) {
+            File backup = new File(folderIndex.getAbsolutePath() + ".bak");
+            if (backup.isFile()) {
+                try {
+                    JSONObject recovered = new JSONObject(readText(backup));
+                    publishJsonWithoutReplacingBackup(folderIndex, recovered);
+                    ensureDirectory(new File(new File(foldersRoot, "default"), "sessions"));
+                    return;
+                } catch (Exception ignored) {}
+            }
             JSONObject index = new JSONObject();
             JSONArray folders = new JSONArray();
             JSONObject value = new JSONObject();
@@ -1483,8 +1644,7 @@ public final class ReliableSessionStore {
         for (File physicalFolder : physicalFolders) {
             String physicalId = physicalFolder.getName();
             if (!SAFE_ID.matcher(physicalId).matches()) continue;
-            String physicalName = "default".equals(physicalId)
-                    ? "Default" : physicalId;
+            String physicalName = fallbackFolderName(physicalId);
             long physicalCreated = physicalFolder.lastModified();
             discovered.putIfAbsent(physicalId,
                     new Folder(physicalId, physicalName, physicalCreated));
@@ -1521,9 +1681,133 @@ public final class ReliableSessionStore {
         return new ArrayList<>(discovered.values());
     }
 
+    private static String fallbackFolderName(String folderId) {
+        if ("default".equals(folderId)) return "Default";
+        if (folderId == null || folderId.isEmpty()) return "Folder";
+        if (folderId.matches("^.+-[0-9a-fA-F]{8}$")) {
+            return folderId.substring(0, folderId.length() - 9);
+        }
+        return folderId;
+    }
+
     private JSONObject readFolderIndex() throws IOException {
-        try { return new JSONObject(readText(folderIndex)); }
-        catch (Exception failure) { throw new IOException("Could not parse folder metadata", failure); }
+        synchronized (FOLDER_INDEX_LOCK) {
+            try { return new JSONObject(readText(folderIndex)); }
+            catch (Exception primaryFailure) {
+                File backup = new File(folderIndex.getAbsolutePath() + ".bak");
+                if (backup.isFile()) {
+                    try {
+                        JSONObject recovered = new JSONObject(readText(backup));
+                        if (folderIndex.exists() && !folderIndex.delete()) {
+                            throw new IOException("Could not discard corrupt folder metadata");
+                        }
+                        publishJsonWithoutReplacingBackup(folderIndex, recovered);
+                        return recovered;
+                    } catch (Exception ignored) {}
+                }
+                JSONObject rebuilt = new JSONObject();
+                JSONArray folders = new JSONArray();
+                long now = System.currentTimeMillis();
+                try {
+                    for (Folder discovered : discoverFoldersFromDisk(foldersRoot)) {
+                        JSONObject value = new JSONObject();
+                        value.put("folder_id", discovered.id);
+                        value.put("name", discovered.name);
+                        value.put("parent_folder_id", "");
+                        value.put("remote_name", discovered.name);
+                        value.put("remote_parent_folder_id", "");
+                        value.put("created_at_ms", discovered.createdAtMs > 0L ? discovered.createdAtMs : now);
+                        value.put("updated_at_ms", now);
+                        folders.put(value);
+                    }
+                    if (folders.length() == 0) {
+                        JSONObject value = new JSONObject();
+                        value.put("folder_id", "default");
+                        value.put("name", "Default");
+                        value.put("parent_folder_id", "");
+                        value.put("remote_name", "Default");
+                        value.put("remote_parent_folder_id", "");
+                        value.put("created_at_ms", now);
+                        value.put("updated_at_ms", now);
+                        folders.put(value);
+                    }
+                    rebuilt.put("schema_version", 2);
+                    rebuilt.put("revision", 1);
+                    rebuilt.put("folders", folders);
+                    durableJson(folderIndex, rebuilt);
+                    return rebuilt;
+                } catch (Exception rebuildFailure) {
+                    IOException out = new IOException("Could not recover folder metadata", rebuildFailure);
+                    out.addSuppressed(primaryFailure);
+                    throw out;
+                }
+            }
+        }
+    }
+
+    public boolean reconcileRemoteFolders(List<Folder> remoteFolders) throws IOException {
+        if (remoteFolders == null || remoteFolders.isEmpty()) return false;
+        synchronized (FOLDER_INDEX_LOCK) {
+            JSONObject index = readFolderIndex();
+            JSONArray array = index.optJSONArray("folders");
+            if (array == null) array = new JSONArray();
+            Map<String, JSONObject> local = new LinkedHashMap<>();
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject item = array.optJSONObject(i);
+                if (item != null) local.put(item.optString("folder_id", ""), item);
+            }
+            boolean changed = false;
+            long now = System.currentTimeMillis();
+            try {
+                for (Folder remote : remoteFolders) {
+                    if (remote == null) continue;
+                    validateId(remote.id);
+                    if (!remote.parentId.isEmpty()) validateId(remote.parentId);
+                    JSONObject item = local.get(remote.id);
+                    if (item == null) {
+                        item = new JSONObject();
+                        item.put("folder_id", remote.id);
+                        item.put("name", remote.name);
+                        item.put("parent_folder_id", remote.parentId);
+                        item.put("remote_name", remote.name);
+                        item.put("remote_parent_folder_id", remote.parentId);
+                        item.put("created_at_ms", remote.createdAtMs > 0L ? remote.createdAtMs : now);
+                        item.put("updated_at_ms", now);
+                        array.put(item);
+                        local.put(remote.id, item);
+                        changed = true;
+                    } else {
+                        String localName = item.optString("name", remote.name);
+                        String localParent = item.optString("parent_folder_id", "");
+                        String previousRemoteName = item.has("remote_name") ? item.optString("remote_name", "") : localName;
+                        String previousRemoteParent = item.has("remote_parent_folder_id") ? item.optString("remote_parent_folder_id", "") : localParent;
+                        boolean localPending = !localName.equals(previousRemoteName) || !localParent.equals(previousRemoteParent);
+                        if (!localPending && (!localName.equals(remote.name) || !localParent.equals(remote.parentId))) {
+                            item.put("name", remote.name);
+                            item.put("parent_folder_id", remote.parentId);
+                            changed = true;
+                        }
+                        if (!remote.name.equals(previousRemoteName) || !remote.parentId.equals(previousRemoteParent)) {
+                            item.put("remote_name", remote.name);
+                            item.put("remote_parent_folder_id", remote.parentId);
+                            changed = true;
+                        }
+                        if (changed) item.put("updated_at_ms", now);
+                    }
+                    ensureDirectory(new File(new File(foldersRoot, remote.id), "sessions"));
+                }
+                if (changed) {
+                    index.put("folders", array);
+                    index.put("schema_version", 2);
+                    index.put("revision", index.optLong("revision", 0L) + 1L);
+                    durableJson(folderIndex, index);
+                    fsyncDirectory(foldersRoot);
+                }
+                return changed;
+            } catch (org.json.JSONException failure) {
+                throw new IOException("Could not reconcile server folder metadata", failure);
+            }
+        }
     }
 
     private void migrateLegacySessions() throws IOException {
@@ -1543,14 +1827,57 @@ public final class ReliableSessionStore {
     }
 
     private static void durableJson(File target, JSONObject value) throws IOException {
-        File temp = new File(target.getAbsolutePath() + ".tmp");
+        synchronized (FOLDER_INDEX_LOCK) {
+            File temp = writeJsonTemp(target, value);
+            File backup = new File(target.getAbsolutePath() + ".bak");
+            try {
+                if (target.isFile()) {
+                    if (backup.exists() && !backup.delete()) {
+                        throw new IOException("Could not replace folder metadata backup");
+                    }
+                    if (!target.renameTo(backup)) {
+                        throw new IOException("Could not preserve previous folder metadata");
+                    }
+                    fsyncDirectory(target.getParentFile());
+                }
+                if (!temp.renameTo(target)) {
+                    if (!target.exists() && backup.isFile()) backup.renameTo(target);
+                    throw new IOException("Could not publish folder metadata");
+                }
+                fsyncDirectory(target.getParentFile());
+            } finally {
+                if (temp.exists()) temp.delete();
+            }
+        }
+    }
+
+    private static void publishJsonWithoutReplacingBackup(File target, JSONObject value)
+            throws IOException {
+        File temp = writeJsonTemp(target, value);
+        try {
+            if (target.exists() && !target.delete()) {
+                throw new IOException("Could not replace recovered folder metadata");
+            }
+            if (!temp.renameTo(target)) {
+                throw new IOException("Could not publish recovered folder metadata");
+            }
+            fsyncDirectory(target.getParentFile());
+        } finally {
+            if (temp.exists()) temp.delete();
+        }
+    }
+
+    private static File writeJsonTemp(File target, JSONObject value) throws IOException {
+        File temp = new File(target.getAbsolutePath() + ".tmp-" + UUID.randomUUID());
         try (FileOutputStream out = new FileOutputStream(temp)) {
             out.write(value.toString(2).getBytes(StandardCharsets.UTF_8));
-            out.flush(); out.getFD().sync();
-        } catch (Exception failure) { throw new IOException("Could not write durable JSON", failure); }
-        if (target.exists() && !target.delete()) throw new IOException("Could not replace JSON file");
-        if (!temp.renameTo(target)) throw new IOException("Could not publish JSON file");
-        fsyncDirectory(target.getParentFile());
+            out.flush();
+            out.getFD().sync();
+            return temp;
+        } catch (Exception failure) {
+            if (temp.exists()) temp.delete();
+            throw new IOException("Could not write durable JSON", failure);
+        }
     }
 
     private synchronized void rebuildTranscript(String sessionId) throws IOException {

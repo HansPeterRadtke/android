@@ -1,8 +1,8 @@
 package com.hans.android.network.reliable;
 
 final class RetryBackoff {
-    static final long BASE_DELAY_MS = 1_000L;
-    static final long MAX_DELAY_MS = 5L * 60L * 1_000L;
+    static final long BASE_DELAY_MS = 250L;
+    static final long MAX_DELAY_MS = 5_000L;
 
     private RetryBackoff() {}
 

@@ -1,5 +1,6 @@
 package com.hans.android.network.reliable;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -24,7 +25,7 @@ public class UploadStallWatchdogTest {
         }
     }
 
-    @Test public void defaultTimeoutAllowsExtremelySlowRequests() {
-        assertTrue(UploadStallWatchdog.DEFAULT_TIMEOUT_MS >= 2L * 60L * 60L * 1000L);
+    @Test public void defaultTimeoutAbortsDeadUploadPromptly() {
+        assertEquals(12_000L, UploadStallWatchdog.DEFAULT_TIMEOUT_MS);
     }
 }

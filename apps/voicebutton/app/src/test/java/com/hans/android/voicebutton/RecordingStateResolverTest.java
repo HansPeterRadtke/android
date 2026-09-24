@@ -1,6 +1,10 @@
 package com.hans.android.voicebutton;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+
+import com.hans.android.audio.reliable.ReliableSessionManifest;
 
 import org.junit.Test;
 
@@ -17,6 +21,8 @@ public class RecordingStateResolverTest {
                 "PAUSED", true, false, false));
         assertEquals(RecordingService.ACTION_PAUSE,
                 RecordingStateResolver.primaryAction(true, false, false));
+        assertEquals(RecordingService.ACTION_PAUSE,
+                RecordingStateResolver.primaryAction(true, true, false));
     }
 
     @Test public void pauseTransitionCannotBecomeRecoveryState() {
@@ -46,4 +52,43 @@ public class RecordingStateResolverTest {
                 RecordingStateResolver.explanation("READY", "Stored completely on the server"));
     }
 
+
+    @Test public void startingRemainsAnOperationStateBeforeCaptureThreadOpens() {
+        assertEquals("STARTING", RecordingStateResolver.normalize(
+                "STARTING", false, false, false));
+    }
+
+    @Test public void finishedLiveManifestCannotBeResurrectedAsPaused() {
+        ReliableSessionManifest cached = new ReliableSessionManifest();
+        cached.sessionId = "session";
+        cached.paused = true;
+        cached.recordingFinished = false;
+        ReliableSessionManifest live = new ReliableSessionManifest();
+        live.sessionId = "session";
+        live.paused = true;
+        live.recordingFinished = true;
+        live.conversionFinished = true;
+        assertNull(RecordingStateResolver.authoritativeOpenSession(cached, live));
+    }
+
+    @Test public void resumedLiveManifestOverridesCachedPausedFlag() {
+        ReliableSessionManifest cached = new ReliableSessionManifest();
+        cached.sessionId = "session";
+        cached.paused = true;
+        ReliableSessionManifest live = new ReliableSessionManifest();
+        live.sessionId = "session";
+        live.paused = false;
+        live.state = "RECORDING";
+        assertSame(live,
+                RecordingStateResolver.authoritativeOpenSession(cached, live));
+    }
+
+    @Test public void stalePausedWithoutOpenSessionBecomesReady() {
+        assertEquals("READY", RecordingStateResolver.normalize(
+                "PAUSED", false, false, false));
+        assertEquals("READY", RecordingStateResolver.normalize(
+                "RECORDING", false, false, false));
+        assertEquals("SYNCHRONIZING", RecordingStateResolver.normalize(
+                "SYNCHRONIZING", false, false, false));
+    }
 }

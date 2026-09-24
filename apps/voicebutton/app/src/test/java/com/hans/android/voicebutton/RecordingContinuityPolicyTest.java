@@ -7,12 +7,26 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public class RecordingContinuityPolicyTest {
-    @Test public void serviceStaysAliveForAnyContinuityObligation() {
-        assertTrue(RecordingContinuityPolicy.keepServiceAlive(true, false, false, false));
-        assertTrue(RecordingContinuityPolicy.keepServiceAlive(false, true, false, false));
-        assertTrue(RecordingContinuityPolicy.keepServiceAlive(false, false, true, false));
-        assertTrue(RecordingContinuityPolicy.keepServiceAlive(false, false, false, true));
-        assertFalse(RecordingContinuityPolicy.keepServiceAlive(false, false, false, false));
+    @Test public void serviceStaysAliveForPauseWithoutTreatingPauseAsWakeLockWork() {
+        assertTrue(RecordingContinuityPolicy.keepServiceAlive(true, false,
+                false, false, false));
+        assertTrue(RecordingContinuityPolicy.keepServiceAlive(false, true,
+                false, false, false));
+        assertTrue(RecordingContinuityPolicy.keepServiceAlive(false, false,
+                true, false, false));
+        assertTrue(RecordingContinuityPolicy.keepServiceAlive(false, false,
+                false, true, false));
+        assertTrue(RecordingContinuityPolicy.keepServiceAlive(false, false,
+                false, false, true));
+        assertFalse(RecordingContinuityPolicy.keepServiceAlive(false, false,
+                false, false, false));
+
+        assertFalse(RecordingContinuityPolicy.holdWakeLock(false, false,
+                false, false));
+        assertTrue(RecordingContinuityPolicy.holdWakeLock(true, false,
+                false, false));
+        assertTrue(RecordingContinuityPolicy.holdWakeLock(false, true,
+                false, false));
     }
 
     @Test public void recoveryBackoffIsBounded() {
@@ -22,13 +36,18 @@ public class RecordingContinuityPolicyTest {
     }
     @Test public void pausedFullySynchronizedSessionDoesNotRunForever() {
         assertFalse(RecordingContinuityPolicy.sessionNeedsSynchronization(
-                false, false, false, false, false));
+                false, false, false, false));
         assertTrue(RecordingContinuityPolicy.sessionNeedsSynchronization(
-                false, false, false, true, false));
+                false, false, false, true));
         assertTrue(RecordingContinuityPolicy.sessionNeedsSynchronization(
-                true, true, false, false, false));
+                true, true, false, false));
         assertFalse(RecordingContinuityPolicy.sessionNeedsSynchronization(
-                true, true, true, false, false));
+                true, true, true, false));
+    }
+
+    @Test public void committedAudioDoesNotWaitForServerTranscript() {
+        assertFalse(RecordingContinuityPolicy.sessionNeedsSynchronization(
+                true, true, true, false));
     }
 
 }

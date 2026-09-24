@@ -8,6 +8,12 @@ final class RecordingIsolationPolicy {
         return !recording && !exitRequested;
     }
 
+    static boolean mayRunDeferredRecovery(boolean recording,
+                                          boolean startQueued,
+                                          boolean exitRequested) {
+        return !recording && !startQueued && !exitRequested;
+    }
+
     static boolean resumeCaptureBeforeDeferredWork(
             boolean interrupted, boolean autoResumeRequested) {
         return interrupted && autoResumeRequested;

@@ -2,9 +2,9 @@ package com.hans.android.voicebutton;
 
 import android.content.Context;
 import android.util.AttributeSet;
-import android.widget.ImageView;
+import androidx.appcompat.widget.AppCompatImageView;
 
-public final class WaveformView extends ImageView {
+public final class WaveformView extends AppCompatImageView {
     public WaveformView(Context context) { super(context); }
     public WaveformView(Context context, AttributeSet attrs) { super(context, attrs); }
     public WaveformView(Context context, AttributeSet attrs, int style) {
