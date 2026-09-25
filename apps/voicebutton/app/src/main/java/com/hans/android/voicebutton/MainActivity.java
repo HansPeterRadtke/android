@@ -120,7 +120,17 @@ public final class MainActivity extends Activity {
     private final AtomicBoolean inputRefreshRunning = new AtomicBoolean(false);
     private final AtomicBoolean folderRefreshRunning = new AtomicBoolean(false);
     private final AtomicBoolean transcriptionStatusRunning = new AtomicBoolean(false);
+    private boolean transcriptionStatusPolling;
+    private final Runnable transcriptionStatusPoll = new Runnable() {
+        @Override public void run() {
+            if (!transcriptionStatusPolling) return;
+            refreshTranscriptionStatusOnce();
+            uiHandler.postDelayed(this, 5000L);
+        }
+    };
     private long lastTranscriptionStatusSuccessElapsedMs = -1L;
+    private int lastReportedTranscriptionCompleteCount = -1;
+    private int lastReportedTranscriptionPendingCount = -1;
     private ReliableUploadClient.TranscriptionStatus lastTranscriptionStatus;
     private ReliableUploadClient transcriptionClient;
     private volatile RecordingService.Snapshot pendingSnapshot;
@@ -197,9 +207,14 @@ public final class MainActivity extends Activity {
         refreshFolders();
         bindService(new Intent(this, RecordingService.class), connection,
                 Context.BIND_AUTO_CREATE);
+        transcriptionStatusPolling = true;
+        uiHandler.removeCallbacks(transcriptionStatusPoll);
+        uiHandler.post(transcriptionStatusPoll);
     }
 
     @Override protected void onStop() {
+        transcriptionStatusPolling = false;
+        uiHandler.removeCallbacks(transcriptionStatusPoll);
         diag(PhoneDiagnostics.INFO, "ui.main.stop", snapshot.currentSessionId,
                 "MainActivity onStop; service work continues independently",
                 PhoneDiagnostics.fields("state", snapshot.state,
@@ -1313,11 +1328,27 @@ public final class MainActivity extends Activity {
         if (value != null) {
             lastTranscriptionStatus = value;
             lastTranscriptionStatusSuccessElapsedMs = now;
+            if (value.completeCount != lastReportedTranscriptionCompleteCount
+                    || value.notTranscribedCount != lastReportedTranscriptionPendingCount) {
+                lastReportedTranscriptionCompleteCount = value.completeCount;
+                lastReportedTranscriptionPendingCount = value.notTranscribedCount;
+                diag(PhoneDiagnostics.INFO, "transcription.status_received", null,
+                        "Jetson transcription state was received",
+                        PhoneDiagnostics.fields("complete_count", value.completeCount,
+                                "pending_count", value.notTranscribedCount,
+                                "overall_percent", value.overallPercent));
+            }
             setTextIfChanged(serverHealthText, MainScreenText.jetsonHealth(true, true, 0L));
             serverHealthText.setContentDescription(serverHealthText.getText());
             serverHealthText.setVisibility(View.GONE);
             renderTranscriptionOverview(value, "", false);
             return;
+        }
+        if (failure != null) {
+            diag(PhoneDiagnostics.ERROR, "transcription.status_failed", null,
+                    "Reading Jetson transcription state failed",
+                    PhoneDiagnostics.fields("exception_class", failure.getClass().getName(),
+                            "exception_message", String.valueOf(failure.getMessage())));
         }
         boolean hasSuccess = lastTranscriptionStatus != null
                 && lastTranscriptionStatusSuccessElapsedMs >= 0L;
