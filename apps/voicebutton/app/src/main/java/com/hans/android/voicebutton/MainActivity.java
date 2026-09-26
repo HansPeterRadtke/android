@@ -13,6 +13,9 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.graphics.Color;
+import android.media.AudioDeviceCallback;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -70,6 +73,31 @@ public final class MainActivity extends Activity {
 
     private final List<AudioInputOption> inputs = new ArrayList<>();
     private final List<ReliableSessionStore.Folder> folders = new ArrayList<>();
+    private boolean inputManuallySelectedThisRun;
+    private boolean audioDeviceCallbackRegistered;
+    private final AudioDeviceCallback audioDeviceCallback = new AudioDeviceCallback() {
+        @Override public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
+            boolean bluetoothAdded = containsBluetoothInput(addedDevices);
+            if (bluetoothAdded) inputManuallySelectedThisRun = false;
+            diag(PhoneDiagnostics.INFO, "microphone.device_added", snapshot.currentSessionId,
+                    "Android reported an audio device connection",
+                    PhoneDiagnostics.fields("bluetooth_added", bluetoothAdded,
+                            "device_count", addedDevices == null ? 0 : addedDevices.length));
+            refreshInputs();
+        }
+
+        @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
+            boolean selectedRemoved = containsDeviceId(removedDevices, selectedDeviceId);
+            boolean bluetoothRemoved = containsBluetoothInput(removedDevices);
+            if (selectedRemoved || bluetoothRemoved) inputManuallySelectedThisRun = false;
+            diag(PhoneDiagnostics.INFO, "microphone.device_removed", snapshot.currentSessionId,
+                    "Android reported an audio device disconnection",
+                    PhoneDiagnostics.fields("selected_removed", selectedRemoved,
+                            "bluetooth_removed", bluetoothRemoved,
+                            "device_count", removedDevices == null ? 0 : removedDevices.length));
+            refreshInputs();
+        }
+    };
     private LinearLayout statusCard;
     private LinearLayout setupContainer;
     private TextView statusTitle;
@@ -79,9 +107,11 @@ public final class MainActivity extends Activity {
     private ProgressBar progressBar;
     private TextView transferText;
     private TextView uploadCurrentText;
+    private ProgressBar uploadCurrentProgressBar;
     private TextView transcriptionSummaryText;
     private TextView transcriptionCurrentText;
     private ProgressBar transcriptionProgressBar;
+    private ProgressBar transcriptionCurrentProgressBar;
     private TextView currentText;
     private TextView routedText;
     private TextView durationText;
@@ -203,6 +233,7 @@ public final class MainActivity extends Activity {
         super.onStart();
         diag(PhoneDiagnostics.INFO, "ui.main.start", null,
                 "MainActivity onStart", PhoneDiagnostics.fields());
+        registerAudioDeviceCallback();
         if (!inputsLoaded) refreshInputs();
         refreshFolders();
         bindService(new Intent(this, RecordingService.class), connection,
@@ -215,6 +246,7 @@ public final class MainActivity extends Activity {
     @Override protected void onStop() {
         transcriptionStatusPolling = false;
         uiHandler.removeCallbacks(transcriptionStatusPoll);
+        unregisterAudioDeviceCallback();
         diag(PhoneDiagnostics.INFO, "ui.main.stop", snapshot.currentSessionId,
                 "MainActivity onStop; service work continues independently",
                 PhoneDiagnostics.fields("state", snapshot.state,
@@ -310,6 +342,19 @@ public final class MainActivity extends Activity {
                 AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
         root.addView(uploadCurrentText, uploadCurrentParams);
 
+        uploadCurrentProgressBar = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        uploadCurrentProgressBar.setId(R.id.voicebutton_upload_current_progress);
+        uploadCurrentProgressBar.setMax(1000);
+        uploadCurrentProgressBar.setProgress(0);
+        uploadCurrentProgressBar.setVisibility(View.GONE);
+        uploadCurrentProgressBar.setContentDescription("Current upload file progress");
+        LinearLayout.LayoutParams uploadCurrentProgressParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 10));
+        uploadCurrentProgressParams.setMargins(AndroidUi.dp(this, 18), 0,
+                AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
+        root.addView(uploadCurrentProgressBar, uploadCurrentProgressParams);
+
         transcriptionSummaryText = AndroidUi.text(this,
                 "Transcription overall: checking…", 14, false, AndroidUi.INK);
         transcriptionSummaryText.setId(R.id.voicebutton_transcription_summary);
@@ -343,6 +388,19 @@ public final class MainActivity extends Activity {
         transcriptionCurrentParams.setMargins(AndroidUi.dp(this, 18), 0,
                 AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
         root.addView(transcriptionCurrentText, transcriptionCurrentParams);
+
+        transcriptionCurrentProgressBar = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        transcriptionCurrentProgressBar.setId(R.id.voicebutton_transcription_current_progress);
+        transcriptionCurrentProgressBar.setMax(1000);
+        transcriptionCurrentProgressBar.setProgress(0);
+        transcriptionCurrentProgressBar.setVisibility(View.GONE);
+        transcriptionCurrentProgressBar.setContentDescription("Current transcription file progress");
+        LinearLayout.LayoutParams transcriptionCurrentProgressParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 10));
+        transcriptionCurrentProgressParams.setMargins(AndroidUi.dp(this, 18), 0,
+                AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
+        root.addView(transcriptionCurrentProgressBar, transcriptionCurrentProgressParams);
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -698,8 +756,9 @@ public final class MainActivity extends Activity {
             render(snapshot);
             return;
         }
-        AudioInputOption resolved = AudioInputCatalog.resolveFreshSelection(
-                inputs, preserve, previous);
+        AudioInputOption resolved = inputManuallySelectedThisRun
+                ? AudioInputCatalog.resolveFreshSelection(inputs, preserve, previous)
+                : AudioInputCatalog.preferredAutomaticInput(inputs);
         selectedDeviceId = resolved == null
                 ? AudioInputOption.DEFAULT_DEVICE_ID : resolved.getDeviceId();
         saveMainSelectionState();
@@ -717,9 +776,38 @@ public final class MainActivity extends Activity {
         }
         inputsLoaded = true;
         showPrimaryPending("Checking microphone…");
+        AudioInputOption previousSelection = findInputById(previousId);
+        refreshInputForStart(previousId, previousSelection, 0);
+    }
+
+    private void refreshInputForStart(int previousId,
+                                      AudioInputOption previousSelection,
+                                      int attempt) {
         inputWorker.execute(() -> {
             List<AudioInputOption> loaded = AudioInputCatalog.list(this);
+            boolean previousBluetooth = previousSelection != null
+                    && previousSelection.isBluetooth();
+            boolean bluetoothEnumerated = AudioInputCatalog.preferredAutomaticInput(loaded) != null
+                    && AudioInputCatalog.preferredAutomaticInput(loaded).isBluetooth();
+            boolean profileConnected = AudioInputCatalog.isBluetoothInputProfileConnected(this);
+            if (previousBluetooth && !bluetoothEnumerated && profileConnected && attempt < 10) {
+                uiHandler.postDelayed(() -> refreshInputForStart(previousId,
+                        previousSelection, attempt + 1), 150L);
+                return;
+            }
             runOnUiThread(() -> {
+                if (previousBluetooth && !bluetoothEnumerated && profileConnected) {
+                    inputRefreshRunning.set(false);
+                    primaryButton.setText("Start recording");
+                    primaryButton.setContentDescription("Start recording");
+                    primaryButton.setEnabled(true);
+                    new MaterialAlertDialogBuilder(this)
+                            .setTitle("Bluetooth microphone is still connecting")
+                            .setMessage("The connected Bluetooth headset has not exposed its microphone route to Android yet. Voice Button will not silently switch this recording to the phone microphone. Try Start again in a moment, or choose the built-in microphone explicitly.")
+                            .setPositiveButton("Back", null)
+                            .show();
+                    return;
+                }
                 applyInputs(loaded, previousId);
                 completeStartWithCurrentInputs(previousId);
             });
@@ -776,6 +864,7 @@ public final class MainActivity extends Activity {
                 .setItems(labels, (dialog, which) -> {
                     if (which == inputs.size()) { refreshInputs(); return; }
                     AudioInputOption selected = inputs.get(which);
+                    inputManuallySelectedThisRun = true;
                     selectedDeviceId = selected.getDeviceId();
                     saveMainSelectionState();
                     updateSetupButtons();
@@ -785,6 +874,48 @@ public final class MainActivity extends Activity {
                                     "device_type", selected.getDeviceType(),
                                     "label", selected.getLabel()));
                 }).setNegativeButton("Back", null).show();
+    }
+
+    private AudioInputOption findInputById(int deviceId) {
+        for (AudioInputOption input : inputs) {
+            if (input.getDeviceId() == deviceId) return input;
+        }
+        return null;
+    }
+
+    private static boolean containsDeviceId(AudioDeviceInfo[] devices, int deviceId) {
+        if (devices == null) return false;
+        for (AudioDeviceInfo device : devices) {
+            if (device != null && device.getId() == deviceId) return true;
+        }
+        return false;
+    }
+
+    private static boolean containsBluetoothInput(AudioDeviceInfo[] devices) {
+        if (devices == null) return false;
+        for (AudioDeviceInfo device : devices) {
+            if (device == null || !device.isSource()) continue;
+            int type = device.getType();
+            if (type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+                    || (Build.VERSION.SDK_INT >= 31
+                    && type == AudioDeviceInfo.TYPE_BLE_HEADSET)) return true;
+        }
+        return false;
+    }
+
+    private void registerAudioDeviceCallback() {
+        if (audioDeviceCallbackRegistered) return;
+        AudioManager manager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        if (manager == null) return;
+        manager.registerAudioDeviceCallback(audioDeviceCallback, uiHandler);
+        audioDeviceCallbackRegistered = true;
+    }
+
+    private void unregisterAudioDeviceCallback() {
+        if (!audioDeviceCallbackRegistered) return;
+        AudioManager manager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        if (manager != null) manager.unregisterAudioDeviceCallback(audioDeviceCallback);
+        audioDeviceCallbackRegistered = false;
     }
 
     private void saveMainSelectionState() {
@@ -1306,10 +1437,11 @@ public final class MainActivity extends Activity {
         setTextIfChanged(uploadCurrentText, MainScreenText.uploadCurrent(
                 uploadFileName, uploadFileProgress, uploadFilesLeft,
                 snapshot.liveUploadOperation));
-        progressBar.setIndeterminate(false);
+        progressBar.setIndeterminate(uploadHasUnmeasured && snapshot.uploadTotalBytes <= 0L);
         int overallUploadProgress = Math.max(0, Math.min(1000,
                 snapshot.uploadProgressPermille));
-        if (progressBar.getProgress() != overallUploadProgress) {
+        if (!progressBar.isIndeterminate()
+                && progressBar.getProgress() != overallUploadProgress) {
             progressBar.setProgress(overallUploadProgress);
         }
         boolean backupComplete = uploadFilesLeft <= 0 && !uploadHasUnmeasured;
@@ -1317,13 +1449,33 @@ public final class MainActivity extends Activity {
                 ? AndroidUi.ORANGE : backupComplete ? AndroidUi.GREEN : AndroidUi.INK);
         transferText.setVisibility(View.VISIBLE);
         progressBar.setContentDescription(transferText.getText());
-        progressBar.setVisibility(compactHeight ? View.GONE : View.VISIBLE);
+        progressBar.setVisibility(backupComplete ? View.GONE : View.VISIBLE);
+
+        boolean showCurrentUpload = !backupComplete && uploadSession != null;
+        uploadCurrentText.setVisibility(showCurrentUpload ? View.VISIBLE : View.GONE);
+        if (showCurrentUpload) {
+            boolean currentUnknown = uploadFileProgress < 0;
+            uploadCurrentProgressBar.setIndeterminate(currentUnknown);
+            if (!currentUnknown) {
+                int currentUploadPermille = Math.max(0, Math.min(1000, uploadFileProgress));
+                if (uploadCurrentProgressBar.getProgress() != currentUploadPermille) {
+                    uploadCurrentProgressBar.setProgress(currentUploadPermille);
+                }
+            }
+            uploadCurrentProgressBar.setContentDescription(uploadCurrentText.getText());
+            uploadCurrentProgressBar.setVisibility(View.VISIBLE);
+        } else {
+            uploadCurrentProgressBar.setIndeterminate(false);
+            uploadCurrentProgressBar.setProgress(backupComplete ? 1000 : 0);
+            uploadCurrentProgressBar.setVisibility(View.GONE);
+        }
     }
 
     private void applyTranscriptionStatus(
             ReliableUploadClient.TranscriptionStatus value, Exception failure) {
         if (transcriptionSummaryText == null || transcriptionCurrentText == null
-                || transcriptionProgressBar == null || serverHealthText == null) return;
+                || transcriptionProgressBar == null || transcriptionCurrentProgressBar == null
+                || serverHealthText == null) return;
         long now = android.os.SystemClock.elapsedRealtime();
         if (value != null) {
             lastTranscriptionStatus = value;
@@ -1369,8 +1521,10 @@ public final class MainActivity extends Activity {
             transcriptionSummaryText.setTextColor(AndroidUi.ORANGE);
             transcriptionCurrentText.setTextColor(AndroidUi.ORANGE);
             transcriptionProgressBar.setIndeterminate(true);
+            transcriptionProgressBar.setVisibility(View.VISIBLE);
             transcriptionProgressBar.setContentDescription(
                     "Transcription status unavailable");
+            transcriptionCurrentProgressBar.setVisibility(View.GONE);
         }
     }
 
@@ -1397,6 +1551,22 @@ public final class MainActivity extends Activity {
         transcriptionProgressBar.setContentDescription(
                 "Transcription overall " + value.overallPercent + " percent · "
                         + MainScreenText.filesLeftLabel(value.notTranscribedCount));
+        boolean transcriptionComplete = value.notTranscribedCount <= 0;
+        transcriptionProgressBar.setVisibility(transcriptionComplete ? View.GONE : View.VISIBLE);
+        transcriptionCurrentText.setVisibility(current == null ? View.GONE : View.VISIBLE);
+        if (current != null) {
+            transcriptionCurrentProgressBar.setIndeterminate(false);
+            int currentProgress = Math.max(0, Math.min(1000, current.percent * 10));
+            if (transcriptionCurrentProgressBar.getProgress() != currentProgress) {
+                transcriptionCurrentProgressBar.setProgress(currentProgress);
+            }
+            transcriptionCurrentProgressBar.setContentDescription(
+                    "Current transcription " + current.percent + " percent");
+            transcriptionCurrentProgressBar.setVisibility(View.VISIBLE);
+        } else {
+            transcriptionCurrentProgressBar.setProgress(transcriptionComplete ? 1000 : 0);
+            transcriptionCurrentProgressBar.setVisibility(View.GONE);
+        }
     }
 
     private static String formatStatusAge(long ageMs) {

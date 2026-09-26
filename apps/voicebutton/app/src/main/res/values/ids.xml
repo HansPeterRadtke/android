@@ -13,7 +13,9 @@
     <item name="voicebutton_primary_disabled_reason" type="id" />
     <item name="voicebutton_primary" type="id" />
     <item name="voicebutton_upload_current" type="id" />
+    <item name="voicebutton_upload_current_progress" type="id" />
     <item name="voicebutton_transcription_summary" type="id" />
     <item name="voicebutton_transcription_progress" type="id" />
     <item name="voicebutton_transcription_current" type="id" />
+    <item name="voicebutton_transcription_current_progress" type="id" />
 </resources>

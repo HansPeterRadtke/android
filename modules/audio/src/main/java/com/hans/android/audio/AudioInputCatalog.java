@@ -219,6 +219,22 @@ public final class AudioInputCatalog {
         return result;
     }
 
+
+    public static AudioInputOption preferredAutomaticInput(
+            List<AudioInputOption> currentInputs) {
+        if (currentInputs == null || currentInputs.isEmpty()) return null;
+        for (AudioInputOption input : currentInputs) {
+            if (input != null && input.isBluetooth()) return input;
+        }
+        return currentInputs.get(0);
+    }
+
+    public static boolean isBluetoothInputProfileConnected(Context context) {
+        return isBluetoothProfileConnected(context, BluetoothProfile.HEADSET)
+                || (Build.VERSION.SDK_INT >= 33
+                && isBluetoothProfileConnected(context, BluetoothProfile.LE_AUDIO));
+    }
+
     public static AudioInputOption resolveFreshSelection(
             List<AudioInputOption> currentInputs, int preferredDeviceId,
             AudioInputOption previousSelection) {

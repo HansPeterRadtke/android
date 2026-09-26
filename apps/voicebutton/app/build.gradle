@@ -10,8 +10,8 @@ android {
         applicationId 'com.hans.android.voicebutton'
         minSdk 24
         targetSdk 34
-        versionCode 88
-        versionName '0.88'
+        versionCode 90
+        versionName '0.90'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
         buildConfigField 'String', 'VOICE_BASE_URL', '"https://jetson-fdx.jimmyandjonny.work"'
         buildConfigField 'String', 'THOR_PLAYER_BASE_URL', '"https://thor.jonnyontherun.org/speech-mobile"'

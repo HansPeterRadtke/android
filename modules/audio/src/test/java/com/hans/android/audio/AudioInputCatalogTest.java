@@ -88,4 +88,25 @@ public class AudioInputCatalogTest {
                 current, 35, previous);
         org.junit.Assert.assertEquals(35, resolved.getDeviceId());
     }
+    @Test public void automaticDefaultPrefersBluetooth() {
+        java.util.List<AudioInputOption> current = new java.util.ArrayList<>();
+        current.add(new AudioInputOption(3, AudioDeviceInfo.TYPE_BUILTIN_MIC,
+                "Built-in microphone", AudioInputOption.Category.BUILT_IN));
+        current.add(new AudioInputOption(44, AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                "Bluetooth headset microphone — G06-BT",
+                AudioInputOption.Category.BLUETOOTH));
+        AudioInputOption selected = AudioInputCatalog.preferredAutomaticInput(current);
+        org.junit.Assert.assertNotNull(selected);
+        org.junit.Assert.assertEquals(44, selected.getDeviceId());
+        org.junit.Assert.assertTrue(selected.isBluetooth());
+    }
+
+    @Test public void automaticDefaultFallsBackToPhysicalInputWithoutBluetooth() {
+        java.util.List<AudioInputOption> current = new java.util.ArrayList<>();
+        current.add(new AudioInputOption(3, AudioDeviceInfo.TYPE_BUILTIN_MIC,
+                "Built-in microphone", AudioInputOption.Category.BUILT_IN));
+        AudioInputOption selected = AudioInputCatalog.preferredAutomaticInput(current);
+        org.junit.Assert.assertEquals(3, selected.getDeviceId());
+    }
+
 }

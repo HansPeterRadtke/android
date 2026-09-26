@@ -284,6 +284,12 @@ public final class RecordingService extends Service {
         }
     };
 
+    private void scheduleUploaderRefresh(RefreshRequest request, long delayMs) {
+        pendingUploaderRefresh.set(request);
+        main.removeCallbacks(uploaderRefresh);
+        main.postDelayed(uploaderRefresh, Math.max(0L, delayMs));
+    }
+
     private final Runnable recordingRecovery = () -> {
         try { serviceExecutor.execute(this::performRecordingRecovery); }
         catch (RuntimeException ignored) {}
@@ -1190,6 +1196,24 @@ public final class RecordingService extends Service {
     private AudioInputOption resolveInput(int deviceId) throws IOException {
         long started = SystemClock.elapsedRealtime();
         List<AudioInputOption> options = AudioInputCatalog.list(this);
+        for (int attempt = 0; attempt < 10; attempt++) {
+            boolean found = false;
+            for (AudioInputOption option : options) {
+                if (option.getDeviceId() == deviceId) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found) break;
+            if (!AudioInputCatalog.isBluetoothInputProfileConnected(this)) break;
+            try {
+                Thread.sleep(150L);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Microphone resolution was interrupted", interrupted);
+            }
+            options = AudioInputCatalog.list(this);
+        }
         org.json.JSONArray devices = new org.json.JSONArray();
         for (AudioInputOption option : options) {
             org.json.JSONObject item = new org.json.JSONObject();
@@ -1213,6 +1237,17 @@ public final class RecordingService extends Service {
         }
         for (AudioInputOption option : options) {
             if (option.getDeviceId() == deviceId) return option;
+        }
+        if (AudioInputCatalog.isBluetoothInputProfileConnected(this)) {
+            AudioInputOption bluetooth = AudioInputCatalog.preferredAutomaticInput(options);
+            if (bluetooth != null && bluetooth.isBluetooth()) {
+                diag(PhoneDiagnostics.WARN, "microphone.bluetooth_id_changed", currentSessionId,
+                        "Android changed the connected Bluetooth microphone device ID; the current Bluetooth input was selected",
+                        PhoneDiagnostics.fields("requested_device_id", deviceId,
+                                "resolved_device_id", bluetooth.getDeviceId(),
+                                "resolved_label", bluetooth.getLabel()));
+                return bluetooth;
+            }
         }
         throw new IOException("The selected microphone is no longer available; press Refresh connected inputs and choose again");
     }
@@ -1878,22 +1913,24 @@ public final class RecordingService extends Service {
                 if (terminal) sessionListDirty.set(true);
                 String requested = humanState.startsWith("Stored completely")
                         ? "READY" : "SYNCHRONIZING";
-                pendingUploaderRefresh.set(new RefreshRequest(
-                        requested, humanState, snapshot.routedInput));
-                main.removeCallbacks(uploaderRefresh);
-                main.post(terminal ? uploaderRefresh : () -> {
-                    main.removeCallbacks(uploaderRefresh);
-                    main.postDelayed(uploaderRefresh, 250L);
-                });
+                scheduleUploaderRefresh(new RefreshRequest(
+                        requested, humanState, snapshot.routedInput),
+                        terminal ? 0L : 250L);
             }
         }
 
         @Override public void onChanged() {
             sessionListDirty.set(true);
-            pendingUploaderRefresh.set(new RefreshRequest(
-                    snapshot.state, snapshot.explanation, snapshot.routedInput));
-            main.removeCallbacks(uploaderRefresh);
-            main.postDelayed(uploaderRefresh, 350L);
+            ReliableUploader.LiveProgress live = uploader == null ? null : uploader.liveProgress();
+            String operation = live == null || live.operation == null ? "idle" : live.operation;
+            boolean idle = operation.isEmpty()
+                    || "idle".equals(operation)
+                    || "idle_ignored_unreadable_records".equals(operation)
+                    || "waiting_quarantined_recordings".equals(operation);
+            scheduleUploaderRefresh(new RefreshRequest(
+                    idle ? "READY" : "SYNCHRONIZING",
+                    idle ? "Server upload is complete" : snapshot.explanation,
+                    snapshot.routedInput), idle ? 0L : 100L);
         }
 
         @Override public void onDiagnostic(String level, String event, String sessionId,
@@ -2159,6 +2196,7 @@ public final class RecordingService extends Service {
         int uploadTotalChunks = 0;
         int uploadDurableChunks = 0;
         for (ReliableSessionManifest manifest : sessions) {
+            if (!OverviewProgress.needsUpload(manifest)) continue;
             for (ReliableSessionManifest.Segment segment : manifest.orderedSegments()) {
                 if (segment.mp3Bytes <= 0L) continue;
                 uploadTotalBytes += segment.mp3Bytes;

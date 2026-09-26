@@ -257,8 +257,10 @@ public final class AudioLibraryActivity extends Activity {
                 appFolderFilter = currentFolder;
                 List<ReliableSessionManifest> manifests = store.list();
                 String parentId = currentFolder == null ? "" : currentFolder.id;
-                for (ReliableSessionStore.Folder child
-                        : store.childFolders(parentId)) {
+                List<ReliableSessionStore.Folder> visibleFolders =
+                        LibraryFolderPolicy.visibleFolders(store.listFolders(),
+                                store.childFolders(parentId), currentFolder == null);
+                for (ReliableSessionStore.Folder child : visibleFolders) {
                     int directRecordings = 0;
                     for (ReliableSessionManifest manifest : manifests) {
                         if (child.id.equals(manifest.folderId)) {
@@ -266,7 +268,7 @@ public final class AudioLibraryActivity extends Activity {
                         }
                     }
                     items.add(LibraryItem.appFolder(child,
-                            directRecordings));
+                            directRecordings, currentFolder == null));
                 }
                 if (currentFolder != null) {
                     manifests.sort(Comparator.comparingLong(
@@ -867,8 +869,10 @@ public final class AudioLibraryActivity extends Activity {
             this.title=title;this.detail=detail;this.directory=directory;this.playable=playable;
             this.document=document;this.recording=recording;this.appFolder=appFolder;this.source=source;
         }
-        static LibraryItem appFolder(ReliableSessionStore.Folder folder,int count){
-            return new LibraryItem(folder.name,
+        static LibraryItem appFolder(ReliableSessionStore.Folder folder, int count,
+                                     boolean showFullPath) {
+            String title = showFullPath ? folder.path : folder.name;
+            return new LibraryItem(title,
                     "Folder · " + count + " recordings", true, false,
                     null, null, folder, null);
         }

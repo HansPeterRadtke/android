@@ -60,12 +60,16 @@ public class MainActivityUiTest {
             onView(withId(R.id.voicebutton_transcription_current)).check(matches(isDisplayed()));
             scenario.onActivity(activity -> {
                 View backupBar = activity.findViewById(R.id.voicebutton_backup_progress);
-                boolean compact = activity.getResources().getConfiguration().screenHeightDp < 520;
-                if (compact) {
-                    assertTrue(backupBar.getVisibility() == View.GONE);
-                } else {
-                    assertTrue(backupBar.getVisibility() == View.VISIBLE);
-                }
+                View uploadCurrentBar = activity.findViewById(
+                        R.id.voicebutton_upload_current_progress);
+                View transcriptionCurrentBar = activity.findViewById(
+                        R.id.voicebutton_transcription_current_progress);
+                assertTrue(backupBar != null);
+                assertTrue(uploadCurrentBar != null);
+                assertTrue(transcriptionCurrentBar != null);
+                assertTrue(backupBar.getVisibility() == View.GONE);
+                assertTrue(uploadCurrentBar.getVisibility() == View.GONE);
+                assertTrue(transcriptionCurrentBar.getVisibility() == View.GONE);
             });            onView(withId(R.id.voicebutton_primary)).check(matches(isDisplayed()));
             onView(withId(R.id.voicebutton_primary)).check(matches(withText("Start recording")));
             onView(withId(R.id.voicebutton_more)).check(matches(isDisplayed()));
