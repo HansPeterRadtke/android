@@ -93,6 +93,8 @@ public class ReliableUploadClientTest {
                                 .put("engine", "openai-whisper-large-v3")
                                 .put("phase", "transcribing")
                                 .put("percent", 42)
+                                .put("frames_done", 420L)
+                                .put("frames_total", 1000L)
                                 .put("duration_ms", 123000L)
                                 .put("updated_at_ms", 456L))
                         .put(new JSONObject()
@@ -110,6 +112,8 @@ public class ReliableUploadClientTest {
                         .put("engine", "openai-whisper-large-v3")
                         .put("phase", "transcribing")
                         .put("percent", 42)
+                        .put("frames_done", 420L)
+                        .put("frames_total", 1000L)
                         .put("duration_ms", 123000L)
                         .put("updated_at_ms", 456L));
         ReliableUploadClient.TranscriptionStatus status =
@@ -122,6 +126,8 @@ public class ReliableUploadClientTest {
         assertEquals("Recording example", status.current.displayName);
         assertEquals(42, status.current.percent);
         assertEquals("transcribing", status.current.phase);
+        assertEquals(420L, status.current.framesDone);
+        assertEquals(1000L, status.current.framesTotal);
         assertEquals(2, status.pending.size());
         assertEquals("session-1", status.pending.get(0).sessionId);
         assertEquals("queued-2", status.pending.get(1).sessionId);

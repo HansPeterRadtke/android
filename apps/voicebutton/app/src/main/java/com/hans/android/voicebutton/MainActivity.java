@@ -1498,32 +1498,82 @@ public final class MainActivity extends Activity {
         uploadCurrentText.setVisibility(View.GONE);
         uploadCurrentProgressBar.setVisibility(View.GONE);
         uploadQueueContainer.removeAllViews();
+
         java.util.Set<String> serverCommitted = lastTranscriptionStatus == null
                 ? java.util.Collections.emptySet()
                 : lastTranscriptionStatus.committedSessionIds;
+        java.util.HashSet<String> rendered = new java.util.HashSet<>();
+        boolean any = false;
+
+        // Start showing the upload pipeline as soon as recording stops, before the
+        // session-list cache has necessarily caught up. This prevents short uploads
+        // from happening entirely between two UI snapshots.
+        String activeSessionId = snapshot.liveUploadSessionId == null
+                ? "" : snapshot.liveUploadSessionId;
+        boolean finalizingCurrent = ("FINISHING".equals(snapshot.state)
+                || "COMPRESSING".equals(snapshot.state))
+                && snapshot.currentSessionId != null
+                && !snapshot.currentSessionId.isEmpty();
+        if (activeSessionId.isEmpty() && finalizingCurrent) {
+            activeSessionId = snapshot.currentSessionId;
+        }
+        if (!activeSessionId.isEmpty() && !serverCommitted.contains(activeSessionId)) {
+            ReliableSessionManifest activeManifest = null;
+            for (ReliableSessionManifest session : snapshot.sessions) {
+                if (activeSessionId.equals(session.sessionId)) {
+                    activeManifest = session;
+                    break;
+                }
+            }
+            String name = activeManifest == null
+                    ? "Current recording" : OverviewProgress.fileName(activeManifest);
+            String op = snapshot.liveUploadOperation == null
+                    ? "" : snapshot.liveUploadOperation;
+            boolean hasLiveBytes = snapshot.liveUploadTotalBytes > 0L;
+            int permille = hasLiveBytes
+                    ? Math.max(0, Math.min(1000, snapshot.liveUploadProgressPermille)) : 0;
+            boolean indeterminate = !hasLiveBytes;
+            String state;
+            if (finalizingCurrent || "stopped".equals(op) || "idle".equals(op)
+                    || op.isEmpty()) {
+                state = "Preparing file for upload";
+                indeterminate = true;
+            } else if ("retry_backoff".equals(op)) {
+                state = "Retrying upload";
+            } else if (op.contains("commit")) {
+                state = "Committing on Jetson";
+                if (hasLiveBytes) permille = 1000;
+            } else if (op.contains("reconcil")) {
+                state = "Verifying Jetson copy";
+            } else {
+                state = "Uploading";
+            }
+            addOperationRow(uploadQueueContainer, name, state,
+                    permille, indeterminate, false);
+            rendered.add(activeSessionId);
+            any = true;
+        }
+
         List<ReliableSessionManifest> pending = OverviewProgress.pendingUploads(
                 snapshot.sessions, serverCommitted);
-        if (pending.isEmpty()) {
-            addOperationMessage(uploadQueueContainer, "No upload in progress", AndroidUi.MUTED);
-            uploadQueueContainer.setVisibility(View.VISIBLE);
-            return;
-        }
         for (ReliableSessionManifest session : pending) {
+            if (rendered.contains(session.sessionId)) continue;
             int permille = OverviewProgress.fileProgressPermille(session);
             boolean accepted = OverviewProgress.allSegmentsAccepted(session);
-            boolean current = session.sessionId.equals(snapshot.liveUploadSessionId);
             boolean indeterminate = !session.conversionFinished || permille < 0;
             String state;
-            if (!session.conversionFinished) state = "Preparing upload";
+            if (!session.conversionFinished) state = "Preparing file for upload";
             else if (accepted && !session.remoteCommitted) state = "Committing on Jetson";
-            else if (current && "retry_backoff".equals(snapshot.liveUploadOperation)) {
-                state = "Retrying upload";
-            } else if (current) state = "Uploading";
             else if (permille > 0) state = "Waiting to resume upload";
             else state = "Waiting to upload";
             if (accepted && !session.remoteCommitted) permille = 1000;
             addOperationRow(uploadQueueContainer, OverviewProgress.fileName(session),
                     state, permille, indeterminate, false);
+            any = true;
+        }
+        if (!any) {
+            addOperationMessage(uploadQueueContainer,
+                    "No upload in progress", AndroidUi.MUTED);
         }
         uploadQueueContainer.setVisibility(View.VISIBLE);
     }
@@ -1597,10 +1647,17 @@ public final class MainActivity extends Activity {
             String state = item.state == null ? "" : item.state;
             boolean running = "RUNNING".equals(state);
             boolean failed = "FAILED".equals(state);
-            boolean indeterminate = !running && !failed;
-            int permille = running ? Math.max(0, Math.min(1000, item.percent * 10)) : 0;
+            String phase = item.phase == null ? "" : item.phase.toLowerCase(java.util.Locale.ROOT);
+            boolean realFrameProgress = running && item.framesTotal > 0L;
+            boolean loading = running && ("loading".equals(phase)
+                    || "starting".equals(phase) || !realFrameProgress);
+            boolean indeterminate = (!running && !failed) || loading;
+            int permille = realFrameProgress
+                    ? Math.max(0, Math.min(1000, item.percent * 10)) : 0;
             String label;
-            if (running) label = "Transcribing";
+            if (loading && "loading".equals(phase)) label = "Loading transcription model";
+            else if (loading) label = "Starting transcription";
+            else if (running) label = "Transcribing";
             else if (failed) label = "Transcription failed";
             else label = "Waiting for transcription";
             if (stale && staleSuffix != null && !staleSuffix.isEmpty()) label += staleSuffix;

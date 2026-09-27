@@ -133,12 +133,15 @@ public final class ReliableUploadClient {
         public final String engine;
         public final String phase;
         public final int percent;
+        public final long framesDone;
+        public final long framesTotal;
         public final long durationMs;
         public final long updatedAtMs;
 
         CurrentTranscription(String sessionId, String displayName,
                              String folderName, String state, String engine,
-                             String phase, int percent, long durationMs,
+                             String phase, int percent, long framesDone,
+                             long framesTotal, long durationMs,
                              long updatedAtMs) {
             this.sessionId = sessionId == null ? "" : sessionId;
             this.displayName = displayName == null ? "" : displayName;
@@ -147,6 +150,8 @@ public final class ReliableUploadClient {
             this.engine = engine == null ? "" : engine;
             this.phase = phase == null ? "" : phase;
             this.percent = Math.max(0, Math.min(100, percent));
+            this.framesDone = Math.max(0L, framesDone);
+            this.framesTotal = Math.max(0L, framesTotal);
             this.durationMs = Math.max(0L, durationMs);
             this.updatedAtMs = Math.max(0L, updatedAtMs);
         }
@@ -218,6 +223,8 @@ public final class ReliableUploadClient {
                     currentObject.optString("engine", ""),
                     currentObject.optString("phase", ""),
                     currentObject.optInt("percent", 0),
+                    currentObject.optLong("frames_done", 0L),
+                    currentObject.optLong("frames_total", 0L),
                     currentObject.optLong("duration_ms", 0L),
                     currentObject.optLong("updated_at_ms", 0L));
         }
@@ -235,6 +242,8 @@ public final class ReliableUploadClient {
                         item.optString("engine", ""),
                         item.optString("phase", ""),
                         item.optInt("percent", 0),
+                        item.optLong("frames_done", 0L),
+                        item.optLong("frames_total", 0L),
                         item.optLong("duration_ms", 0L),
                         item.optLong("updated_at_ms", 0L)));
             }
