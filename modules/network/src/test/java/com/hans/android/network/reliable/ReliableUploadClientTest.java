@@ -82,6 +82,26 @@ public class ReliableUploadClientTest {
                 .put("complete_count", 83)
                 .put("not_transcribed_count", 1)
                 .put("overall_percent", 98)
+                .put("committed_session_ids", new JSONArray()
+                        .put("session-1").put("already-done"))
+                .put("pending", new JSONArray()
+                        .put(new JSONObject()
+                                .put("session_id", "session-1")
+                                .put("display_name", "Recording example")
+                                .put("folder_name", "agents")
+                                .put("state", "RUNNING")
+                                .put("engine", "openai-whisper-large-v3")
+                                .put("phase", "transcribing")
+                                .put("percent", 42)
+                                .put("duration_ms", 123000L)
+                                .put("updated_at_ms", 456L))
+                        .put(new JSONObject()
+                                .put("session_id", "queued-2")
+                                .put("display_name", "Queued recording")
+                                .put("folder_name", "agents")
+                                .put("state", "QUEUED")
+                                .put("phase", "queued")
+                                .put("percent", 0)))
                 .put("current", new JSONObject()
                         .put("session_id", "session-1")
                         .put("display_name", "Recording example")
@@ -102,6 +122,11 @@ public class ReliableUploadClientTest {
         assertEquals("Recording example", status.current.displayName);
         assertEquals(42, status.current.percent);
         assertEquals("transcribing", status.current.phase);
+        assertEquals(2, status.pending.size());
+        assertEquals("session-1", status.pending.get(0).sessionId);
+        assertEquals("queued-2", status.pending.get(1).sessionId);
+        assertTrue(status.committedSessionIds.contains("session-1"));
+        assertTrue(status.committedSessionIds.contains("already-done"));
     }
 
     @Test public void parsesIdleTranscriptionStatusWithoutCurrentFile() throws Exception {

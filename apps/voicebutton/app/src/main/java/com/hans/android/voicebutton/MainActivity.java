@@ -112,6 +112,8 @@ public final class MainActivity extends Activity {
     private TextView transcriptionCurrentText;
     private ProgressBar transcriptionProgressBar;
     private ProgressBar transcriptionCurrentProgressBar;
+    private LinearLayout uploadQueueContainer;
+    private LinearLayout transcriptionQueueContainer;
     private TextView currentText;
     private TextView routedText;
     private TextView durationText;
@@ -355,6 +357,16 @@ public final class MainActivity extends Activity {
                 AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
         root.addView(uploadCurrentProgressBar, uploadCurrentProgressParams);
 
+        uploadQueueContainer = new LinearLayout(this);
+        uploadQueueContainer.setId(R.id.voicebutton_upload_queue);
+        uploadQueueContainer.setOrientation(LinearLayout.VERTICAL);
+        uploadQueueContainer.setVisibility(View.GONE);
+        LinearLayout.LayoutParams uploadQueueParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        uploadQueueParams.setMargins(AndroidUi.dp(this, 18), 0,
+                AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
+        root.addView(uploadQueueContainer, uploadQueueParams);
+
         transcriptionSummaryText = AndroidUi.text(this,
                 "Transcription overall: checking…", 14, false, AndroidUi.INK);
         transcriptionSummaryText.setId(R.id.voicebutton_transcription_summary);
@@ -401,6 +413,27 @@ public final class MainActivity extends Activity {
         transcriptionCurrentProgressParams.setMargins(AndroidUi.dp(this, 18), 0,
                 AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
         root.addView(transcriptionCurrentProgressBar, transcriptionCurrentProgressParams);
+
+        transcriptionQueueContainer = new LinearLayout(this);
+        transcriptionQueueContainer.setId(R.id.voicebutton_transcription_queue);
+        transcriptionQueueContainer.setOrientation(LinearLayout.VERTICAL);
+        transcriptionQueueContainer.setVisibility(View.GONE);
+        LinearLayout.LayoutParams transcriptionQueueParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        transcriptionQueueParams.setMargins(AndroidUi.dp(this, 18), 0,
+                AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
+        root.addView(transcriptionQueueContainer, transcriptionQueueParams);
+
+        // Legacy aggregate progress widgets remain addressable for compatibility tests,
+        // but the main UI never renders aggregate historical percentages anymore.
+        transferText.setVisibility(View.GONE);
+        progressBar.setVisibility(View.GONE);
+        uploadCurrentText.setVisibility(View.GONE);
+        uploadCurrentProgressBar.setVisibility(View.GONE);
+        transcriptionSummaryText.setVisibility(View.GONE);
+        transcriptionProgressBar.setVisibility(View.GONE);
+        transcriptionCurrentText.setVisibility(View.GONE);
+        transcriptionCurrentProgressBar.setVisibility(View.GONE);
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -1426,56 +1459,49 @@ public final class MainActivity extends Activity {
         if (Math.abs(micLevelBar.getProgress() - level) >= 8) micLevelBar.setProgress(level);
         micLevelBar.setContentDescription(micLevelText.getText());
         micLevelBar.setVisibility(snapshot.recording ? View.VISIBLE : View.GONE);
-        int uploadFilesLeft = OverviewProgress.uploadFilesRemaining(snapshot.sessions);
-        boolean uploadHasUnmeasured = OverviewProgress.hasUnmeasuredUpload(snapshot.sessions);
-        setTextIfChanged(transferText, MainScreenText.uploadOverall(
-                snapshot.uploadProgressPermille, uploadFilesLeft, uploadHasUnmeasured));
-        ReliableSessionManifest uploadSession = OverviewProgress.findSession(
-                snapshot.sessions, snapshot.liveUploadSessionId);
-        String uploadFileName = OverviewProgress.fileName(uploadSession);
-        int uploadFileProgress = OverviewProgress.fileProgressPermille(uploadSession);
-        setTextIfChanged(uploadCurrentText, MainScreenText.uploadCurrent(
-                uploadFileName, uploadFileProgress, uploadFilesLeft,
-                snapshot.liveUploadOperation));
-        progressBar.setIndeterminate(uploadHasUnmeasured && snapshot.uploadTotalBytes <= 0L);
-        int overallUploadProgress = Math.max(0, Math.min(1000,
-                snapshot.uploadProgressPermille));
-        if (!progressBar.isIndeterminate()
-                && progressBar.getProgress() != overallUploadProgress) {
-            progressBar.setProgress(overallUploadProgress);
-        }
-        boolean backupComplete = uploadFilesLeft <= 0 && !uploadHasUnmeasured;
-        transferText.setTextColor("retry_backoff".equals(snapshot.liveUploadOperation)
-                ? AndroidUi.ORANGE : backupComplete ? AndroidUi.GREEN : AndroidUi.INK);
-        transferText.setVisibility(View.VISIBLE);
-        progressBar.setContentDescription(transferText.getText());
-        progressBar.setVisibility(backupComplete ? View.GONE : View.VISIBLE);
+        renderUploadOperations();
+    }
 
-        boolean showCurrentUpload = !backupComplete && uploadSession != null;
-        uploadCurrentText.setVisibility(showCurrentUpload ? View.VISIBLE : View.GONE);
-        if (showCurrentUpload) {
-            boolean currentUnknown = uploadFileProgress < 0;
-            uploadCurrentProgressBar.setIndeterminate(currentUnknown);
-            if (!currentUnknown) {
-                int currentUploadPermille = Math.max(0, Math.min(1000, uploadFileProgress));
-                if (uploadCurrentProgressBar.getProgress() != currentUploadPermille) {
-                    uploadCurrentProgressBar.setProgress(currentUploadPermille);
-                }
-            }
-            uploadCurrentProgressBar.setContentDescription(uploadCurrentText.getText());
-            uploadCurrentProgressBar.setVisibility(View.VISIBLE);
-        } else {
-            uploadCurrentProgressBar.setIndeterminate(false);
-            uploadCurrentProgressBar.setProgress(backupComplete ? 1000 : 0);
-            uploadCurrentProgressBar.setVisibility(View.GONE);
+    private void renderUploadOperations() {
+        if (uploadQueueContainer == null) return;
+        transferText.setVisibility(View.GONE);
+        progressBar.setVisibility(View.GONE);
+        uploadCurrentText.setVisibility(View.GONE);
+        uploadCurrentProgressBar.setVisibility(View.GONE);
+        uploadQueueContainer.removeAllViews();
+        java.util.Set<String> serverCommitted = lastTranscriptionStatus == null
+                ? java.util.Collections.emptySet()
+                : lastTranscriptionStatus.committedSessionIds;
+        List<ReliableSessionManifest> pending = OverviewProgress.pendingUploads(
+                snapshot.sessions, serverCommitted);
+        if (pending.isEmpty()) {
+            uploadQueueContainer.setVisibility(View.GONE);
+            return;
         }
+        addOperationHeader(uploadQueueContainer, "Uploads");
+        for (ReliableSessionManifest session : pending) {
+            int permille = OverviewProgress.fileProgressPermille(session);
+            boolean accepted = OverviewProgress.allSegmentsAccepted(session);
+            boolean current = session.sessionId.equals(snapshot.liveUploadSessionId);
+            boolean indeterminate = !session.conversionFinished || permille < 0;
+            String state;
+            if (!session.conversionFinished) state = "Preparing upload";
+            else if (accepted && !session.remoteCommitted) state = "Committing on Jetson";
+            else if (current && "retry_backoff".equals(snapshot.liveUploadOperation)) {
+                state = "Retrying upload";
+            } else if (current) state = "Uploading";
+            else if (permille > 0) state = "Waiting to resume upload";
+            else state = "Waiting to upload";
+            if (accepted && !session.remoteCommitted) permille = 1000;
+            addOperationRow(uploadQueueContainer, OverviewProgress.fileName(session),
+                    state, permille, indeterminate, false);
+        }
+        uploadQueueContainer.setVisibility(View.VISIBLE);
     }
 
     private void applyTranscriptionStatus(
             ReliableUploadClient.TranscriptionStatus value, Exception failure) {
-        if (transcriptionSummaryText == null || transcriptionCurrentText == null
-                || transcriptionProgressBar == null || transcriptionCurrentProgressBar == null
-                || serverHealthText == null) return;
+        if (transcriptionQueueContainer == null || serverHealthText == null) return;
         long now = android.os.SystemClock.elapsedRealtime();
         if (value != null) {
             lastTranscriptionStatus = value;
@@ -1493,7 +1519,8 @@ public final class MainActivity extends Activity {
             setTextIfChanged(serverHealthText, MainScreenText.jetsonHealth(true, true, 0L));
             serverHealthText.setContentDescription(serverHealthText.getText());
             serverHealthText.setVisibility(View.GONE);
-            renderTranscriptionOverview(value, "", false);
+            renderUploadOperations();
+            renderTranscriptionOperations(value, "", false);
             return;
         }
         if (failure != null) {
@@ -1511,62 +1538,90 @@ public final class MainActivity extends Activity {
         serverHealthText.setContentDescription(serverHealthText.getText());
         serverHealthText.setVisibility(View.GONE);
         if (hasSuccess) {
-            renderTranscriptionOverview(lastTranscriptionStatus,
+            renderTranscriptionOperations(lastTranscriptionStatus,
                     " · last update " + formatStatusAge(age) + " ago", true);
         } else {
-            setTextIfChanged(transcriptionSummaryText,
-                    "Transcription overall: unavailable · files left unknown");
-            setTextIfChanged(transcriptionCurrentText,
-                    "Transcription current file: unavailable");
-            transcriptionSummaryText.setTextColor(AndroidUi.ORANGE);
-            transcriptionCurrentText.setTextColor(AndroidUi.ORANGE);
-            transcriptionProgressBar.setIndeterminate(true);
-            transcriptionProgressBar.setVisibility(View.VISIBLE);
-            transcriptionProgressBar.setContentDescription(
-                    "Transcription status unavailable");
-            transcriptionCurrentProgressBar.setVisibility(View.GONE);
+            transcriptionQueueContainer.removeAllViews();
+            addOperationHeader(transcriptionQueueContainer, "Transcription");
+            addOperationMessage(transcriptionQueueContainer,
+                    "Jetson transcription status unavailable · retrying", AndroidUi.ORANGE);
+            transcriptionQueueContainer.setVisibility(View.VISIBLE);
         }
     }
 
-    private void renderTranscriptionOverview(
+    private void renderTranscriptionOperations(
             ReliableUploadClient.TranscriptionStatus value,
             String staleSuffix, boolean stale) {
-        setTextIfChanged(transcriptionSummaryText, MainScreenText.transcriptionOverall(
-                value.overallPercent, value.notTranscribedCount, staleSuffix));
-        ReliableUploadClient.CurrentTranscription current = value.current;
-        String label = current == null ? ""
-                : (current.displayName == null || current.displayName.isEmpty()
-                        ? current.sessionId : current.displayName);
-        setTextIfChanged(transcriptionCurrentText, MainScreenText.transcriptionCurrent(
-                label, current == null ? 0 : current.percent,
-                value.notTranscribedCount, current == null ? "" : current.phase));
-        transcriptionSummaryText.setTextColor(stale ? AndroidUi.ORANGE
-                : value.notTranscribedCount <= 0 ? AndroidUi.GREEN : AndroidUi.INK);
-        transcriptionCurrentText.setTextColor(stale ? AndroidUi.ORANGE : AndroidUi.INK);
-        transcriptionProgressBar.setIndeterminate(false);
-        int progress = Math.max(0, Math.min(1000, value.overallPercent * 10));
-        if (transcriptionProgressBar.getProgress() != progress) {
-            transcriptionProgressBar.setProgress(progress);
+        transcriptionSummaryText.setVisibility(View.GONE);
+        transcriptionProgressBar.setVisibility(View.GONE);
+        transcriptionCurrentText.setVisibility(View.GONE);
+        transcriptionCurrentProgressBar.setVisibility(View.GONE);
+        transcriptionQueueContainer.removeAllViews();
+        if (value == null || value.pending.isEmpty()) {
+            transcriptionQueueContainer.setVisibility(View.GONE);
+            return;
         }
-        transcriptionProgressBar.setContentDescription(
-                "Transcription overall " + value.overallPercent + " percent · "
-                        + MainScreenText.filesLeftLabel(value.notTranscribedCount));
-        boolean transcriptionComplete = value.notTranscribedCount <= 0;
-        transcriptionProgressBar.setVisibility(transcriptionComplete ? View.GONE : View.VISIBLE);
-        transcriptionCurrentText.setVisibility(current == null ? View.GONE : View.VISIBLE);
-        if (current != null) {
-            transcriptionCurrentProgressBar.setIndeterminate(false);
-            int currentProgress = Math.max(0, Math.min(1000, current.percent * 10));
-            if (transcriptionCurrentProgressBar.getProgress() != currentProgress) {
-                transcriptionCurrentProgressBar.setProgress(currentProgress);
-            }
-            transcriptionCurrentProgressBar.setContentDescription(
-                    "Current transcription " + current.percent + " percent");
-            transcriptionCurrentProgressBar.setVisibility(View.VISIBLE);
-        } else {
-            transcriptionCurrentProgressBar.setProgress(transcriptionComplete ? 1000 : 0);
-            transcriptionCurrentProgressBar.setVisibility(View.GONE);
+        addOperationHeader(transcriptionQueueContainer, "Transcription");
+        for (ReliableUploadClient.CurrentTranscription item : value.pending) {
+            String name = item.displayName == null || item.displayName.isEmpty()
+                    ? item.sessionId : item.displayName;
+            String state = item.state == null ? "" : item.state;
+            boolean running = "RUNNING".equals(state);
+            boolean failed = "FAILED".equals(state);
+            boolean indeterminate = !running && !failed;
+            int permille = running ? Math.max(0, Math.min(1000, item.percent * 10)) : 0;
+            String label;
+            if (running) label = "Transcribing";
+            else if (failed) label = "Transcription failed";
+            else label = "Waiting for transcription";
+            if (stale && staleSuffix != null && !staleSuffix.isEmpty()) label += staleSuffix;
+            addOperationRow(transcriptionQueueContainer, name, label,
+                    permille, indeterminate, failed);
         }
+        transcriptionQueueContainer.setVisibility(View.VISIBLE);
+    }
+
+    private void addOperationHeader(LinearLayout container, String title) {
+        TextView header = AndroidUi.text(this, title, 14, true, AndroidUi.INK);
+        header.setGravity(Gravity.START);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.setMargins(0, AndroidUi.dp(this, 3), 0, AndroidUi.dp(this, 4));
+        container.addView(header, params);
+    }
+
+    private void addOperationMessage(LinearLayout container, String text, int color) {
+        TextView message = AndroidUi.small(this, text);
+        message.setTextColor(color);
+        message.setGravity(Gravity.START);
+        container.addView(message, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    private void addOperationRow(LinearLayout container, String name, String state,
+                                 int permille, boolean indeterminate, boolean failed) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        String safeName = name == null || name.isEmpty() ? "Recording" : name;
+        int bounded = Math.max(0, Math.min(1000, permille));
+        String progressText = indeterminate ? "" : " · " + (bounded / 10) + "%";
+        TextView label = AndroidUi.small(this, safeName + " — " + state + progressText);
+        label.setTextColor(failed ? AndroidUi.ORANGE : AndroidUi.INK);
+        label.setGravity(Gravity.START);
+        row.addView(label, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        ProgressBar bar = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        bar.setMax(1000);
+        bar.setIndeterminate(indeterminate);
+        if (!indeterminate) bar.setProgress(bounded);
+        bar.setContentDescription(label.getText());
+        LinearLayout.LayoutParams barParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 10));
+        barParams.setMargins(0, AndroidUi.dp(this, 2), 0, AndroidUi.dp(this, 8));
+        row.addView(bar, barParams);
+        container.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     private static String formatStatusAge(long ageMs) {

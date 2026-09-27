@@ -70,4 +70,15 @@ public class OverviewProgressTest {
         assertTrue(OverviewProgress.hasUnmeasuredUpload(Arrays.asList(open)));
         assertEquals(1, OverviewProgress.uploadFilesRemaining(Arrays.asList(open)));
     }
+    @Test public void serverCommittedSessionIsRemovedFromPendingUploads() {
+        ReliableSessionManifest stale = session("stale", true, true, false, 100L, 98L);
+        ReliableSessionManifest pending = session("pending", true, true, false, 100L, 40L);
+        java.util.Set<String> committed = new java.util.HashSet<>();
+        committed.add("stale");
+        java.util.List<ReliableSessionManifest> result = OverviewProgress.pendingUploads(
+                Arrays.asList(stale, pending), committed);
+        assertEquals(1, result.size());
+        assertEquals("pending", result.get(0).sessionId);
+    }
+
 }

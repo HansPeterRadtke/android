@@ -3,7 +3,10 @@ package com.hans.android.voicebutton;
 import com.hans.android.audio.reliable.RecordingFileNames;
 import com.hans.android.audio.reliable.ReliableSessionManifest;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 
 final class OverviewProgress {
     private OverviewProgress() {}
@@ -16,6 +19,28 @@ final class OverviewProgress {
             if (!segment.remoteAccepted) return true;
         }
         return !session.remoteCommitted;
+    }
+
+
+    static List<ReliableSessionManifest> pendingUploads(
+            List<ReliableSessionManifest> sessions, Set<String> serverCommittedIds) {
+        ArrayList<ReliableSessionManifest> result = new ArrayList<>();
+        if (sessions == null) return result;
+        for (ReliableSessionManifest session : sessions) {
+            if (session == null || !session.recordingFinished) continue;
+            if (serverCommittedIds != null && serverCommittedIds.contains(session.sessionId)) continue;
+            if (needsUpload(session)) result.add(session);
+        }
+        result.sort(Comparator.comparingLong(value -> value.createdAt));
+        return result;
+    }
+
+    static boolean allSegmentsAccepted(ReliableSessionManifest session) {
+        if (session == null || session.segments.isEmpty()) return false;
+        for (ReliableSessionManifest.Segment segment : session.segments) {
+            if (!segment.remoteAccepted) return false;
+        }
+        return true;
     }
 
     static int uploadFilesRemaining(List<ReliableSessionManifest> sessions) {

@@ -102,15 +102,25 @@ public final class ReliableUploadClient {
         public final int completeCount;
         public final int notTranscribedCount;
         public final int overallPercent;
+        public final java.util.List<CurrentTranscription> pending;
+        public final java.util.Set<String> committedSessionIds;
         public final CurrentTranscription current;
 
         TranscriptionStatus(int totalCommittedCount, int completeCount,
                             int notTranscribedCount, int overallPercent,
+                            java.util.List<CurrentTranscription> pending,
+                            java.util.Set<String> committedSessionIds,
                             CurrentTranscription current) {
             this.totalCommittedCount = Math.max(0, totalCommittedCount);
             this.completeCount = Math.max(0, completeCount);
             this.notTranscribedCount = Math.max(0, notTranscribedCount);
             this.overallPercent = Math.max(0, Math.min(100, overallPercent));
+            this.pending = pending == null
+                    ? java.util.Collections.emptyList()
+                    : java.util.Collections.unmodifiableList(new java.util.ArrayList<>(pending));
+            this.committedSessionIds = committedSessionIds == null
+                    ? java.util.Collections.emptySet()
+                    : java.util.Collections.unmodifiableSet(new java.util.HashSet<>(committedSessionIds));
             this.current = current;
         }
     }
@@ -211,13 +221,41 @@ public final class ReliableUploadClient {
                     currentObject.optLong("duration_ms", 0L),
                     currentObject.optLong("updated_at_ms", 0L));
         }
+        java.util.ArrayList<CurrentTranscription> pendingItems = new java.util.ArrayList<>();
+        JSONArray pendingArray = response == null ? null : response.optJSONArray("pending");
+        if (pendingArray != null) {
+            for (int i = 0; i < pendingArray.length(); i++) {
+                JSONObject item = pendingArray.optJSONObject(i);
+                if (item == null) continue;
+                pendingItems.add(new CurrentTranscription(
+                        item.optString("session_id", ""),
+                        item.optString("display_name", ""),
+                        item.optString("folder_name", ""),
+                        item.optString("state", ""),
+                        item.optString("engine", ""),
+                        item.optString("phase", ""),
+                        item.optInt("percent", 0),
+                        item.optLong("duration_ms", 0L),
+                        item.optLong("updated_at_ms", 0L)));
+            }
+        }
+        java.util.HashSet<String> committedSessionIds = new java.util.HashSet<>();
+        JSONArray committedArray = response == null ? null
+                : response.optJSONArray("committed_session_ids");
+        if (committedArray != null) {
+            for (int i = 0; i < committedArray.length(); i++) {
+                String id = committedArray.optString(i, "");
+                if (!id.isEmpty()) committedSessionIds.add(id);
+            }
+        }
         int total = response == null ? 0 : response.optInt("total_committed_count", 0);
         int complete = response == null ? 0 : response.optInt("complete_count", 0);
         int pending = response == null ? 0 : response.optInt("not_transcribed_count",
                 Math.max(0, total - complete));
         int overall = response == null ? 0 : response.optInt("overall_percent",
                 total <= 0 ? 100 : (complete * 100) / total);
-        return new TranscriptionStatus(total, complete, pending, overall, current);
+        return new TranscriptionStatus(total, complete, pending, overall,
+                pendingItems, committedSessionIds, current);
     }
 
     public List<ReliableSessionStore.Folder> listFolders() throws Exception {
