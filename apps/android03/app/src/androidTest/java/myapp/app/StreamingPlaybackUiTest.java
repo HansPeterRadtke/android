@@ -1,22 +1,17 @@
 package myapp.app;
 
-import static androidx.test.espresso.Espresso.onView;
-import static androidx.test.espresso.action.ViewActions.click;
-import static androidx.test.espresso.action.ViewActions.scrollTo;
-import static androidx.test.espresso.assertion.ViewAssertions.matches;
-import static androidx.test.espresso.matcher.ViewMatchers.Visibility.GONE;
-import static androidx.test.espresso.matcher.ViewMatchers.isDescendantOfA;
-import static androidx.test.espresso.matcher.ViewMatchers.isDisplayed;
-import static androidx.test.espresso.matcher.ViewMatchers.withEffectiveVisibility;
-import static androidx.test.espresso.matcher.ViewMatchers.withId;
-import static androidx.test.espresso.matcher.ViewMatchers.withText;
-import static org.hamcrest.Matchers.allOf;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import android.Manifest;
+import android.graphics.Rect;
+import android.view.View;
 
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.rule.GrantPermissionRule;
+
+import com.google.android.material.button.MaterialButton;
 
 import org.junit.Rule;
 import org.junit.Test;
@@ -27,6 +22,13 @@ public class StreamingPlaybackUiTest {
   @Rule public GrantPermissionRule permissions = GrantPermissionRule.grant(
       Manifest.permission.RECORD_AUDIO, Manifest.permission.BLUETOOTH_CONNECT);
 
+  private static void assertDisplayed(View view) {
+    assertEquals(View.VISIBLE, view.getVisibility());
+    Rect visible = new Rect();
+    assertTrue("view has no global visible rectangle", view.getGlobalVisibleRect(visible));
+    assertTrue("visible rectangle is empty", visible.width() > 0 && visible.height() > 0);
+  }
+
   @Test public void liveReplyAutoplaysOnFirstFrameAndStopHidesImmediately() throws Exception {
     try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
       scenario.onActivity(activity -> {
@@ -36,20 +38,20 @@ public class StreamingPlaybackUiTest {
         player.append(pcm);
       });
       Thread.sleep(300L);
-      onView(allOf(
-          withId(R.id.voice_player_play_pause),
-          isDescendantOfA(withId(R.id.voice_assistant_player))))
-          .check(matches(isDisplayed()))
-          .check(matches(withText(R.string.pause)));
-      onView(withId(R.id.voice_conversation)).check(matches(isDisplayed()));
-      onView(withId(R.id.voice_draft)).check(matches(isDisplayed()));
-      onView(withId(R.id.voice_send)).check(matches(isDisplayed()));
-      onView(allOf(
-          withId(R.id.voice_player_stop),
-          isDescendantOfA(withId(R.id.voice_assistant_player))))
-          .check(matches(isDisplayed()))
-          .perform(click());
-      onView(withId(R.id.voice_assistant_player)).check(matches(withEffectiveVisibility(GONE)));
+      scenario.onActivity(activity -> {
+        VoicePcmPlayerView player = activity.findViewById(R.id.voice_assistant_player);
+        MaterialButton playPause = player.findViewById(R.id.voice_player_play_pause);
+        MaterialButton stop = player.findViewById(R.id.voice_player_stop);
+        assertDisplayed(player);
+        assertDisplayed(playPause);
+        assertEquals(activity.getString(R.string.pause), playPause.getText().toString());
+        assertDisplayed(stop);
+        assertDisplayed(activity.findViewById(R.id.voice_conversation));
+        assertDisplayed(activity.findViewById(R.id.voice_draft));
+        assertDisplayed(activity.findViewById(R.id.voice_send));
+        assertTrue("Stop click was not accepted", stop.performClick());
+        assertEquals(View.GONE, player.getVisibility());
+      });
     }
   }
 
@@ -63,7 +65,10 @@ public class StreamingPlaybackUiTest {
         player.endStream();
       });
       Thread.sleep(500L);
-      onView(withId(R.id.voice_assistant_player)).check(matches(withEffectiveVisibility(GONE)));
+      scenario.onActivity(activity -> {
+        VoicePcmPlayerView player = activity.findViewById(R.id.voice_assistant_player);
+        assertEquals(View.GONE, player.getVisibility());
+      });
 
       scenario.onActivity(activity -> {
         VoicePcmPlayerView player = activity.findViewById(R.id.voice_assistant_player);
@@ -72,7 +77,7 @@ public class StreamingPlaybackUiTest {
         player.endStream();
       });
       Thread.sleep(500L);
-      onView(withId(R.id.voice_assistant_player)).check(matches(isDisplayed()));
+      scenario.onActivity(activity -> assertDisplayed(activity.findViewById(R.id.voice_assistant_player)));
     }
   }
 }

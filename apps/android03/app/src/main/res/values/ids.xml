@@ -27,4 +27,5 @@
     <item name="voice_player_current" type="id"/>
     <item name="voice_player_remaining" type="id"/>
     <item name="voice_player_total" type="id"/>
+    <item name="voice_latest" type="id"/>
 </resources>

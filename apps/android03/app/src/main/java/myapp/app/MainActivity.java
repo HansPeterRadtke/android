@@ -25,6 +25,7 @@ import android.text.InputType;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewTreeObserver;
 import android.view.ViewGroup;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -107,6 +108,10 @@ public class MainActivity extends Activity {
   private TextView workerView;
   private TextView conversationView;
   private ScrollView conversationScrollView;
+  private MaterialButton latestButton;
+  private volatile boolean conversationPinnedToLatest = true;
+  private volatile boolean conversationScrollInitialized = false;
+  private volatile boolean conversationProgrammaticScroll = false;
   private LinearLayout transcriptPanel;
   private LinearLayout replayRow;
   private TextInputEditText draftEdit;
@@ -177,6 +182,26 @@ public class MainActivity extends Activity {
   private AutomaticGainControl agc;
   private final Object diagnosticLock = new Object();
   private String diagnosticText = "";
+
+  private final class LowerControlsLayout extends LinearLayout {
+    LowerControlsLayout(Context context) {
+      super(context);
+      setOrientation(VERTICAL);
+    }
+
+    @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+      if (useWideShortLayout()) {
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        return;
+      }
+      // LinearLayout may hand wrap-content children an UNSPECIFIED height. Use the
+      // real window height instead so the lower controls can never consume the
+      // entire phone and erase the conversation viewport.
+      int windowHeight = getResources().getDisplayMetrics().heightPixels;
+      int cap = Math.max(dp(220), Math.round(windowHeight * 0.52f));
+      super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(cap, MeasureSpec.AT_MOST));
+    }
+  }
 
   private final class WindowFractionScrollView extends ScrollView {
     WindowFractionScrollView(Context context) {
@@ -290,7 +315,21 @@ public class MainActivity extends Activity {
     conversationScrollView = new ScrollView(this);
     conversationScrollView.setFillViewport(true);
     conversationScrollView.addView(conversationView, fullWrap());
-    loadConversationHistory();
+    conversationScrollView.setOnScrollChangeListener((view, scrollX, scrollY, oldScrollX, oldScrollY) -> {
+      if (!conversationProgrammaticScroll) conversationPinnedToLatest = isConversationAtLatest();
+      updateLatestButtonVisibility();
+    });
+    latestButton = new MaterialButton(this);
+    latestButton.setId(R.id.voice_latest);
+    latestButton.setText(R.string.latest);
+    latestButton.setMinHeight(dp(48));
+    latestButton.setVisibility(View.GONE);
+    latestButton.setOnClickListener(v -> scrollConversationToLatest());
+    LinearLayout conversationPanel = new LinearLayout(this);
+    conversationPanel.setOrientation(LinearLayout.VERTICAL);
+    conversationPanel.addView(conversationScrollView, new LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+    conversationPanel.addView(latestButton, fullWrap());
 
     userPlayer = new VoicePcmPlayerView(this, appConfig.sampleRate, appConfig.playerMaxBytes, getString(R.string.user_audio));
     userPlayer.setId(R.id.voice_user_player);
@@ -318,15 +357,14 @@ public class MainActivity extends Activity {
     draftEdit.setId(R.id.voice_draft);
     draftEdit.setHint(R.string.transcript_hint);
     draftEdit.setTextSize(17);
-    draftEdit.setMinLines(1);
-    draftEdit.setMaxLines(useWideShortLayout() ? 1 : 5);
-    if (useWideShortLayout()) {
-      draftEdit.setMinHeight(dp(48));
-      draftEdit.setMaxHeight(dp(56));
-    }
     draftEdit.setInputType(InputType.TYPE_CLASS_TEXT
         | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+    // Keep the composer line-based instead of mixing line and pixel constraints.
+    // Pixel min/max height switches TextView out of line-count mode and made the
+    // short-screen editor report/render like a one-line field.
+    draftEdit.setMinLines(2);
+    draftEdit.setMaxLines(useWideShortLayout() ? 3 : 6);
     transcriptInput.addView(draftEdit, fullWrap());
     draftEdit.addTextChangedListener(new TextWatcher() {
       @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) {}
@@ -377,7 +415,7 @@ public class MainActivity extends Activity {
       body.setBaselineAligned(false);
       LinearLayout.LayoutParams bodyParams = new LinearLayout.LayoutParams(
           ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-      body.addView(conversationScrollView, new LinearLayout.LayoutParams(
+      body.addView(conversationPanel, new LinearLayout.LayoutParams(
           0, ViewGroup.LayoutParams.MATCH_PARENT, 3f));
 
       // Conversation-first landscape hierarchy: the editable current message
@@ -394,13 +432,17 @@ public class MainActivity extends Activity {
       body.addView(right, rightParams);
       root.addView(body, bodyParams);
     } else {
-      root.addView(conversationScrollView, new LinearLayout.LayoutParams(
+      conversationPanel.setMinimumHeight(dp(96));
+      root.addView(conversationPanel, new LinearLayout.LayoutParams(
           ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-      root.addView(audioScroll, fullWrap());
-      root.addView(transcriptPanel, fullWrap());
+      LowerControlsLayout lowerControls = new LowerControlsLayout(this);
+      lowerControls.addView(audioScroll, fullWrap());
+      lowerControls.addView(transcriptPanel, fullWrap());
+      root.addView(lowerControls, fullWrap());
     }
 
     setContentView(root);
+    loadConversationHistory();
     setForegroundMode(ForegroundMode.READY, null);
     draftEdit.setText(historyPrefs.getString(DRAFT_PREF_KEY, ""));
     draftEdit.setSelection(draftEdit.length());
@@ -2067,7 +2109,6 @@ public class MainActivity extends Activity {
       persistAndRenderConversation();
       updateTranscriptPanel();
       updateReplayRow();
-      conversationScrollView.post(() -> conversationScrollView.fullScroll(View.FOCUS_DOWN));
       if (autoSend && !pendingTurnId.isEmpty() && !draftEdit.getText().toString().trim().isEmpty()) {
         submitDraft();
       }
@@ -2077,13 +2118,62 @@ public class MainActivity extends Activity {
   private void renderConversationText() {
     if (conversationView == null || conversationScrollView == null) return;
     runOnUiThread(() -> {
+      boolean followLatest = !conversationScrollInitialized || conversationPinnedToLatest;
       String rendered = conversationTextModel.render(getString(R.string.empty_conversation));
       if (rendered.length() > appConfig.historyCacheMaxChars) {
         rendered = rendered.substring(rendered.length() - appConfig.historyCacheMaxChars);
       }
       conversationView.setText(rendered);
-      conversationScrollView.post(() -> conversationScrollView.fullScroll(View.FOCUS_DOWN));
+      if (followLatest) scrollConversationToLatest();
+      else conversationScrollView.post(this::updateLatestButtonVisibility);
     });
+  }
+
+  private boolean isConversationAtLatest() {
+    if (conversationScrollView == null || conversationScrollView.getChildCount() == 0) return true;
+    View child = conversationScrollView.getChildAt(0);
+    int remaining = child.getBottom() - (conversationScrollView.getScrollY() + conversationScrollView.getHeight());
+    return remaining <= dp(48);
+  }
+
+  private void updateLatestButtonVisibility() {
+    if (latestButton == null || conversationScrollView == null) return;
+    boolean scrollable = conversationScrollView.canScrollVertically(-1)
+        || conversationScrollView.canScrollVertically(1);
+    latestButton.setVisibility(scrollable ? View.VISIBLE : View.GONE);
+  }
+
+  private void scrollConversationToLatest() {
+    if (conversationScrollView == null || conversationView == null) return;
+    conversationProgrammaticScroll = true;
+    conversationPinnedToLatest = true;
+    ViewTreeObserver observer = conversationScrollView.getViewTreeObserver();
+    final ViewTreeObserver.OnPreDrawListener[] holder = new ViewTreeObserver.OnPreDrawListener[1];
+    holder[0] = () -> {
+      ViewTreeObserver current = conversationScrollView.getViewTreeObserver();
+      if (current.isAlive()) current.removeOnPreDrawListener(holder[0]);
+      forceConversationBottom();
+      conversationScrollView.post(() -> {
+        forceConversationBottom();
+        conversationScrollInitialized = true;
+        conversationProgrammaticScroll = false;
+        conversationPinnedToLatest = isConversationAtLatest();
+        updateLatestButtonVisibility();
+      });
+      return true;
+    };
+    observer.addOnPreDrawListener(holder[0]);
+    conversationScrollView.requestLayout();
+    conversationScrollView.invalidate();
+  }
+
+  private void forceConversationBottom() {
+    if (conversationScrollView == null || conversationScrollView.getChildCount() == 0) return;
+    View child = conversationScrollView.getChildAt(0);
+    int viewport = conversationScrollView.getHeight()
+        - conversationScrollView.getPaddingTop() - conversationScrollView.getPaddingBottom();
+    int target = Math.max(0, child.getHeight() - Math.max(0, viewport));
+    conversationScrollView.scrollTo(0, target);
   }
 
   private void persistAndRenderConversation() {

@@ -29,6 +29,7 @@
     <string name="recognized_text">Current message</string>
     <string name="transcript_hint">Type or speak a message</string>
     <string name="send">Send</string>
+    <string name="latest">Latest</string>
 <string name="background_working">Background work is running</string>
     <string name="background_input">Background work needs your input</string>
     <string name="background_completed">Background work completed</string>

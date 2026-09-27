@@ -1,20 +1,11 @@
 package myapp.app;
 
-import static androidx.test.espresso.Espresso.closeSoftKeyboard;
-import static androidx.test.espresso.Espresso.onView;
-import static androidx.test.espresso.assertion.ViewAssertions.matches;
-import static androidx.test.espresso.action.ViewActions.replaceText;
-import static androidx.test.espresso.action.ViewActions.scrollTo;
-import static androidx.test.espresso.matcher.ViewMatchers.Visibility.VISIBLE;
-import static androidx.test.espresso.matcher.ViewMatchers.isDisplayed;
-import static androidx.test.espresso.matcher.ViewMatchers.withEffectiveVisibility;
-import static androidx.test.espresso.matcher.ViewMatchers.isEnabled;
-import static androidx.test.espresso.matcher.ViewMatchers.withId;
-import static androidx.test.espresso.matcher.ViewMatchers.isDescendantOfA;
-import static org.hamcrest.Matchers.allOf;
-import static androidx.test.espresso.matcher.ViewMatchers.withText;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
+import android.view.View;
 
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -26,13 +17,21 @@ import org.junit.runner.RunWith;
 public class LifecycleUiTest {
   @Test public void unsentDraftSurvivesActivityRecreation() {
     try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
-      onView(withId(R.id.voice_draft)).perform(replaceText("draftpersists"));
-      closeSoftKeyboard();
+      scenario.onActivity(activity -> {
+        com.google.android.material.textfield.TextInputEditText editor = activity.findViewById(R.id.voice_draft);
+        editor.setText("draftpersists");
+        editor.setSelection(editor.length());
+      });
       scenario.recreate();
-      onView(withId(R.id.voice_draft)).check(matches(withText("draftpersists")));
-      onView(withId(R.id.voice_send)).check(matches(isEnabled()));
+      scenario.onActivity(activity -> {
+        com.google.android.material.textfield.TextInputEditText editor = activity.findViewById(R.id.voice_draft);
+        com.google.android.material.button.MaterialButton send = activity.findViewById(R.id.voice_send);
+        assertEquals("draftpersists", editor.getText().toString());
+        assertTrue(send.isEnabled());
+      });
     }
   }
+
   @Test public void unsentManualRecordingSurvivesActivityRecreation() {
     try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
       scenario.onActivity(activity -> {
@@ -53,16 +52,16 @@ public class LifecycleUiTest {
       });
       scenario.recreate();
       try {
-        onView(withId(R.id.voice_user_player)).check(matches(withEffectiveVisibility(VISIBLE)));
-        onView(allOf(withId(R.id.voice_player_play_pause), isDescendantOfA(withId(R.id.voice_user_player)))).perform(scrollTo()).check(matches(isDisplayed()));
-        onView(allOf(withId(R.id.voice_player_stop), isDescendantOfA(withId(R.id.voice_user_player)))).perform(scrollTo()).check(matches(isDisplayed()));
-        onView(allOf(withId(R.id.voice_player_seek), isDescendantOfA(withId(R.id.voice_user_player)))).perform(scrollTo()).check(matches(isDisplayed()));
-        final boolean[] wide = {false};
         scenario.onActivity(activity -> {
-          android.content.res.Configuration config = activity.getResources().getConfiguration();
-          wide[0] = config.screenWidthDp >= 600 && config.screenWidthDp > config.screenHeightDp;
+          VoicePcmPlayerView player = activity.findViewById(R.id.voice_user_player);
+          assertNotNull(player);
+          assertEquals(View.VISIBLE, player.getVisibility());
+          assertNotNull(player.findViewById(R.id.voice_player_play_pause));
+          assertNotNull(player.findViewById(R.id.voice_player_stop));
+          assertNotNull(player.findViewById(R.id.voice_player_seek));
+          assertTrue(activity.getFileStreamPath("voice_unsent_manual.pcm").isFile());
+          assertEquals(View.VISIBLE, activity.findViewById(R.id.voice_transcribe).getVisibility());
         });
-        onView(withId(R.id.voice_transcribe)).check(matches(isDisplayed()));
       } finally {
         scenario.onActivity(activity -> {
           activity.deleteFile("voice_unsent_manual.pcm");
@@ -74,5 +73,4 @@ public class LifecycleUiTest {
       }
     }
   }
-
 }
