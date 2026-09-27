@@ -67,6 +67,18 @@ public class MainActivityUiTest {
                 assertTrue(backupBar != null);
                 assertTrue(uploadCurrentBar != null);
                 assertTrue(transcriptionCurrentBar != null);
+                View uploadQueue = activity.findViewById(R.id.voicebutton_upload_queue);
+                View transcriptionQueue = activity.findViewById(R.id.voicebutton_transcription_queue);
+                assertTrue(uploadQueue != null);
+                assertTrue(transcriptionQueue != null);
+                assertTrue(uploadQueue.getVisibility() == View.VISIBLE);
+                assertTrue(transcriptionQueue.getVisibility() == View.VISIBLE);
+                assertTrue(uploadQueue.getParent() instanceof ScrollView);
+                assertTrue(transcriptionQueue.getParent() instanceof ScrollView);
+                assertTrue(((View) uploadQueue.getParent()).getLayoutParams().height
+                        == dp(activity, activity.getResources().getConfiguration().screenHeightDp < 520 ? 72 : 108));
+                assertTrue(((View) transcriptionQueue.getParent()).getLayoutParams().height
+                        == dp(activity, activity.getResources().getConfiguration().screenHeightDp < 520 ? 72 : 108));
                 assertTrue(backupBar.getVisibility() == View.GONE);
                 assertTrue(uploadCurrentBar.getVisibility() == View.GONE);
                 assertTrue(transcriptionCurrentBar.getVisibility() == View.GONE);

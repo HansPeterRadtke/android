@@ -114,6 +114,8 @@ public final class MainActivity extends Activity {
     private ProgressBar transcriptionCurrentProgressBar;
     private LinearLayout uploadQueueContainer;
     private LinearLayout transcriptionQueueContainer;
+    private ScrollView uploadQueueScroll;
+    private ScrollView transcriptionQueueScroll;
     private TextView currentText;
     private TextView routedText;
     private TextView durationText;
@@ -357,15 +359,28 @@ public final class MainActivity extends Activity {
                 AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
         root.addView(uploadCurrentProgressBar, uploadCurrentProgressParams);
 
+        TextView uploadQueueTitle = AndroidUi.text(this, "Uploads", 14, true, AndroidUi.INK);
+        uploadQueueTitle.setGravity(Gravity.START);
+        LinearLayout.LayoutParams uploadQueueTitleParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        uploadQueueTitleParams.setMargins(AndroidUi.dp(this, 18), 0,
+                AndroidUi.dp(this, 18), AndroidUi.dp(this, 3));
+        root.addView(uploadQueueTitle, uploadQueueTitleParams);
+
+        uploadQueueScroll = new ScrollView(this);
+        uploadQueueScroll.setFillViewport(true);
+        uploadQueueScroll.setVerticalScrollBarEnabled(true);
         uploadQueueContainer = new LinearLayout(this);
         uploadQueueContainer.setId(R.id.voicebutton_upload_queue);
         uploadQueueContainer.setOrientation(LinearLayout.VERTICAL);
-        uploadQueueContainer.setVisibility(View.GONE);
+        uploadQueueContainer.setMinimumHeight(AndroidUi.dp(this, compactHeight ? 72 : 108));
+        uploadQueueScroll.addView(uploadQueueContainer, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         LinearLayout.LayoutParams uploadQueueParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, compactHeight ? 72 : 108));
         uploadQueueParams.setMargins(AndroidUi.dp(this, 18), 0,
                 AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
-        root.addView(uploadQueueContainer, uploadQueueParams);
+        root.addView(uploadQueueScroll, uploadQueueParams);
 
         transcriptionSummaryText = AndroidUi.text(this,
                 "Transcription overall: checking…", 14, false, AndroidUi.INK);
@@ -414,15 +429,29 @@ public final class MainActivity extends Activity {
                 AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
         root.addView(transcriptionCurrentProgressBar, transcriptionCurrentProgressParams);
 
+        TextView transcriptionQueueTitle = AndroidUi.text(this,
+                "Transcription", 14, true, AndroidUi.INK);
+        transcriptionQueueTitle.setGravity(Gravity.START);
+        LinearLayout.LayoutParams transcriptionQueueTitleParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        transcriptionQueueTitleParams.setMargins(AndroidUi.dp(this, 18), 0,
+                AndroidUi.dp(this, 18), AndroidUi.dp(this, 3));
+        root.addView(transcriptionQueueTitle, transcriptionQueueTitleParams);
+
+        transcriptionQueueScroll = new ScrollView(this);
+        transcriptionQueueScroll.setFillViewport(true);
+        transcriptionQueueScroll.setVerticalScrollBarEnabled(true);
         transcriptionQueueContainer = new LinearLayout(this);
         transcriptionQueueContainer.setId(R.id.voicebutton_transcription_queue);
         transcriptionQueueContainer.setOrientation(LinearLayout.VERTICAL);
-        transcriptionQueueContainer.setVisibility(View.GONE);
+        transcriptionQueueContainer.setMinimumHeight(AndroidUi.dp(this, compactHeight ? 72 : 108));
+        transcriptionQueueScroll.addView(transcriptionQueueContainer, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         LinearLayout.LayoutParams transcriptionQueueParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, compactHeight ? 72 : 108));
         transcriptionQueueParams.setMargins(AndroidUi.dp(this, 18), 0,
                 AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
-        root.addView(transcriptionQueueContainer, transcriptionQueueParams);
+        root.addView(transcriptionQueueScroll, transcriptionQueueParams);
 
         // Legacy aggregate progress widgets remain addressable for compatibility tests,
         // but the main UI never renders aggregate historical percentages anymore.
@@ -1475,10 +1504,10 @@ public final class MainActivity extends Activity {
         List<ReliableSessionManifest> pending = OverviewProgress.pendingUploads(
                 snapshot.sessions, serverCommitted);
         if (pending.isEmpty()) {
-            uploadQueueContainer.setVisibility(View.GONE);
+            addOperationMessage(uploadQueueContainer, "No upload in progress", AndroidUi.MUTED);
+            uploadQueueContainer.setVisibility(View.VISIBLE);
             return;
         }
-        addOperationHeader(uploadQueueContainer, "Uploads");
         for (ReliableSessionManifest session : pending) {
             int permille = OverviewProgress.fileProgressPermille(session);
             boolean accepted = OverviewProgress.allSegmentsAccepted(session);
@@ -1542,7 +1571,6 @@ public final class MainActivity extends Activity {
                     " · last update " + formatStatusAge(age) + " ago", true);
         } else {
             transcriptionQueueContainer.removeAllViews();
-            addOperationHeader(transcriptionQueueContainer, "Transcription");
             addOperationMessage(transcriptionQueueContainer,
                     "Jetson transcription status unavailable · retrying", AndroidUi.ORANGE);
             transcriptionQueueContainer.setVisibility(View.VISIBLE);
@@ -1558,10 +1586,11 @@ public final class MainActivity extends Activity {
         transcriptionCurrentProgressBar.setVisibility(View.GONE);
         transcriptionQueueContainer.removeAllViews();
         if (value == null || value.pending.isEmpty()) {
-            transcriptionQueueContainer.setVisibility(View.GONE);
+            addOperationMessage(transcriptionQueueContainer,
+                    "No transcription in progress", AndroidUi.MUTED);
+            transcriptionQueueContainer.setVisibility(View.VISIBLE);
             return;
         }
-        addOperationHeader(transcriptionQueueContainer, "Transcription");
         for (ReliableUploadClient.CurrentTranscription item : value.pending) {
             String name = item.displayName == null || item.displayName.isEmpty()
                     ? item.sessionId : item.displayName;
@@ -1604,21 +1633,44 @@ public final class MainActivity extends Activity {
         row.setOrientation(LinearLayout.VERTICAL);
         String safeName = name == null || name.isEmpty() ? "Recording" : name;
         int bounded = Math.max(0, Math.min(1000, permille));
-        String progressText = indeterminate ? "" : " · " + (bounded / 10) + "%";
-        TextView label = AndroidUi.small(this, safeName + " — " + state + progressText);
-        label.setTextColor(failed ? AndroidUi.ORANGE : AndroidUi.INK);
-        label.setGravity(Gravity.START);
-        row.addView(label, new LinearLayout.LayoutParams(
+
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        TextView nameView = AndroidUi.small(this, safeName);
+        nameView.setSingleLine(true);
+        nameView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        nameView.setTextColor(failed ? AndroidUi.ORANGE : AndroidUi.INK);
+        top.addView(nameView, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView percentView = AndroidUi.small(this,
+                indeterminate ? "…" : ((bounded + 5) / 10) + "%");
+        percentView.setGravity(Gravity.END);
+        percentView.setTypeface(android.graphics.Typeface.MONOSPACE);
+        percentView.setMinWidth(AndroidUi.dp(this, 58));
+        percentView.setTextColor(failed ? AndroidUi.ORANGE : AndroidUi.INK);
+        top.addView(percentView, new LinearLayout.LayoutParams(
+                AndroidUi.dp(this, 58), ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.addView(top, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView stateView = AndroidUi.small(this, state == null ? "" : state);
+        stateView.setSingleLine(true);
+        stateView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        stateView.setTextColor(failed ? AndroidUi.ORANGE : AndroidUi.MUTED);
+        row.addView(stateView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         ProgressBar bar = new ProgressBar(this, null,
                 android.R.attr.progressBarStyleHorizontal);
         bar.setMax(1000);
         bar.setIndeterminate(indeterminate);
         if (!indeterminate) bar.setProgress(bounded);
-        bar.setContentDescription(label.getText());
+        bar.setContentDescription(safeName + " · " + state + " · "
+                + (indeterminate ? "progress unknown" : ((bounded + 5) / 10) + " percent"));
         LinearLayout.LayoutParams barParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 10));
-        barParams.setMargins(0, AndroidUi.dp(this, 2), 0, AndroidUi.dp(this, 8));
+        barParams.setMargins(0, AndroidUi.dp(this, 2), 0, AndroidUi.dp(this, 7));
         row.addView(bar, barParams);
         container.addView(row, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
