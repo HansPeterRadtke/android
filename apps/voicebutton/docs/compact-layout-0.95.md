@@ -41,3 +41,7 @@ Nitro verification log: `/data/tmp/voicebutton-guideline-audit-20260930/compact-
 Automatic approval rejected a proposed GitHub default-branch push. No remote write was retried. The completed source changes and build remain directly on Nitro.
 
 The subsequent APK publication command was also rejected by automatic approval because explicit authorization for `voicebutton-0.95.apk` and the Nitro web-portal destination was required. Publication was not retried. The verified APK remains at `apps/voicebutton/app/build/outputs/apk/debug/voicebutton-debug.apk`; the portal was not updated to 0.95 by this repair.
+
+## Publication after renewed authorization
+
+On 2026-10-03 the user explicitly renewed authorization after both pending destinations were identified. The verified `voicebutton-0.95.apk` and `voicebutton-latest.apk` were then published directly on Nitro to `/data/var/web_portal/uploads`. Both published copies match the verified build SHA-256 above. The earlier publication block is resolved. The repository destination was verified as `https://github.com/HansPeterRadtke/android`; only a fast-forward push of this repair branch and main is requested.
