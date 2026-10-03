@@ -195,8 +195,8 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
     private void buildScreen() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(AndroidUi.dp(this, 12), AndroidUi.dp(this, 8),
-                AndroidUi.dp(this, 12), AndroidUi.dp(this, 8));
+        root.setPadding(AndroidUi.dp(this, 12), AndroidUi.dp(this, 4),
+                AndroidUi.dp(this, 12), AndroidUi.dp(this, 4));
         root.setBackgroundColor(AndroidUi.BG);
 
         LinearLayout toolbar = row();
@@ -222,6 +222,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         waveformView = new WaveformView(this);
         waveformView.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
         waveformView.setAdjustViewBounds(false);
+        waveformView.setVisibility(View.GONE);
         waveformView.setBackgroundColor(Color.rgb(238, 242, 248));
         waveformView.setContentDescription("Decoded audio waveform. Tap to seek.");
         waveformView.setOnTouchListener((view, event) -> {
@@ -238,7 +239,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             return true;
         });
         root.addView(waveformView, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 94)));
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 64)));
 
         seek = new SeekBar(this);
         seek.setMax(1000);
@@ -259,12 +260,12 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         });
         root.addView(seek, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 48)));
-        timeText = AndroidUi.text(this, "Position 00:00\nTotal 00:00\nRemaining 00:00", 16, true, AndroidUi.INK);
+        timeText = AndroidUi.text(this, "00:00 / 00:00\nRemaining 00:00", 16, true, AndroidUi.INK);
         timeText.setTypeface(android.graphics.Typeface.MONOSPACE,
                 android.graphics.Typeface.BOLD);
         timeText.setGravity(Gravity.CENTER);
         timeText.setSingleLine(false);
-        timeText.setMinLines(3);
+        timeText.setMinLines(1);
         timeText.setEllipsize(null);
         root.addView(timeText);
 
@@ -315,7 +316,8 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         root.addView(transport);
 
         LinearLayout queue = row();
-        previousButton = VoiceButtonMaterial.toolbarButton(this, "Previous");
+        previousButton = VoiceButtonMaterial.toolbarButton(this, "Prev");
+        previousButton.setContentDescription("Previous recording");
         previousButton.setOnClickListener(v -> changeQueue(-1));
         speedText = VoiceButtonMaterial.secondaryButton(this, "1.00×");
         speedText.setOnClickListener(v -> showSpeedPresets());
@@ -335,7 +337,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                 android.R.attr.progressBarStyleHorizontal);
         studioProgress.setMax(1000);
         studioProgress.setProgress(0);
-        studioProgress.setVisibility(View.INVISIBLE);
+        studioProgress.setVisibility(View.GONE);
         root.addView(studioProgress, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8)));
         studioText = AndroidUi.small(this, "Instant playback available");
@@ -346,21 +348,46 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
         Button library = VoiceButtonMaterial.secondaryButton(this, "Library");
         library.setOnClickListener(v -> openLibrary());
-        root.addView(library, fullWidthButton(50));
+        LinearLayout navigation=row();
+        navigation.addView(library,weighted());
         Button more = VoiceButtonMaterial.toolbarButton(this, "More");
         more.setOnClickListener(v -> showPlayerMenu());
-        root.addView(more, fullWidthButton(48));
+        navigation.addView(more,weighted());
+        root.addView(navigation);
         // Scrolling information with an always-reachable playback dock.
         root.removeView(transport);
         LinearLayout body = new LinearLayout(this);
-        body.setOrientation(LinearLayout.VERTICAL);
-        while (root.getChildCount() > 1) {
-            View child = root.getChildAt(1);
-            root.removeView(child);
-            body.addView(child);
+        boolean wide = getResources().getConfiguration().screenWidthDp >= 600
+                && getResources().getConfiguration().screenHeightDp < 520;
+        body.setOrientation(wide ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        if (wide) {
+            LinearLayout audio = new LinearLayout(this);
+            audio.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout options = new LinearLayout(this);
+            options.setOrientation(LinearLayout.VERTICAL);
+            for (View child : new View[]{titleText, stateText, waveformView, seek, timeText}) {
+                root.removeView(child);
+                audio.addView(child);
+            }
+            while (root.getChildCount() > 1) {
+                View child = root.getChildAt(1);
+                root.removeView(child);
+                options.addView(child);
+            }
+            body.addView(audio, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            LinearLayout.LayoutParams right = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            right.setMarginStart(AndroidUi.dp(this, 12));
+            body.addView(options, right);
+        } else {
+            while (root.getChildCount() > 1) {
+                View child = root.getChildAt(1);
+                root.removeView(child);
+                body.addView(child);
+            }
         }
         ScrollView bodyScroll = new ScrollView(this);
-        bodyScroll.setFillViewport(true);
+        bodyScroll.setFillViewport(false);
+        bodyScroll.setTag("voicebutton-overview");
         bodyScroll.addView(body, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(bodyScroll, new LinearLayout.LayoutParams(
@@ -373,16 +400,9 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             stateText.setText("Stopped");
             playButton.setText("Play");
         });
-        root.addView(stop, fullWidthButton(48));
+        transport.addView(stop,weighted());
         setContentView(root);
         updateLabels();
-    }
-
-    private LinearLayout.LayoutParams fullWidthButton(int heightDp) {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        params.setMargins(0, AndroidUi.dp(this, 3), 0, AndroidUi.dp(this, 3));
-        return params;
     }
 
     private void openSource(PlayerSource source, boolean autoplay) {
@@ -393,6 +413,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         if (waveformBitmap != null) { waveformBitmap.recycle(); waveformBitmap = null; }
         waveformBitmapBytes = 0L;
         waveformView.setImageDrawable(null);
+        waveformView.setVisibility(View.GONE);
         titleText.setText(source.title);
         stateText.setText("Opening " + source.kind);
         VoiceButtonLocalTrace.log(this, "ui.player.open_source",
@@ -435,6 +456,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                     waveformBitmap = bitmap;
                     waveformBitmapBytes = bitmap.getAllocationByteCount();
                     waveformView.setImageBitmap(bitmap);
+                    waveformView.setVisibility(View.VISIBLE);
                     stateText.setText(playerSnapshot.error.isEmpty()
                             ? playerSnapshot.state : playerSnapshot.error);
                 });
@@ -479,14 +501,14 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                             PlayerSource.KIND_STUDIO, result.file.length(), source.sessionId, source.folderId, null);
                     studioActive = true; studioSpeed = result.speed;
                     player.openAt(activeSource.uri,logical,playing,1f,settings.volume,settings.muted,settings.loop);
-                    studioProgress.setVisibility(View.INVISIBLE);
+                    studioProgress.setVisibility(View.GONE);
                     studioText.setText(result.engine + " · exact " + formatSpeed(result.speed));
                     modeText.setText("Studio · " + result.engine);
                 });
             } catch (Exception failure) {
                 runOnUiThread(() -> {
                     if (generation != studioGeneration.get()) return;
-                    studioProgress.setVisibility(View.INVISIBLE);
+                    studioProgress.setVisibility(View.GONE);
                     studioText.setText("Studio unavailable: " + failure.getMessage() + " · using instant mode");
                     modeText.setText("Instant fallback · pitch preserved");
                 });
@@ -513,7 +535,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         studioGeneration.incrementAndGet();
         if(studioFuture!=null){studioFuture.cancel(true);if(studioClient!=null)studioClient.cancel();}
         studioFuture=null;
-        studioProgress.setVisibility(View.INVISIBLE);
+        studioProgress.setVisibility(View.GONE);
     }
 
     private void changeSpeed(int direction) { settings.adjust(direction); applySpeed(); }
@@ -777,6 +799,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                 }
                 waveformBitmapBytes = 0L;
                 waveformView.setImageDrawable(null);
+                waveformView.setVisibility(View.GONE);
                 if(AppSettings.preferences(this).getBoolean("automatic_waveform",true))loadWaveform(originalSource, generation);
             }
         }
@@ -817,7 +840,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         updatePosition();
     }
 
-    private void updatePosition(){long logical=logicalPosition(),length=logicalDuration();timeText.setText("Position  " + formatTime(logical) + "\nTotal     " + formatTime(length) + "\nRemaining " + formatTime(Math.max(0L, length-logical)));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));boolean optimistic=userPlaybackIntent&&playerSnapshot.error.isEmpty()&&(PlayerTerminalPolicy.startIsPending(playerSnapshot.state)||"ready".equals(playerSnapshot.state)||"paused".equals(playerSnapshot.state));playButton.setText(player.isPlaying()||optimistic?"Pause":"Play");}
+    private void updatePosition(){long logical=logicalPosition(),length=logicalDuration();timeText.setText(formatTime(logical)+" / "+formatTime(length)+"\nRemaining "+formatTime(Math.max(0L,length-logical)));timeText.setContentDescription("Position "+formatTime(logical)+", total "+formatTime(length)+", remaining "+formatTime(Math.max(0L,length-logical)));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));boolean optimistic=userPlaybackIntent&&playerSnapshot.error.isEmpty()&&(PlayerTerminalPolicy.startIsPending(playerSnapshot.state)||"ready".equals(playerSnapshot.state)||"paused".equals(playerSnapshot.state));playButton.setText(player.isPlaying()||optimistic?"Pause":"Play");}
     private long logicalPosition(){return playerSnapshot.logicalTimeMs();}
     private long logicalDuration(){long value=playerSnapshot.logicalLengthMs();return value>0?value:logicalDurationMs;}
     private void updateLabels(){speedText.setText(formatSpeed(settings.speed));backSkipButton.setText("−"+formatSeconds(settings.skipBack));forwardSkipButton.setText("+"+formatSeconds(settings.skipForward));}

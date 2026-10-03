@@ -2,7 +2,7 @@
 
 Version 0.16 replaces the old MP3-only platform player with LibVLC 3.7.0. LibVLC streams the selected URI and provides broad codec and container support, pitch-preserving instant speed, seeking, volume, media-session controls and local document playback. The application does not claim that every malformed or proprietary file can be decoded; every regular file selected through Android's Storage Access Framework is offered to LibVLC and decode failure is reported without changing the source.
 
-Back, Home, skip, Play/Pause and Stop remain reachable outside the scrolling details region. The full title, state, waveform, seek position, Position/Total/Remaining clock, queue controls and settings scroll when the viewport or font size requires it. See GUI_CONTRACT.md for the current screen contract.
+Back, Home, skip, Play/Pause and Stop remain reachable outside the scrolling details region. The body uses two columns in landscape; Stop shares the transport row and Library/More share a navigation row. An absent waveform and inactive Studio progress occupy no space. Position and total share one clock line with remaining time beneath it. Normal phone overviews fit without scrolling; unusually long titles or a constrained accessibility window can scroll. See GUI_CONTRACT.md for the current screen contract.
 
 Speed parameters persist across launches. The configurable range is bounded by the Thor contract at 0.25x to 8.00x. Speed step is configurable from 0.01 to 1.00. Backward and forward skip values are independently configurable from 0.1 to 3600 seconds. Presets, volume, mute, loop, autoplay and sleep timer are configurable.
 

@@ -55,9 +55,10 @@ public class MainActivityUiTest {
             awaitText(R.id.voicebutton_status_title, "Ready to record");
             scenario.onActivity(activity->{
                 for(int id:new int[]{R.id.voicebutton_upload_queue,R.id.voicebutton_transcription_queue}){
-                    View queue=activity.findViewById(id);assertTrue(queue instanceof android.widget.ListView);assertTrue(queue.getVisibility()==View.VISIBLE);
-                    assertTrue(((android.widget.ListView)queue).getAdapter().getCount()>0);
-                    assertTrue(queue.getLayoutParams().height==dp(activity,activity.getResources().getConfiguration().screenHeightDp<520?72:108));
+                    View queue=activity.findViewById(id);assertTrue(queue instanceof android.widget.ListView);
+                    int count=((android.widget.ListView)queue).getAdapter().getCount();
+                    assertTrue(queue.getVisibility()==(count==0?View.GONE:View.VISIBLE));
+                    if(count==0)assertTrue(queue.getMeasuredHeight()==0||queue.getVisibility()==View.GONE);
                 }
             });
             onView(withId(R.id.voicebutton_primary)).check(matches(isDisplayed()));

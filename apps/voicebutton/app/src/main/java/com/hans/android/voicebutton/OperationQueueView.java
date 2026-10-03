@@ -19,6 +19,7 @@ final class OperationQueueView extends ListView {
     private final List<Row> pending = new ArrayList<>();
     private List<Row> rows = new ArrayList<>();
     private final Rows adapter = new Rows();
+    private View measuringRow;
 
     // ListView handles item clicks and accessibility; this listener only arbitrates nested scrolling.
     @android.annotation.SuppressLint("ClickableViewAccessibility")
@@ -26,6 +27,8 @@ final class OperationQueueView extends ListView {
         super(context);
         setAdapter(adapter);
         setDivider(null);
+        setVisibility(GONE);
+        setScrollbarFadingEnabled(false);
         setNestedScrollingEnabled(true);
         setOnItemClickListener((parent, view, position, id) -> {
             Row row = rows.get(position);
@@ -52,8 +55,19 @@ final class OperationQueueView extends ListView {
     void commitUpdate() {
         if (!rows.equals(pending)) {
             rows = new ArrayList<>(pending);
-            adapter.notifyDataSetChanged();
+            setVisibility(rows.isEmpty()?GONE:VISIBLE);
+            adapter.notifyDataSetChanged();requestLayout();
         }
+    }
+
+    @Override protected void onMeasure(int widthSpec,int heightSpec) {
+        if(rows.isEmpty()){setMeasuredDimension(MeasureSpec.getSize(widthSpec),0);return;}
+        int width=Math.max(0,MeasureSpec.getSize(widthSpec)-getPaddingLeft()-getPaddingRight());
+        measuringRow=adapter.getView(0,measuringRow,this);
+        measuringRow.measure(MeasureSpec.makeMeasureSpec(width,MeasureSpec.EXACTLY),MeasureSpec.makeMeasureSpec(0,MeasureSpec.UNSPECIFIED));
+        int height=Math.max(AndroidUi.dp(getContext(),48),measuringRow.getMeasuredHeight());
+        if(MeasureSpec.getMode(heightSpec)!=MeasureSpec.UNSPECIFIED)height=Math.min(height,MeasureSpec.getSize(heightSpec));
+        super.onMeasure(widthSpec,MeasureSpec.makeMeasureSpec(height,MeasureSpec.EXACTLY));
     }
 
     private final class Rows extends BaseAdapter {
@@ -99,8 +113,8 @@ final class OperationQueueView extends ListView {
             progress.setMax(1000);
             box.addView(name);
             box.addView(state);
-            box.addView(progress, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(getContext(), 10)));
-            box.setPadding(0, 0, 0, AndroidUi.dp(getContext(), 7));
+            box.addView(progress, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(getContext(), 8)));
+            box.setPadding(0, 0, 0, AndroidUi.dp(getContext(), 2));
         }
     }
     private static final class Row {

@@ -45,6 +45,11 @@ public class GuidelineRegressionTest {
             capture(MainActivity.class,"main-"+state+"-"+size[0]+"x"+size[1]+"-font200",size[0],size[1],2f);
         capture(MainActivity.class,"main-queue-393x803-font200",393,803,2f);
         capture(PlayerActivity.class,"player-long-title-393x803-font200",393,803,2f);
+        capture(MainActivity.class,"main-360x640-font100",360,640,1f);
+        capture(MainActivity.class,"main-recording-360x640-font100",360,640,1f);
+        for(int[] size:new int[][]{{393,803},{803,345}})for(float scale:new float[]{1f,2f})
+            capture(PlayerActivity.class,"player-loaded-"+size[0]+"x"+size[1]+"-font"+(int)(scale*100),size[0],size[1],scale);
+        capture(PlayerActivity.class,"player-loaded-360x640-font100",360,640,1f);
     }
     @Test public void renderSettingsAndMenus() throws Exception {
         for(int[] size:new int[][]{{393,803},{803,345}})for(float font:new float[]{1f,2f}) {
@@ -137,6 +142,12 @@ public class GuidelineRegressionTest {
             }
             apply.invoke(a,status,null);apply.invoke(a,null,new IOException("synthetic offline test"));
         }
+        if(name.contains("-loaded-")) {
+            Field f=type.getDeclaredField("waveformView");f.setAccessible(true);((View)f.get(a)).setVisibility(View.VISIBLE);
+            f=type.getDeclaredField("titleText");f.setAccessible(true);((TextView)f.get(a)).setText("Recording.mp3");
+            f=type.getDeclaredField("stateText");f.setAccessible(true);((TextView)f.get(a)).setText("Playing");
+            f=type.getDeclaredField("timeText");f.setAccessible(true);((TextView)f.get(a)).setText("12:34 / 30:00\nRemaining 17:26");
+        }
         if(name.contains("-long-title-")){
             Field f=type.getDeclaredField("titleText");f.setAccessible(true);((TextView)f.get(a)).setText("Recording a long technical discussion about the application guidelines, durability requirements, microphone routing and playback controls that must remain visible.mp3");
         }
@@ -176,12 +187,17 @@ public class GuidelineRegressionTest {
                 }
             }
         }
+        ScrollView overview=root.findViewWithTag("voicebutton-overview");
+        int contentHeight=overview==null?0:overview.getChildAt(0).getMeasuredHeight();
+        int viewportHeightMeasured=overview==null?0:overview.getHeight()-overview.getPaddingTop()-overview.getPaddingBottom();
         Bitmap b=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888);
         root.draw(new Canvas(b));
         try(FileOutputStream out=new FileOutputStream(new File(OUT,name+".png"))){b.compress(Bitmap.CompressFormat.PNG,100,out);}b.recycle();
         JSONArray nodes=new JSONArray();survey(root,0,0,width,height,false,nodes);
-        JSONObject report=new JSONObject().put("name",name).put("widthDp",width).put("heightDp",height).put("fontScale",font).put("nodes",nodes);
+        JSONObject report=new JSONObject().put("name",name).put("widthDp",width).put("heightDp",height).put("fontScale",font).put("contentHeight",contentHeight).put("viewportHeight",viewportHeightMeasured).put("scrollOverflow",Math.max(0,contentHeight-viewportHeightMeasured)).put("nodes",nodes);
         try(FileWriter out=new FileWriter(new File(OUT,name+".json"))){out.write(report.toString(2));}
+        if(dialog==null&&overview!=null&&(height>=640||font==1f)&&!name.contains("-long-title-"))
+            org.junit.Assert.assertTrue(name+": overview wastes space and scrolls: content="+contentHeight+", viewport="+viewportHeightMeasured,contentHeight<=viewportHeightMeasured);
         System.out.println("GUI_CASE "+name);
         for(int i=0;i<nodes.length();i++) {
             JSONObject node=nodes.getJSONObject(i);

@@ -282,8 +282,8 @@ public final class MainActivity extends Activity {
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(AndroidUi.dp(this, 10), AndroidUi.dp(this, compactHeight ? 2 : 8),
-                AndroidUi.dp(this, 8), AndroidUi.dp(this, compactHeight ? 2 : 6));
+        header.setPadding(AndroidUi.dp(this, 10), AndroidUi.dp(this, 2),
+                AndroidUi.dp(this, 8), AndroidUi.dp(this, 2));
 
         secondaryButton = materialDangerButton("Finish");
         secondaryButton.setId(R.id.voicebutton_finish);
@@ -315,12 +315,12 @@ public final class MainActivity extends Activity {
         transferText.setId(R.id.voicebutton_backup_text);
         AndroidUi.readableLine(this, transferText, 0, compactHeight ? 1 : 3);
         transferText.setTextSize(compactHeight ? 12 : 14);
-        transferText.setGravity(Gravity.CENTER);
+        transferText.setGravity(Gravity.START);
         transferText.setVisibility(View.GONE);
         LinearLayout.LayoutParams backupParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        backupParams.setMargins(AndroidUi.dp(this, 18), 0,
-                AndroidUi.dp(this, 18), AndroidUi.dp(this, 4));
+        backupParams.setMargins(0, 0,
+                0, AndroidUi.dp(this, 4));
         root.addView(transferText, backupParams);
 
         serverHealthText = AndroidUi.small(this, "");
@@ -332,9 +332,9 @@ public final class MainActivity extends Activity {
         progressBar.setContentDescription("Backup progress");
         progressBar.setVisibility(View.GONE);
         LinearLayout.LayoutParams uploadProgressParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 10));
-        uploadProgressParams.setMargins(AndroidUi.dp(this, 18), 0,
-                AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8));
+        uploadProgressParams.setMargins(0, 0,
+                0, AndroidUi.dp(this, 8));
         root.addView(progressBar, uploadProgressParams);
         uploadCurrentText = AndroidUi.small(this, "Upload current file: none");
         uploadCurrentText.setId(R.id.voicebutton_upload_current);
@@ -342,8 +342,8 @@ public final class MainActivity extends Activity {
         uploadCurrentText.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams uploadCurrentParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        uploadCurrentParams.setMargins(AndroidUi.dp(this, 18), 0,
-                AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
+        uploadCurrentParams.setMargins(0, 0,
+                0, AndroidUi.dp(this, 8));
         root.addView(uploadCurrentText, uploadCurrentParams);
 
         uploadCurrentProgressBar = new ProgressBar(this, null,
@@ -355,35 +355,27 @@ public final class MainActivity extends Activity {
         uploadCurrentProgressBar.setContentDescription("Current upload file progress");
         LinearLayout.LayoutParams uploadCurrentProgressParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 10));
-        uploadCurrentProgressParams.setMargins(AndroidUi.dp(this, 18), 0,
-                AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
+        uploadCurrentProgressParams.setMargins(0, 0,
+                0, AndroidUi.dp(this, 8));
         root.addView(uploadCurrentProgressBar, uploadCurrentProgressParams);
-
-        TextView uploadQueueTitle = AndroidUi.text(this, "Uploads", 14, true, AndroidUi.INK);
-        uploadQueueTitle.setGravity(Gravity.START);
-        LinearLayout.LayoutParams uploadQueueTitleParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        uploadQueueTitleParams.setMargins(AndroidUi.dp(this, 18), 0,
-                AndroidUi.dp(this, 18), AndroidUi.dp(this, 3));
-        root.addView(uploadQueueTitle, uploadQueueTitleParams);
 
         uploadQueueContainer = new OperationQueueView(this);
         uploadQueueContainer.setId(R.id.voicebutton_upload_queue);
         LinearLayout.LayoutParams uploadQueueParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, compactHeight ? 72 : 108));
-        uploadQueueParams.setMargins(AndroidUi.dp(this, 18), 0,
-                AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        uploadQueueParams.setMargins(0, 0,
+                0, AndroidUi.dp(this, 8));
         root.addView(uploadQueueContainer, uploadQueueParams);
 
         transcriptionSummaryText = AndroidUi.text(this,
                 "Transcription overall: checking…", 14, false, AndroidUi.INK);
         transcriptionSummaryText.setId(R.id.voicebutton_transcription_summary);
         AndroidUi.readableLine(this, transcriptionSummaryText, 0, 2);
-        transcriptionSummaryText.setGravity(Gravity.CENTER);
+        transcriptionSummaryText.setGravity(Gravity.START);
         LinearLayout.LayoutParams transcriptionSummaryParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        transcriptionSummaryParams.setMargins(AndroidUi.dp(this, 18), 0,
-                AndroidUi.dp(this, 18), AndroidUi.dp(this, 4));
+        transcriptionSummaryParams.setMargins(0, 0,
+                0, AndroidUi.dp(this, 4));
         root.addView(transcriptionSummaryText, transcriptionSummaryParams);
 
         transcriptionProgressBar = new ProgressBar(this, null,
@@ -393,9 +385,9 @@ public final class MainActivity extends Activity {
         transcriptionProgressBar.setIndeterminate(true);
         transcriptionProgressBar.setContentDescription("Transcription overall progress");
         LinearLayout.LayoutParams transcriptionProgressParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 10));
-        transcriptionProgressParams.setMargins(AndroidUi.dp(this, 18), 0,
-                AndroidUi.dp(this, 18), AndroidUi.dp(this, 4));
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8));
+        transcriptionProgressParams.setMargins(0, 0,
+                0, AndroidUi.dp(this, 4));
         root.addView(transcriptionProgressBar, transcriptionProgressParams);
 
         transcriptionCurrentText = AndroidUi.small(this,
@@ -405,8 +397,8 @@ public final class MainActivity extends Activity {
         transcriptionCurrentText.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams transcriptionCurrentParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        transcriptionCurrentParams.setMargins(AndroidUi.dp(this, 18), 0,
-                AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
+        transcriptionCurrentParams.setMargins(0, 0,
+                0, AndroidUi.dp(this, 8));
         root.addView(transcriptionCurrentText, transcriptionCurrentParams);
 
         transcriptionCurrentProgressBar = new ProgressBar(this, null,
@@ -418,25 +410,16 @@ public final class MainActivity extends Activity {
         transcriptionCurrentProgressBar.setContentDescription("Current transcription file progress");
         LinearLayout.LayoutParams transcriptionCurrentProgressParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 10));
-        transcriptionCurrentProgressParams.setMargins(AndroidUi.dp(this, 18), 0,
-                AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
+        transcriptionCurrentProgressParams.setMargins(0, 0,
+                0, AndroidUi.dp(this, 8));
         root.addView(transcriptionCurrentProgressBar, transcriptionCurrentProgressParams);
-
-        TextView transcriptionQueueTitle = AndroidUi.text(this,
-                "Transcription", 14, true, AndroidUi.INK);
-        transcriptionQueueTitle.setGravity(Gravity.START);
-        LinearLayout.LayoutParams transcriptionQueueTitleParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        transcriptionQueueTitleParams.setMargins(AndroidUi.dp(this, 18), 0,
-                AndroidUi.dp(this, 18), AndroidUi.dp(this, 3));
-        root.addView(transcriptionQueueTitle, transcriptionQueueTitleParams);
 
         transcriptionQueueContainer = new OperationQueueView(this);
         transcriptionQueueContainer.setId(R.id.voicebutton_transcription_queue);
         LinearLayout.LayoutParams transcriptionQueueParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, compactHeight ? 72 : 108));
-        transcriptionQueueParams.setMargins(AndroidUi.dp(this, 18), 0,
-                AndroidUi.dp(this, 18), AndroidUi.dp(this, 8));
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        transcriptionQueueParams.setMargins(0, 0,
+                0, AndroidUi.dp(this, 8));
         root.addView(transcriptionQueueContainer, transcriptionQueueParams);
 
         // Overall progress and per-file queue rows answer different questions.
@@ -461,25 +444,25 @@ public final class MainActivity extends Activity {
         statusCard = new LinearLayout(this);
         statusCard.setOrientation(LinearLayout.VERTICAL);
         statusCard.setGravity(Gravity.CENTER_HORIZONTAL);
-        statusCard.setPadding(0, AndroidUi.dp(this, compactHeight ? 1 : 8),
-                0, AndroidUi.dp(this, compactHeight ? 1 : 8));
+        statusCard.setPadding(0, AndroidUi.dp(this, 2),
+                0, AndroidUi.dp(this, 2));
 
         statusTitle = AndroidUi.text(this, "Ready to record",
-                compactHeight ? 22 : 32, true, AndroidUi.GREEN);
+                22, true, AndroidUi.GREEN);
         statusTitle.setId(R.id.voicebutton_status_title);
         statusTitle.setGravity(Gravity.CENTER);
-        AndroidUi.readableLine(this, statusTitle, compactHeight ? 44 : 56,
+        AndroidUi.readableLine(this, statusTitle, 0,
                 compactHeight ? 2 : 3);
         statusCard.addView(statusTitle, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         durationText = AndroidUi.text(this, "00:00:00",
-                compactHeight ? 34 : 54, true, AndroidUi.INK);
+                32, true, AndroidUi.INK);
         durationText.setId(R.id.voicebutton_duration);
         durationText.setTypeface(android.graphics.Typeface.MONOSPACE,
                 android.graphics.Typeface.BOLD);
         durationText.setGravity(Gravity.CENTER);
-        durationText.setMinHeight(AndroidUi.dp(this, compactHeight ? 54 : 88));
+        durationText.setMinHeight(0);
         durationText.setVisibility(View.GONE);
         statusCard.addView(durationText);
 
@@ -528,12 +511,7 @@ public final class MainActivity extends Activity {
         setupContainer = new LinearLayout(this);
         setupContainer.setId(R.id.voicebutton_setup);
         setupContainer.setOrientation(LinearLayout.VERTICAL);
-        setupContainer.setPadding(0, AndroidUi.dp(this, 32), 0, 0);
-        TextView setupLabel = AndroidUi.small(this, "Next recording");
-        setupLabel.setGravity(Gravity.CENTER);
-        AndroidUi.readableLine(this, setupLabel, 28, 2);
-        setupContainer.addView(setupLabel);
-
+        setupContainer.setPadding(0, AndroidUi.dp(this, 4), 0, 0);
         folderButton = materialSecondaryButton("Folder: Default");
         folderButton.setSingleLine(false);
         folderButton.setMaxLines(2);
@@ -548,8 +526,8 @@ public final class MainActivity extends Activity {
         inputButton.setContentDescription("Choose recording microphone");
         inputButton.setOnClickListener(v -> showInputPicker());
 
-        setupContainer.addView(folderButton, flexibleButtonParams(4));
-        setupContainer.addView(inputButton, flexibleButtonParams(4));
+        setupContainer.addView(folderButton, flexibleButtonParams(0));
+        setupContainer.addView(inputButton, flexibleButtonParams(0));
         content.addView(setupContainer, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(scroll, new LinearLayout.LayoutParams(
@@ -557,8 +535,8 @@ public final class MainActivity extends Activity {
 
         LinearLayout actionArea = new LinearLayout(this);
         actionArea.setOrientation(LinearLayout.VERTICAL);
-        actionArea.setPadding(AndroidUi.dp(this, 12), AndroidUi.dp(this, compactHeight ? 2 : 8),
-                AndroidUi.dp(this, 12), AndroidUi.dp(this, compactHeight ? 4 : 12));
+        actionArea.setPadding(AndroidUi.dp(this, 12), AndroidUi.dp(this, 2),
+                AndroidUi.dp(this, 12), AndroidUi.dp(this, 4));
         actionArea.setBackgroundColor(AndroidUi.SURFACE);
         actionArea.setElevation(AndroidUi.dp(this, 8));
 
@@ -571,32 +549,39 @@ public final class MainActivity extends Activity {
 
         primaryButton = materialPrimaryButton("Start recording");
         primaryButton.setId(R.id.voicebutton_primary);
-        primaryButton.setMinHeight(AndroidUi.dp(this, compactHeight ? 52 : 68));
+        primaryButton.setMinHeight(AndroidUi.dp(this, 56));
         primaryButton.setTextSize(19);
         primaryButton.setContentDescription("Start recording");
         primaryButton.setOnClickListener(v -> primaryAction());
         actionArea.addView(primaryButton, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        // Keep only the toolbar and action dock fixed. All informational content
-        // can scroll within the measured window, including large-font landscape.
-        LinearLayout information = new LinearLayout(this);
-        information.setOrientation(LinearLayout.VERTICAL);
+        // Compact overview first; scrolling is only an accessibility fallback.
         root.removeView(statusCard);
-        information.addView(statusCard);
         root.removeView(scroll);
         content.removeView(setupContainer);
+        LinearLayout transfers = new LinearLayout(this);
+        transfers.setOrientation(LinearLayout.VERTICAL);
         while (root.getChildCount() > 1) {
-            View child = root.getChildAt(1);
-            root.removeView(child);
-            information.addView(child);
+            View child=root.getChildAt(1);root.removeView(child);transfers.addView(child);
         }
-        information.addView(setupContainer);
-        ScrollView informationScroll = new ScrollView(this);
-        informationScroll.setFillViewport(true);
-        informationScroll.addView(information, new ScrollView.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        root.addView(informationScroll, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        LinearLayout information=new LinearLayout(this);
+        boolean wide=getResources().getConfiguration().screenWidthDp>=600&&compactHeight;
+        information.setOrientation(wide?LinearLayout.HORIZONTAL:LinearLayout.VERTICAL);
+        if(wide) {
+            LinearLayout recording=new LinearLayout(this);recording.setOrientation(LinearLayout.VERTICAL);
+            recording.addView(statusCard);recording.addView(setupContainer);
+            information.addView(recording,new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f));
+            LinearLayout.LayoutParams right=new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f);
+            right.setMarginStart(AndroidUi.dp(this,12));information.addView(transfers,right);
+        } else {
+            information.addView(statusCard);information.addView(transfers);information.addView(setupContainer);
+        }
+        ScrollView informationScroll=new ScrollView(this);
+        informationScroll.setTag("voicebutton-overview");
+        informationScroll.setPadding(AndroidUi.dp(this,12),0,AndroidUi.dp(this,12),0);
+        informationScroll.setFillViewport(false);
+        informationScroll.addView(information,new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(informationScroll,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,0,1f));
         root.addView(actionArea);
 
         setContentView(root);
@@ -1524,7 +1509,7 @@ public final class MainActivity extends Activity {
         int remaining=OverviewProgress.uploadFilesRemaining(snapshot.sessions);
         boolean unknown=OverviewProgress.hasUnmeasuredUpload(snapshot.sessions);
         int overall=remaining==0?1000:snapshot.uploadProgressPermille;
-        transferText.setText("Uploads · "+(unknown?"preparing":((overall+5)/10)+"%")+" · "+remaining+" recordings remaining");
+        transferText.setText("Uploads · "+(unknown?"preparing":((overall+5)/10)+"%")+" · "+remaining+" pending");
         progressBar.setIndeterminate(unknown);
         if(!unknown)progressBar.setProgress(overall);
         uploadCurrentText.setVisibility(View.GONE);
@@ -1534,12 +1519,11 @@ public final class MainActivity extends Activity {
         // The durable local ledger, not an unrelated status list, owns completion.
         java.util.Set<String> serverCommitted = java.util.Collections.emptySet();
         java.util.HashSet<String> rendered = new java.util.HashSet<>();
-        boolean any = false;
-        if(!AppSettings.uploadPermitted(this)) {
-            addOperationMessage(uploadQueueContainer,"Automatic upload is off. Recordings stay on this phone. Use More → Send pending recordings.",AndroidUi.MUTED);any=true;
-        }
         if("waiting_quarantined_recordings".equals(snapshot.liveUploadOperation)||"session_quarantined".equals(snapshot.liveUploadOperation)) {
-            addOperationMessage(uploadQueueContainer,"Backup incomplete: unreadable recordings need recovery. Open Library, retain local audio and retry synchronization.",AndroidUi.ORANGE);any=true;
+            addOperationMessage(uploadQueueContainer,"Backup incomplete · recovery needed in Library. Keep local audio.",AndroidUi.ORANGE);
+        }
+        if(!AppSettings.uploadPermitted(this)) {
+            addOperationMessage(uploadQueueContainer,"Upload off · saved on phone. More → Send pending recordings.",AndroidUi.MUTED);
         }
 
         // Start showing the upload pipeline as soon as recording stops, before the
@@ -1588,7 +1572,6 @@ public final class MainActivity extends Activity {
             addOperationRow(uploadQueueContainer, name, state,
                     permille, indeterminate, false);
             rendered.add(activeSessionId);
-            any = true;
         }
 
         List<ReliableSessionManifest> pending = OverviewProgress.pendingUploads(
@@ -1606,11 +1589,6 @@ public final class MainActivity extends Activity {
             if (accepted && !session.remoteCommitted) permille = 1000;
             addOperationRow(uploadQueueContainer, OverviewProgress.fileName(session),
                     state, permille, indeterminate, false);
-            any = true;
-        }
-        if (!any) {
-            addOperationMessage(uploadQueueContainer,
-                    "No upload in progress", AndroidUi.MUTED);
         }
         uploadQueueContainer.commitUpdate();
     }
@@ -1655,16 +1633,15 @@ public final class MainActivity extends Activity {
         serverHealthText.setVisibility(View.GONE);
         if (hasSuccess) {
             renderTranscriptionOperations(lastTranscriptionStatus,
-                    " · last update " + formatStatusAge(age) + " ago", true);
+                    " · " + formatStatusAge(age) + " old", true);
         } else {
             transcriptionQueueContainer.beginUpdate();
             transcriptionSummaryText.setVisibility(View.VISIBLE);
             transcriptionSummaryText.setMaxLines(Integer.MAX_VALUE);
-            transcriptionSummaryText.setText("Transcription status unavailable; check Internet or retry synchronization");
+            transcriptionSummaryText.setText("Transcription · unavailable\nCheck Internet · More → Retry synchronization");
             transcriptionProgressBar.setVisibility(View.VISIBLE);
             transcriptionProgressBar.setIndeterminate(true);
-            addOperationMessage(transcriptionQueueContainer,
-                    "Transcription status unavailable. Recording stays on this phone. Retrying automatically; check Internet or use More → Retry synchronization.", AndroidUi.ORANGE);
+            transcriptionSummaryText.setTextColor(AndroidUi.ORANGE);
             transcriptionQueueContainer.commitUpdate();
         }
     }
@@ -1678,17 +1655,14 @@ public final class MainActivity extends Activity {
         boolean unknown=value==null;
         int overall=unknown?0:(value.notTranscribedCount==0?100:value.overallPercent);
         transcriptionSummaryText.setText(unknown?"Transcription status unavailable":
-                (stale?"Last-known transcription · ":"Transcription · ")+overall+"% · "+value.notTranscribedCount+" recordings remaining"+(stale?staleSuffix:""));
+                "Transcription · "+overall+"% · "+value.notTranscribedCount+" pending"+(stale?"\nLast known"+staleSuffix+" · Retry in More":""));
+        transcriptionSummaryText.setTextColor(stale?AndroidUi.ORANGE:AndroidUi.INK);
         transcriptionProgressBar.setIndeterminate(unknown||stale);
         if(!unknown&&!stale)transcriptionProgressBar.setProgress(overall*10);
         transcriptionCurrentText.setVisibility(View.GONE);
         transcriptionCurrentProgressBar.setVisibility(View.GONE);
         transcriptionQueueContainer.beginUpdate();
         if (value == null || value.pending.isEmpty()) {
-            addOperationMessage(transcriptionQueueContainer,
-                    stale ? "Last known: no transcription in progress" + staleSuffix
-                            + ". Cannot refresh; check Internet or use More → Retry synchronization."
-                            : "No transcription in progress", stale ? AndroidUi.ORANGE : AndroidUi.MUTED);
             transcriptionQueueContainer.commitUpdate();
             return;
         }
@@ -1712,7 +1686,7 @@ public final class MainActivity extends Activity {
             else if (failed) label = "Transcription failed; audio retained. Use More → Transcribe uploaded recordings to retry.";
             else if ("MANUAL".equals(state)) label = "Automatic transcription is off. Use More → Transcribe uploaded recordings.";
             else label = "Waiting for transcription";
-            if (stale && staleSuffix != null && !staleSuffix.isEmpty()) label += staleSuffix;
+            // Snapshot age is already shown once in the section summary.
             addOperationRow(transcriptionQueueContainer, name, label,
                     permille, indeterminate, failed);
         }
