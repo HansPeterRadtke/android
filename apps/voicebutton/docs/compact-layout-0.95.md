@@ -39,3 +39,5 @@ APK: 205056525 bytes; SHA-256 `b190fc73f9bcabf0418289d1ecdeae8b8f72f7984d46f2b62
 Nitro verification log: `/data/tmp/voicebutton-guideline-audit-20260930/compact-095-final.log`. Aggregated evidence: `release-095-verification.json`; rendered evidence archive: `verified-layouts-095.zip`, in the same directory.
 
 Automatic approval rejected a proposed GitHub default-branch push. No remote write was retried. The completed source changes and build remain directly on Nitro.
+
+The subsequent APK publication command was also rejected by automatic approval because explicit authorization for `voicebutton-0.95.apk` and the Nitro web-portal destination was required. Publication was not retried. The verified APK remains at `apps/voicebutton/app/build/outputs/apk/debug/voicebutton-debug.apk`; the portal was not updated to 0.95 by this repair.
