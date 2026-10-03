@@ -131,10 +131,13 @@ public final class AndroidUi {
 
     public static Button modeButton(Context c, String text, boolean selected) {
         Button b = button(c, text);
+        b.setSingleLine(false);
+        b.setEllipsize(null);
+        b.setMinHeight(dp(c, 48));
         b.setTextColor(selected ? Color.WHITE : BLUE);
         GradientDrawable g = round(selected ? BLUE : Color.WHITE, selected ? BLUE : Color.rgb(205, 214, 225), dp(c, 18));
         b.setBackground(g);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(c, 44), 1);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
         lp.setMargins(dp(c, 3), dp(c, 6), dp(c, 3), dp(c, 6));
         b.setLayoutParams(lp);
         return b;

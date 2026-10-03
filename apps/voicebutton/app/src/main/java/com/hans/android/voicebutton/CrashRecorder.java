@@ -80,13 +80,21 @@ final class CrashRecorder {
                 }
             }
             out.flush();
-            byte[] bytes = buffer.toString().getBytes(StandardCharsets.UTF_8);
+            byte[] bytes = boundedReportBytes(buffer.toString());
             try (FileOutputStream stream = new FileOutputStream(file, false)) {
-                stream.write(bytes, 0, Math.min(bytes.length, MAX_REPORT_CHARS));
+                stream.write(bytes);
                 stream.flush();
                 stream.getFD().sync();
             }
         } catch (Throwable ignored) {}
+    }
+
+    static byte[] boundedReportBytes(String report) {
+        byte[] bytes=report.getBytes(StandardCharsets.UTF_8);
+        if(bytes.length<=MAX_REPORT_CHARS)return bytes;
+        int length=MAX_REPORT_CHARS;
+        while(length>0&&(bytes[length]&0xc0)==0x80)length--;
+        return java.util.Arrays.copyOf(bytes,length);
     }
 
     private static File crashFile(Context context) {

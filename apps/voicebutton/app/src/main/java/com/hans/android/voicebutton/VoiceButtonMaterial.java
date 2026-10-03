@@ -42,6 +42,11 @@ final class VoiceButtonMaterial {
     private static void configure(MaterialButton button, String text, int minHeightDp) {
         button.setText(text);
         button.setAllCaps(false);
+        button.setSingleLine(false);
+        button.setEllipsize(null);
+        button.setMinWidth(0);
+        int inset = Math.round(8 * button.getResources().getDisplayMetrics().density);
+        button.setPadding(inset, inset / 2, inset, inset / 2);
         float density = button.getResources().getDisplayMetrics().density;
         button.setMinHeight(Math.round(minHeightDp * density));
     }

@@ -69,3 +69,6 @@ Version 0.34 replaces full-manifest mobile reconciliation with Jetson's compact 
 
 
 Version 0.35 repairs library playback and result visibility. Tapping a recording with durable source audio but no final MP3 now requests the existing protected service conversion pipeline, waits for atomic publication, and opens PlayerActivity automatically. Conversion is refused while microphone capture is active. The paired Jetson receiver exports only canonical Large-v3 transcripts in the visible text tree; provisional streaming text remains internal.
+
+
+Version 0.94 corrects the complete-guideline audit findings in capture durability, acknowledgement proof, playback exclusion, automation controls, bounded diagnostics/cache, numeric validation and adaptive layouts. GUI_CONTRACT.md is authoritative. Publication follows the existing Explorer versioned/latest convention: voicebutton-0.94.apk and voicebutton-latest.apk, written atomically after hash verification. Older installers are retained. The earlier “exactly one debug APK” statements above describe historical releases.

@@ -64,6 +64,11 @@ public final class PhoneDiagnostics {
     private final String appVersion;
     private volatile long droppedDebugEvents;
     private volatile long droppedInfoEvents;
+    private final java.util.concurrent.atomic.AtomicInteger admitted = new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicLong droppedQueuedEvents = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicBoolean flushQueued = new java.util.concurrent.atomic.AtomicBoolean();
+    private static final java.util.concurrent.atomic.AtomicBoolean INITIALIZING = new java.util.concurrent.atomic.AtomicBoolean();
+    private volatile long lastStorageFailureElapsedMs;
 
     private PhoneDiagnostics(Context context, String baseUrl, String appVersion) throws Exception {
         this.context = context.getApplicationContext();
@@ -112,9 +117,9 @@ public final class PhoneDiagnostics {
 
     public static void initializeAsync(Context context, String baseUrl,
                                        String appVersion) {
-        if (INSTANCE.get() != null) return;
-        try { INITIALIZER.execute(() -> initialize(context, baseUrl, appVersion)); }
-        catch (RuntimeException ignored) {}
+        if (INSTANCE.get() != null || !INITIALIZING.compareAndSet(false,true)) return;
+        try { INITIALIZER.execute(() -> {try{initialize(context,baseUrl,appVersion);}finally{INITIALIZING.set(false);}}); }
+        catch (RuntimeException ignored) {INITIALIZING.set(false);}
     }
 
     public static PhoneDiagnostics get() { return INSTANCE.get(); }
@@ -122,26 +127,40 @@ public final class PhoneDiagnostics {
     public String getInstallationId() { return installationId; }
 
     public void log(String level, String event, String sessionId, String message, JSONObject fields) {
+        if (!AppSettings.logAllowed(context,level,event)) return;
         JSONObject value = event(level, event, sessionId, message, fields, null);
-        try { executor.execute(() -> appendSafely(value)); }
-        catch (RuntimeException ignored) {}
+        enqueueEvent(value);
     }
 
     public void error(String event, String sessionId, String operation, Throwable failure, JSONObject fields) {
         JSONObject value = event(ERROR, event, sessionId,
                 exactFailure(operation, failure), fields, failure);
-        try { executor.execute(() -> appendSafely(value)); }
-        catch (RuntimeException ignored) {}
+        enqueueEvent(value);
+    }
+
+    private void enqueueEvent(JSONObject value) {
+        if(value.toString().length()>32768)try {
+            value.put("fields",fields("omitted","Event exceeded entry budget"));
+            value.put("stack_trace","See bounded crash report");
+            value.put("message",bounded(value.optString("message",""),4096));
+            value.put("exception_message",bounded(value.optString("exception_message",""),4096));
+        } catch(Exception ignored){}
+        int limit=(int)com.hans.android.audio.reliable.RuntimePolicy.value("log_queue_events"), n;
+        do{n=admitted.get();if(n>=limit){droppedQueuedEvents.incrementAndGet();return;}}while(!admitted.compareAndSet(n,n+1));
+        try {executor.execute(()->{try {
+            if(AppSettings.logAllowed(context,value.optString("level",INFO),value.optString("event","")))appendSafely(value);
+        }finally{admitted.decrementAndGet();}});}
+        catch(RuntimeException failure){admitted.decrementAndGet();droppedQueuedEvents.incrementAndGet();}
     }
 
     public void flushSoon() {
-        try { executor.execute(this::flushSafely); }
-        catch (RuntimeException ignored) {}
+        if(!flushQueued.compareAndSet(false,true))return;
+        try {executor.execute(()->{try{flushSafely();}finally{flushQueued.set(false);}});}
+        catch(RuntimeException failure){flushQueued.set(false);}
     }
 
     public void shutdown() {
-        try { executor.execute(this::flushSafely); }
-        catch (RuntimeException ignored) {}
+        flushSoon();
         executor.shutdown();
     }
 
@@ -151,7 +170,7 @@ public final class PhoneDiagnostics {
 
     public void shutdownForAppExit() {
         client.cancelActiveRequest();
-        try { executor.execute(this::flushSafely); } catch (Exception ignored) {}
+        flushSoon();
         executor.shutdownNow();
         try { executor.awaitTermination(500L, TimeUnit.MILLISECONDS); }
         catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
@@ -187,7 +206,7 @@ public final class PhoneDiagnostics {
         long wall = System.currentTimeMillis();
         try {
             value.put("event_id", UUID.randomUUID().toString());
-            value.put("event", event);
+            value.put("event", bounded(event,256));
             value.put("level", level);
             value.put("wall_time_ms", wall);
             value.put("wall_time_iso_utc", isoUtc(wall));
@@ -200,20 +219,40 @@ public final class PhoneDiagnostics {
             value.put("manufacturer", Build.MANUFACTURER);
             value.put("model", Build.MODEL);
             value.put("sdk_int", Build.VERSION.SDK_INT);
-            if (sessionId != null && !sessionId.isEmpty()) value.put("session_id", sessionId);
-            value.put("message", message == null ? "" : message);
-            value.put("fields", fields == null ? new JSONObject() : fields);
+            if (sessionId != null && !sessionId.isEmpty()) value.put("session_id", bounded(sessionId,256));
+            value.put("message", bounded(message,4096));
+            value.put("fields", safeFields(fields));
             if (failure != null) {
                 value.put("exception_class", failure.getClass().getName());
-                value.put("exception_message", failure.getMessage() == null ? "" : failure.getMessage());
+                value.put("exception_message", bounded(failure.getMessage(),4096));
                 value.put("stack_trace", stackTrace(failure));
             }
         } catch (Exception ignored) {}
         return value;
     }
 
+    private static String bounded(String value,int limit) {
+        if(value==null)return "";
+        return value.length()<=limit?value:value.substring(0,limit)+"…";
+    }
+    private static JSONObject safeFields(JSONObject original) {
+        JSONObject safe=new JSONObject();if(original==null)return safe;
+        try {
+            java.util.Iterator<String> keys=original.keys();int count=0;
+            while(keys.hasNext()&&count++<40) {
+                String key=keys.next(),lower=key.toLowerCase(java.util.Locale.ROOT);Object value=original.opt(key);
+                safe.put(bounded(key,128),lower.matches(".*(token|password|secret|authorization|credential).*")?"[redacted]":
+                    (value instanceof Number||value instanceof Boolean)?value:bounded(String.valueOf(value),500));
+            }
+        }catch(Exception ignored){}
+        return safe;
+    }
+
     private void appendSafely(JSONObject value) {
         try {
+            long queueDrops=droppedQueuedEvents.getAndSet(0L);
+            if(queueDrops>0L)appendBytes((event(WARN,"diagnostics.queue_overflow",null,
+                    "Diagnostic tasks dropped to protect recording memory",fields("dropped_events",queueDrops),null).toString()+"\n").getBytes(StandardCharsets.UTF_8),true);
             byte[] bytes = (value.toString() + "\n").getBytes(StandardCharsets.UTF_8);
             String level = value.optString("level", INFO);
             long projected = pendingFile.length() + bytes.length;
@@ -241,17 +280,15 @@ public final class PhoneDiagnostics {
                 writeQueuePressureState();
             }
             appendBytes(bytes, WARN.equals(level) || ERROR.equals(level));
-        } catch (Exception ignored) {
-            // Diagnostics must never stop microphone capture or file recovery.
+        } catch (Exception failure) {
+            long now=SystemClock.elapsedRealtime();
+            if(now-lastStorageFailureElapsedMs>60000L){lastStorageFailureElapsedMs=now;
+                android.util.Log.e("VoiceButton","Diagnostic storage failed; recording remains independent",failure);}
         }
     }
 
-    private void appendBytes(byte[] bytes, boolean durable) throws Exception {
-        try (FileOutputStream out = new FileOutputStream(pendingFile, true)) {
-            out.write(bytes);
-            out.flush();
-            if (durable) out.getFD().sync();
-        }
+    private void appendBytes(byte[] bytes,boolean durable) throws Exception {
+        BoundedLogFile.append(pendingFile,bytes,com.hans.android.audio.reliable.RuntimePolicy.value("log_pending_bytes"),durable);
     }
 
     private void syncPendingFile() throws Exception {
@@ -354,11 +391,8 @@ public final class PhoneDiagnostics {
         String preserved = line == null ? "" : line;
         if (preserved.length() > 65536) preserved = preserved.substring(0, 65536);
         record.put("preserved_line", preserved);
-        try (FileOutputStream out = new FileOutputStream(corrupt, true)) {
-            out.write((record.toString() + "\n").getBytes(StandardCharsets.UTF_8));
-            out.flush();
-            out.getFD().sync();
-        }
+        BoundedLogFile.append(corrupt,(record.toString()+"\n").getBytes(StandardCharsets.UTF_8),
+                com.hans.android.audio.reliable.RuntimePolicy.value("log_corrupt_bytes"),true);
     }
 
     private void writeQueuePressureState() throws Exception {

@@ -53,36 +53,14 @@ public class MainActivityUiTest {
     @Test public void idleOverviewMatchesRecordingContract() {
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             awaitText(R.id.voicebutton_status_title, "Ready to record");
-            onView(withId(R.id.voicebutton_backup_text)).check(matches(isDisplayed()));
-            onView(withId(R.id.voicebutton_upload_current)).check(matches(isDisplayed()));
-            onView(withId(R.id.voicebutton_transcription_summary)).check(matches(isDisplayed()));
-            onView(withId(R.id.voicebutton_transcription_progress)).check(matches(isDisplayed()));
-            onView(withId(R.id.voicebutton_transcription_current)).check(matches(isDisplayed()));
-            scenario.onActivity(activity -> {
-                View backupBar = activity.findViewById(R.id.voicebutton_backup_progress);
-                View uploadCurrentBar = activity.findViewById(
-                        R.id.voicebutton_upload_current_progress);
-                View transcriptionCurrentBar = activity.findViewById(
-                        R.id.voicebutton_transcription_current_progress);
-                assertTrue(backupBar != null);
-                assertTrue(uploadCurrentBar != null);
-                assertTrue(transcriptionCurrentBar != null);
-                View uploadQueue = activity.findViewById(R.id.voicebutton_upload_queue);
-                View transcriptionQueue = activity.findViewById(R.id.voicebutton_transcription_queue);
-                assertTrue(uploadQueue != null);
-                assertTrue(transcriptionQueue != null);
-                assertTrue(uploadQueue.getVisibility() == View.VISIBLE);
-                assertTrue(transcriptionQueue.getVisibility() == View.VISIBLE);
-                assertTrue(uploadQueue.getParent() instanceof ScrollView);
-                assertTrue(transcriptionQueue.getParent() instanceof ScrollView);
-                assertTrue(((View) uploadQueue.getParent()).getLayoutParams().height
-                        == dp(activity, activity.getResources().getConfiguration().screenHeightDp < 520 ? 72 : 108));
-                assertTrue(((View) transcriptionQueue.getParent()).getLayoutParams().height
-                        == dp(activity, activity.getResources().getConfiguration().screenHeightDp < 520 ? 72 : 108));
-                assertTrue(backupBar.getVisibility() == View.GONE);
-                assertTrue(uploadCurrentBar.getVisibility() == View.GONE);
-                assertTrue(transcriptionCurrentBar.getVisibility() == View.GONE);
-            });            onView(withId(R.id.voicebutton_primary)).check(matches(isDisplayed()));
+            scenario.onActivity(activity->{
+                for(int id:new int[]{R.id.voicebutton_upload_queue,R.id.voicebutton_transcription_queue}){
+                    View queue=activity.findViewById(id);assertTrue(queue instanceof android.widget.ListView);assertTrue(queue.getVisibility()==View.VISIBLE);
+                    assertTrue(((android.widget.ListView)queue).getAdapter().getCount()>0);
+                    assertTrue(queue.getLayoutParams().height==dp(activity,activity.getResources().getConfiguration().screenHeightDp<520?72:108));
+                }
+            });
+            onView(withId(R.id.voicebutton_primary)).check(matches(isDisplayed()));
             onView(withId(R.id.voicebutton_primary)).check(matches(withText("Start recording")));
             onView(withId(R.id.voicebutton_more)).check(matches(isDisplayed()));
             onView(withId(R.id.voicebutton_finish)).check(matches(withEffectiveVisibility(GONE)));

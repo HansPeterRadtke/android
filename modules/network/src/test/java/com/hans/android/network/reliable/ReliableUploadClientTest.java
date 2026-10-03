@@ -145,4 +145,18 @@ public class ReliableUploadClientTest {
         assertEquals(100, status.overallPercent);
         assertTrue(status.current == null);
     }
+    @org.junit.Test public void pendingWorkWithoutTotalIsNotReportedComplete() throws Exception {
+        ReliableUploadClient.TranscriptionStatus status=ReliableUploadClient.parseTranscriptionStatus(
+                new JSONObject().put("not_transcribed_count",30));
+        assertEquals(30,status.totalCommittedCount);
+        assertEquals(0,status.overallPercent);
+    }
+    @org.junit.Test public void disabledTranscriptionRequiresExplicitServerAcknowledgement() throws Exception {
+        for(JSONObject reply:new JSONObject[]{new JSONObject(),new JSONObject().put("auto_transcribe",true),new JSONObject().put("auto_transcribe","false")}) {
+            try{ReliableUploadClient.verifyTranscriptionPolicy(false,reply);org.junit.Assert.fail("Missing or wrong policy accepted");}
+            catch(java.io.IOException expected){org.junit.Assert.assertTrue(expected.getMessage().contains("Audio remains"));}
+        }
+        ReliableUploadClient.verifyTranscriptionPolicy(false,new JSONObject().put("auto_transcribe",false));
+        ReliableUploadClient.verifyTranscriptionPolicy(true,new JSONObject());
+    }
 }

@@ -15,40 +15,36 @@ import java.util.TimeZone;
 
 final class VoiceButtonLocalTrace {
     private static final Object LOCK = new Object();
-    private static final long MAX_BYTES = 768L * 1024L;
-    private static final long TRIM_BYTES = 384L * 1024L;
 
     private VoiceButtonLocalTrace() {}
 
-    static void log(Context context, String event, Object... keyValues) {
-        if (context == null) return;
-        synchronized (LOCK) {
-            try {
-                File file = traceFile(context);
-                File parent = file.getParentFile();
-                if (parent != null && !parent.isDirectory()) parent.mkdirs();
-                trimIfNeeded(file);
-                StringBuilder line = new StringBuilder(256);
-                long wall = System.currentTimeMillis();
-                line.append(isoUtc(wall));
-                line.append(" elapsed=").append(SystemClock.elapsedRealtime());
-                line.append(" thread=").append(Thread.currentThread().getName());
-                line.append(" event=").append(safe(event));
-                if (keyValues != null) {
-                    for (int i = 0; i + 1 < keyValues.length; i += 2) {
-                        line.append(' ')
-                                .append(safe(String.valueOf(keyValues[i])))
-                                .append('=')
-                                .append(safe(String.valueOf(keyValues[i + 1])));
-                    }
-                }
-                line.append('\n');
-                try (FileOutputStream out = new FileOutputStream(file, true)) {
-                    out.write(line.toString().getBytes(StandardCharsets.UTF_8));
-                    out.flush();
-                }
-            } catch (Exception ignored) {}
+    private static final java.util.concurrent.atomic.AtomicLong DROPPED=new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.ThreadPoolExecutor WRITER=new java.util.concurrent.ThreadPoolExecutor(
+            1,1,0L,java.util.concurrent.TimeUnit.MILLISECONDS,
+            new java.util.concurrent.ArrayBlockingQueue<>((int)com.hans.android.audio.reliable.RuntimePolicy.value("log_queue_events")),
+            runnable->{Thread t=new Thread(runnable,"voicebutton-local-trace");t.setDaemon(true);return t;},
+            new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+
+    static void log(Context context,String event,Object... keyValues) {
+        if(context==null||!AppSettings.logAllowed(context,"DEBUG",event))return;
+        Context app=context.getApplicationContext();StringBuilder line=new StringBuilder(256);
+        line.append(isoUtc(System.currentTimeMillis())).append(" elapsed=").append(SystemClock.elapsedRealtime())
+                .append(" thread=").append(Thread.currentThread().getName()).append(" event=").append(safe(event));
+        if(keyValues!=null)for(int i=0;i+1<keyValues.length&&i<40;i+=2) {
+            String key=String.valueOf(keyValues[i]);
+            boolean secret=key.toLowerCase(Locale.ROOT).matches(".*(token|password|secret|authorization).*");
+            line.append(' ').append(safe(key)).append('=').append(secret?"[redacted]":safe(String.valueOf(keyValues[i+1])));
         }
+        final String captured=line.append('\n').toString();
+        try {WRITER.execute(()->{
+            if(!AppSettings.logAllowed(app,"DEBUG",event))return;
+            synchronized(LOCK){try {
+                long dropped=DROPPED.getAndSet(0L);
+                String text=(dropped==0?"":"trace_queue_dropped="+dropped+"\n")+captured;
+                BoundedLogFile.append(traceFile(app),text.getBytes(StandardCharsets.UTF_8),
+                        com.hans.android.audio.reliable.RuntimePolicy.value("trace_bytes"),false);
+            }catch(Exception failure){DROPPED.incrementAndGet();}}
+        });}catch(java.util.concurrent.RejectedExecutionException full){DROPPED.incrementAndGet();}
     }
 
     static String tail(Context context, int maxBytes) {
@@ -85,28 +81,6 @@ final class VoiceButtonLocalTrace {
     private static File traceFile(Context context) {
         return new File(new File(context.getNoBackupFilesDir(), "local_trace"),
                 "voicebutton-trace.log");
-    }
-
-    private static void trimIfNeeded(File file) throws Exception {
-        if (!file.isFile() || file.length() <= MAX_BYTES) return;
-        byte[] tail;
-        try (FileInputStream in = new FileInputStream(file);
-             ByteArrayOutputStream out = new ByteArrayOutputStream((int)TRIM_BYTES)) {
-            long skip = Math.max(0L, file.length() - TRIM_BYTES);
-            while (skip > 0L) {
-                long skipped = in.skip(skip);
-                if (skipped <= 0L) break;
-                skip -= skipped;
-            }
-            byte[] buffer = new byte[8192];
-            int read;
-            while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
-            tail = out.toByteArray();
-        }
-        try (FileOutputStream out = new FileOutputStream(file, false)) {
-            out.write(tail);
-            out.flush();
-        }
     }
 
     private static String isoUtc(long wall) {

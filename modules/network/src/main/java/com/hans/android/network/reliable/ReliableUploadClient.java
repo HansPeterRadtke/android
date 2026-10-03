@@ -183,6 +183,13 @@ public final class ReliableUploadClient {
         }
     }
 
+    private volatile boolean automaticTranscription=true;
+    public void setAutomaticTranscription(boolean enabled){automaticTranscription=enabled;}
+    public boolean requiresTranscriptionPolicyConfirmation(){return !automaticTranscription;}
+    static void verifyTranscriptionPolicy(boolean automatic,JSONObject response)throws java.io.IOException {
+        if(!automatic&&!Boolean.FALSE.equals(response.opt("auto_transcribe")))
+            throw new java.io.IOException("Server has not confirmed automatic transcription is off. Audio remains on this phone; retry after the receiver update.");
+    }
     private final String baseUrl;
     private final List<String> baseUrls;
     private final String userAgent;
@@ -261,6 +268,8 @@ public final class ReliableUploadClient {
         int complete = response == null ? 0 : response.optInt("complete_count", 0);
         int pending = response == null ? 0 : response.optInt("not_transcribed_count",
                 Math.max(0, total - complete));
+        if (response != null && !response.has("total_committed_count"))
+            total = Math.max(complete + pending, complete + pendingItems.size());
         int overall = response == null ? 0 : response.optInt("overall_percent",
                 total <= 0 ? 100 : (complete * 100) / total);
         return new TranscriptionStatus(total, complete, pending, overall,
@@ -313,8 +322,15 @@ public final class ReliableUploadClient {
         }
     }
 
+    public void requestTranscription(ReliableSessionManifest manifest) throws Exception {
+        JSONObject result=postJson("/audio/v2/transcription-request?folder="+encode(manifest.folderId)
+                +"&sid="+encode(manifest.sessionId),new JSONObject());
+        if(!result.optBoolean("ok",false))throw new ProtocolException(409,"Server did not accept the transcription request");
+    }
+
     public void updateMetadata(ReliableSessionManifest manifest) throws Exception {
         JSONObject payload = new JSONObject();
+        payload.put("auto_transcribe",automaticTranscription);
         payload.put("display_name", manifest.displayName == null
                 || manifest.displayName.trim().isEmpty()
                 ? manifest.sessionId : manifest.displayName.trim());
@@ -329,6 +345,7 @@ public final class ReliableUploadClient {
         if (!response.optBoolean("ok", false)) {
             throw new ProtocolException(409, "Server did not confirm recording metadata");
         }
+        verifyTranscriptionPolicy(automaticTranscription,response);
     }
 
     public Status status(ReliableSessionManifest manifest) throws Exception {
@@ -437,7 +454,7 @@ public final class ReliableUploadClient {
                 response.optLong("manifest_revision", 0L));
     }
 
-    private static Ack ackFromCompleted(JSONObject response,
+    static Ack ackFromCompleted(JSONObject response,
                                         ReliableSessionManifest.Segment segment)
             throws ProtocolException {
         if (!response.optBoolean("complete", false)
@@ -448,6 +465,9 @@ public final class ReliableUploadClient {
             throw new ProtocolException(409,
                     "Server completed-chunk acknowledgement did not match local bytes");
         }
+        if (response.optString("server_id", "").trim().isEmpty()) {
+            throw new ProtocolException(409, "Server identity is missing from durable acknowledgement");
+        }
         return new Ack(response.optString("server_id", ""),
                 response.optLong("manifest_revision", 0L),
                 response.optLong("server_received_at_ms", 0L),
@@ -456,6 +476,7 @@ public final class ReliableUploadClient {
 
     public Status commit(ReliableSessionManifest manifest) throws Exception {
         JSONObject payload = new JSONObject(manifest.canonicalCommitJson());
+        payload.put("auto_transcribe",automaticTranscription);
         payload.put("manifest_sha256", manifest.commitSha256());
         JSONObject response = postJson("/audio/v2/commit?folder=" + encode(manifest.folderId)
                 + "&sid=" + encode(manifest.sessionId) + "&compact=1", payload);
@@ -642,7 +663,11 @@ public final class ReliableUploadClient {
         try (InputStream in = input; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[8192]; int read;
             while ((read = in.read(buffer)) != -1) {
-                checkInterrupted(); out.write(buffer, 0, read);
+                checkInterrupted();
+                if (out.size() > com.hans.android.audio.reliable.RuntimePolicy.value("http_response_bytes") - read) {
+                    throw new java.io.IOException("Server response exceeds the configured safety limit");
+                }
+                out.write(buffer, 0, read);
             }
             return out.toByteArray();
         }

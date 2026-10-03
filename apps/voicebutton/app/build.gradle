@@ -2,6 +2,10 @@ plugins {
     id 'com.android.application'
 }
 
+def voiceButtonPrivateConfig = new File(System.getenv('VOICEBUTTON_PRIVATE_BUILD_CONFIG') ?: '/data/var/build-config/voicebutton-studio.json')
+def voiceButtonPrivateValues = voiceButtonPrivateConfig.isFile() ? new groovy.json.JsonSlurper().parse(voiceButtonPrivateConfig) : [:]
+def voiceButtonStudioToken = System.getenv('VOICEBUTTON_THOR_TOKEN') ?: (voiceButtonPrivateValues.thor_player_token ?: '')
+
 android {
     namespace 'com.hans.android.voicebutton'
     compileSdk 34
@@ -10,12 +14,23 @@ android {
         applicationId 'com.hans.android.voicebutton'
         minSdk 24
         targetSdk 34
-        versionCode 93
-        versionName '0.93'
+        versionCode 94
+        versionName '0.94'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
         buildConfigField 'String', 'VOICE_BASE_URL', '"https://jetson-fdx.jimmyandjonny.work"'
         buildConfigField 'String', 'THOR_PLAYER_BASE_URL', '"https://thor.jonnyontherun.org/speech-mobile"'
-        buildConfigField 'String', 'THOR_PLAYER_TOKEN', '"-xad-MEIqaxraJg-CwU2oO3779SxDwFeNau0klgZWHfNuWg2"'
+
+        buildConfigField 'String', 'THOR_PLAYER_TOKEN', groovy.json.JsonOutput.toJson(voiceButtonStudioToken)
+    }
+
+    testOptions {
+        unitTests.includeAndroidResources = true
+        unitTests.all {
+            maxHeapSize = '2g'
+            maxParallelForks = 1
+            systemProperty 'robolectric.dependency.repo.url', 'https://repo.maven.apache.org/maven2'
+            jvmArgs '--add-opens=java.base/java.lang=ALL-UNNAMED', '--add-opens=java.base/java.util=ALL-UNNAMED', '--add-opens=java.base/java.io=ALL-UNNAMED', '--add-opens=java.base/java.net=ALL-UNNAMED', '--add-opens=java.base/java.security=ALL-UNNAMED', '--add-opens=java.base/java.text=ALL-UNNAMED', '--add-opens=java.base/jdk.internal.access=ALL-UNNAMED', '--add-opens=java.desktop/java.awt.font=ALL-UNNAMED', '--add-opens=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED'
+        }
     }
 
     buildFeatures {
@@ -45,6 +60,7 @@ dependencies {
     implementation 'androidx.work:work-runtime:2.9.1'
     implementation 'org.videolan.android:libvlc-all:3.7.0'
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.17'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
     androidTestImplementation 'androidx.test:rules:1.5.0'
     androidTestImplementation 'androidx.test:runner:1.5.2'

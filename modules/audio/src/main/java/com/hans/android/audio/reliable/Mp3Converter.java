@@ -194,15 +194,20 @@ public final class Mp3Converter {
         }
     }
     @android.annotation.TargetApi(26)
-    private static void fsyncDirectory(File directory) {
-        if (directory == null || !directory.isDirectory()) return;
-        if (android.os.Build.VERSION.SDK_INT < 26) return;
-        try (java.nio.channels.FileChannel channel =
-                     java.nio.channels.FileChannel.open(directory.toPath(),
-                             java.nio.file.StandardOpenOption.READ)) {
+    private static void fsyncDirectory(File directory) throws IOException {
+        if(directory==null||!directory.isDirectory())throw new IOException("Missing directory for durable publication");
+        if(android.os.Build.VERSION.SDK_INT>=24&&android.os.Build.VERSION.SDK_INT<26) {
+            java.io.FileDescriptor descriptor=null;
+            try {
+                descriptor=android.system.Os.open(directory.getAbsolutePath(),android.system.OsConstants.O_RDONLY,0);
+                android.system.Os.fsync(descriptor);
+            }catch(android.system.ErrnoException failure){throw new IOException("Directory sync failed; publication durability not confirmed",failure);}
+            finally{if(descriptor!=null)try{android.system.Os.close(descriptor);}catch(android.system.ErrnoException failure){throw new IOException("Directory close failed",failure);}}
+        } else try(java.nio.channels.FileChannel channel=java.nio.channels.FileChannel.open(directory.toPath(),java.nio.file.StandardOpenOption.READ)) {
             channel.force(true);
-        } catch (Exception ignored) {}
+        }
     }
+
 
     private static boolean isAndroidRuntime() {
         String vm = System.getProperty("java.vm.name", "");

@@ -12,7 +12,7 @@ Progress state: current duration, number of durable MP3 segments, local bytes, s
 
 Diagnostics: raw session ids, file paths, HTTP responses, thread state, stack traces, individual retry timers, and raw manifest JSON. Diagnostics are hidden by default.
 
-Visible metric dictionary: Current duration is the sum of committed MP3-frame duration plus active capture elapsed time, shown as hours, minutes, and seconds. Local audio storage is the total private app storage used by recordings and transfer material, shown in binary byte units. Durable segments is the number of immutable hashed MP3 segments belonging to the selected recording. Server state is pending or complete based on hash reconciliation and final commit.
+Visible metric dictionary: see the source, formula, scope, units, precision, freshness and decision definitions in `../GUI_CONTRACT.md`.
 
 User language mapping: internal capture and upload states become READY, RECORDING, PAUSED, FINISHING, WAITING FOR NETWORK, SYNCHRONIZING, SERVER COMPLETE, RECOVERY REQUIRED, and FAILED, each with a human-readable explanation and remedy.
 

@@ -143,9 +143,11 @@ public final class AudioLibraryActivity extends Activity {
         TextView title = AndroidUi.title(this, "Library");
         AndroidUi.stableLine(this, title, 40);
         root.addView(title);
+        if (getResources().getConfiguration().screenHeightDp < 520) title.setVisibility(View.GONE);
         stateText = AndroidUi.small(this, "Choose audio to play");
         AndroidUi.stableLine(this, stateText, 30);
         root.addView(stateText);
+        if (getResources().getConfiguration().screenHeightDp < 520) stateText.setVisibility(View.GONE);
 
         LinearLayout modes = row();
         recordingsModeButton = AndroidUi.modeButton(this, "App recordings", true);
@@ -163,11 +165,14 @@ public final class AudioLibraryActivity extends Activity {
         upButton = VoiceButtonMaterial.toolbarButton(this, "Up");
         upButton.setOnClickListener(v -> up());
         pathText = AndroidUi.body(this, "App recording folders");
-        AndroidUi.stableLine(this, pathText, 46);
+        pathText.setSingleLine(false);
+        pathText.setEllipsize(null);
+        pathText.setMinHeight(AndroidUi.dp(this, 48));
+        upButton.setMinHeight(AndroidUi.dp(this, 48));
         navigation.addView(upButton, new LinearLayout.LayoutParams(
-                AndroidUi.dp(this, 72), AndroidUi.dp(this, 46)));
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         navigation.addView(pathText, new LinearLayout.LayoutParams(
-                0, AndroidUi.dp(this, 46), 1f));
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         root.addView(navigation);
 
         list = new ListView(this);
@@ -410,6 +415,9 @@ public final class AudioLibraryActivity extends Activity {
             restoreScrollFirst = 0; restoreScrollTop = 0;
             saveLibraryState(); refreshFiles();
             return;
+        }
+        if(CapturePlaybackGate.isCapturing()) {
+            Toast.makeText(this,"Pause recording before playing audio",Toast.LENGTH_LONG).show();return;
         }
         if (!item.playable) {
             if (item.recording != null) {

@@ -60,10 +60,9 @@ final class FileOperations {
         if (target == null) throw new java.io.IOException("Could not create the destination file");
         try {
             copy(context, sourceUri, target.getUri());
-            long expected = source.length(), actual = target.length();
-            if (expected > 0L && actual > 0L && expected != actual) {
-                throw new java.io.IOException("The destination byte count does not match the source");
-            }
+            // Provider length is optional and is never proof of a successful move.
+            // Reopen both streams after closing the copy and verify every byte.
+            verifyIdentical(context, sourceUri, target.getUri());
             if (!source.delete()) throw new java.io.IOException("The copy succeeded but the source could not be deleted");
             return target.getUri();
         } catch (Exception failure) {
@@ -92,6 +91,29 @@ final class FileOperations {
             }
             out.flush();
         }
+    }
+
+    static void verifyIdentical(Context context, Uri source, Uri destination) throws Exception {
+        byte[] expected = digest(context, source);
+        byte[] actual = digest(context, destination);
+        if (!java.security.MessageDigest.isEqual(expected, actual)) {
+            throw new IOException("Destination content differs; the original file was retained");
+        }
+    }
+
+    private static byte[] digest(Context context, Uri uri) throws Exception {
+        java.security.MessageDigest hash = java.security.MessageDigest.getInstance("SHA-256");
+        InputStream raw = context.getContentResolver().openInputStream(uri);
+        if (raw == null) throw new IOException("Cannot verify copied audio; original retained");
+        try (InputStream in = new BufferedInputStream(raw)) {
+            byte[] buffer = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buffer)) != -1) {
+                if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("Verification cancelled");
+                hash.update(buffer, 0, n);
+            }
+        }
+        return hash.digest();
     }
 
     static String cleanName(String value) throws Exception {

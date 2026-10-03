@@ -1,70 +1,57 @@
 # Voice Button GUI contract
 
-Module: Protected recording
-User goal: Start, pause, resume, and finish a loss-protected recording quickly and confidently on the phone.
-Operating states: ready, starting, recording, paused, saving/finalizing, recovery required, failed/degraded.
-Real results: a locally protected recording and its finalized playable file.
-Progress state: current recording duration and live microphone input while recording; background backup only when pending or delayed.
-Diagnostics: raw uploader state, retry counters, remote chunk details, transcription internals, session IDs, stack traces, logs.
-Forbidden default content: transcription state, raw uploader/session/protocol fields, worker state, healthy server detail, diagnostic counters, player internals.
+This is the current authoritative screen contract. It consolidates earlier versioned proposals. User-facing upload and transcription progress remain on the recording screen; raw engine, protocol, session, retry and storage diagnostics belong in More. Essential text wraps and must not be clipped at large font sizes.
 
-Screen: Voice Button recording
-Mode: action and monitoring
-Purpose: Let the user know whether recording can proceed and control the current recording with minimal visual and motor effort.
-Primary questions:
-- Can I record now?
-- Am I recording, paused, starting, saving, or recovering?
-- How long is the current/open recording?
-- Is captured audio safe on this phone?
-- Is the selected microphone producing input while recording?
-- What action can I take now?
-Visible answers:
-- Upper information area -> one human-language recording state; timer only for an actual/open recording; transition/error explanation only when needed.
-- Local safety -> one concise “Safe on this phone” line only for an actual/open recording.
-- Live input -> selected routed microphone, input state, and level only while recording.
-- Idle setup -> folder and microphone controls only while a new recording can be configured.
-- Fixed bottom reach zone -> one large Start/Pause/Resume/Recover action with inline disabled reason.
-- Upper-left separated danger zone -> Finish/Silence alarm only while relevant; Finish requires consequence confirmation.
-- Upload status -> always show overall byte percentage, overall progress bar, current recording filename with its own whole-file percentage when measurable, and number of recordings left to upload.
-- Transcription status -> always show overall percentage, overall progress bar, current filename with current-file percentage when available, and number of files left to transcribe.
-Secondary questions:
-- Exact synchronization, Jetson, transcription, player/files, support and diagnostics -> More / detail screens.
-Hidden by default:
-- Raw transcription engine/session/protocol diagnostics; user-facing transcription overall/current-file progress remains visible.
-- Healthy Jetson/server state.
-- Raw uploader operation, sequence, chunks, retries, watchdogs and quarantine counters.
-- Session IDs, logs, stack traces, internal booleans and raw config.
-Trust state:
-- Recording state and local safety are visible without scrolling.
-- A backup delay is visible but explicitly does not imply local recording loss.
-- Remote/transcription detail is available through More without competing with recording.
-Actions:
-- Start/Pause/Resume/Recover -> always-reachable fixed bottom action.
-- Finish -> upper-left, separated from the frequent action, visible only for an open/current recording, requires confirmation.
-- Folder/microphone -> idle-only setup controls.
-- Player/files, synchronization retry, status, support and diagnostics -> More.
-Rejected elements:
-- Dashboard/card-stack composition.
-- Permanent healthy Jetson/upload/transcription status.
-- Transcription progress on the recording overview.
-- Idle 00:00:00 timer.
-- “Local protection” jargon when there is no audio to protect.
-- Raw chunk/sequence/retry/session details on the overview.
-- Primary action inside scrollable content.
-- Finish adjacent to Pause/Resume in the lower reach zone.
-- Disabled primary action without a visible reason.
-- Fixed-height important text that clips at large font scale.
-Acceptance tests:
-- Start remains usable while old backup/transcription work exists.
-- Primary action remains outside the ScrollView and at least 48 dp high.
-- Finish remains outside the bottom action zone and requires confirmation.
-- Idle state hides timer, local-safety line, live microphone signal, and transcription.
-- Recording state shows timer, local safety, routed microphone, signal text, and level.
-- Healthy upload and transcription remain visible as compact 100% completion states because overall completion is an explicit user requirement.
-- Any pending backup remains visible during idle, recording, pause, finalization, and retry with one concise line plus progress bar; retry backoff says local recording remains safe.
-- Important text wraps; no raw internal names appear on the default screen.
+## Recording screen
 
-Metric dictionary:
-- Recording duration: RecordingService snapshot duration for the current/open recording, hh:mm:ss, exact, confirms capture continuity.
-- Microphone input: live recorder signal/level for the current recording, qualitative text plus level bar, confirms input activity without treating quiet as automatic failure.
-- Backup pending: durable local upload ledger for finalized audio, bytes/percent when denominator is known, shown only while pending or delayed.
+The screen answers whether recording can start, whether it is recording or paused, how long the current recording is, whether captured audio is protected locally, which microphone is routed, and what action is available. Both upload and transcription always retain overall progress, remaining file counts, and a stable viewport containing per-file identity, state and progress. A fresh empty queue may show completion. Unknown or stale server state must identify uncertainty and the age of the last successful snapshot; it never establishes that the current queue is empty.
+
+Start/Pause/Resume/Recover stays outside the scrolling information area. Finish stays in the separated upper toolbar and requires consequence confirmation. Information starts with the recording state, followed by microphone, upload, transcription and idle setup. At short heights and large fonts the information scrolls while toolbar and primary controls remain reachable. Branding may hide when constrained. Idle hides duration, local protection and live microphone details. Recording shows those details.
+
+Progress rows reuse views and keep their viewport geometry through idle, failure and progress updates. A shortened filename must expose its complete identity and status by tap and accessibility. Overall and per-file percentages are distinct. Unknown denominators use indeterminate progress. Offline and failed states identify what remains local and the remedy: check Internet, then More → Retry synchronization / Send pending recordings. Quarantined audio prevents backup-complete claims and identifies recovery as the next step.
+
+More contains player/library, retry, support, diagnostics, automation and privacy. Automatic upload and transcription have separate persisted controls. Manual Send pending recordings and Transcribe uploaded recordings remain available. Foreground and scheduled workers honor the upload control. Work already submitted to the server is not recalled.
+
+## Player and library
+
+Player shows file identity, playing/paused/stopped state, position, total and remaining time, speed, seek, Play/Pause, Stop, skips, Library and More. Toolbar and transport stay reachable outside scrolling information. Long titles, failure explanations and labels wrap. Action and seek targets are at least 48 dp high. More holds settings, file operations, memory/cache, manual waveform generation and engine details.
+
+An existing file never bypasses capture exclusion. Starting capture pauses the playback engine before opening the microphone. Studio handoff preserves logical position and requested playing/paused state; native paused seek priming stays muted. Source/speed changes invalidate late results and cancel network requests. The playback service owns a monotonic sleep deadline, which survives activity recreation and prevents resumed autoplay after expiry.
+
+Library keeps source, location and items readable at large font sizes. Up and mode controls are at least 48 dp; rows reuse views. Complete identity is available through details. Active capture produces an explicit playback-disabled reason. Destructive actions require consequence previews. Copy-and-delete moves verify source and destination content before source deletion, including providers with unknown lengths.
+
+## Lifecycle and performance
+
+Home and switching views leave active foreground work running. Back/explicit close warn when active work requires it. Task removal follows the current controlled-exit behavior: capture is paused and journaled, workers stop, and playback saves its checkpoint before stopping. Reopening restores the checkpoint and its prior intent subject to capture exclusion and sleep expiry. Force-stop, shutdown and hardware failure remain external boundaries.
+
+Live duration and microphone updates use in-memory snapshots. Filesystem scans, JSON parsing, recursive byte counts, log writes and fsync do not run on the UI update path. Queue changes are coalesced and reuse rows. Diagnostic queue admission and retained bytes remain bounded even during repeated errors.
+
+## Acceptance matrix
+
+Render recorder idle, recording, paused, saving, failure, stale/offline and long queues; player normal and long-title states; and library layouts in phone portrait, phone landscape and tablet portrait at 1.0 and 2.0 font scale. Assert fixed controls remain within bounds and meet 48 dp targets. Inspect wrapping, scrolling, full filename details and stable queue slots. Device validation additionally covers actual microphone routes, Bluetooth, background operation, TalkBack and OEM lifecycle behavior.
+
+## Metric dictionary
+
+Percentages are bounded to 0–100. Higher completion means less remaining work and proves only the named evidence. Never turn a failed refresh into a fresh success.
+
+| Metric | Source / formula | Scope, units, precision | Freshness / uncertainty | Decision |
+| --- | --- | --- | --- | --- |
+| Recording duration | Service duration from durable audio plus current recorder samples / actual sample rate | Current recording; hh:mm:ss, whole seconds | Live snapshot; paused duration stops increasing | Confirm capture continuity |
+| Microphone level | Recorder signal and normalized peak level | Routed microphone; qualitative text and level | Live only during capture; silence alone is not failure | Check selected input |
+| Local protection | Journal/manifest state, overridden by capture or storage failure | Current recording; explicit text | Service snapshot | Pause, preserve audio or recover |
+| Overall upload | Durable remote bytes plus bounded partial acknowledgements / known local encoded bytes | Phone recording set; whole percent | Verified ledger; indeterminate while bytes are unmeasured | Judge backup progress |
+| Per-file upload | Matching segment bytes plus partial durable offsets / that recording's encoded bytes | One named recording; whole percent | Commit is separate from byte completion | Identify current or stalled file |
+| Upload remaining | Sessions still requiring transfer or verified commit | Local recording set; integer files | Local snapshot; quarantined files stay incomplete | Know whether backup is complete |
+| Overall transcription | Server completion count / server committed recording count | Server recording set; whole percent | Last successful response; marked last-known when stale | Judge transcription backlog |
+| Per-file transcription | Server frame progress for the current identified recording | Named server recording; whole percent | Indeterminate during model load/start or unknown totals | Wait or retry |
+| Transcription remaining | Server pending list/count | Server recording set; integer files | Unknown if never loaded; last-known after failed refresh | Plan remaining work |
+| Status age | Elapsed time since last successful receipt | Transcription snapshot; seconds/minutes | Increases through failures | Distinguish current evidence from cache |
+| Playback position | Service logical timeline, adjusted for Studio speed | Selected source; hh:mm:ss | Live snapshot | Seek/resume accurately |
+| Playback total | Source duration metadata | Selected source; hh:mm:ss | Unknown until loaded | Judge length |
+| Playback remaining | max(0, logical total minus logical position) | Selected source; hh:mm:ss | Same uncertainty as total and position | Judge listening time |
+| Speed | Validated setting or acknowledged Studio render speed | Current source; multiplier, two decimals | Applied mode and fallback are explicit | Understand rate |
+| Studio progress | Copied/uploaded/downloaded bytes / expected bytes; named render phase if unmeasurable | Current requested source/render; whole percent or phase | Generation-scoped; discarded on cancellation | Wait, cancel or use Instant mode |
+| Studio cache | Sum of cached source, render and waveform byte lengths | App cache; binary byte units | Off-thread inspection and checks before writes | Clear unused cache or adjust limit |
+| Recording/file size | Local file or durable manifest bytes | Selected file; binary byte units | Provider length may be unknown | Understand storage; never use size alone as move proof |
+
+Defaults, ranges, units, precedence and safety role of limits are in `docs/runtime-configuration.md`.

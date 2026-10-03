@@ -37,15 +37,16 @@ public final class Mp3Frames {
             temp.delete();
             throw new IOException("No complete MP3 frames were found");
         }
-        if (file.exists() && !file.delete()) {
-            temp.delete();
-            throw new IOException("Could not replace MP3 segment");
-        }
-        if (!temp.renameTo(file)) {
-            temp.delete();
-            throw new IOException("Could not publish normalized MP3 segment");
-        }
+        publishReplacement(temp, file);
         return stats;
+    }
+
+    // rename on Android/Linux replaces the directory entry atomically. Never unlink
+    // the old audio first, and retain the synced candidate if publication fails.
+    static void publishReplacement(File candidate, File destination) throws IOException {
+        if (!candidate.renameTo(destination)) {
+            throw new IOException("Could not publish normalized audio; original and recovery copy retained");
+        }
     }
 
     public static Stats copyFrames(File file, OutputStream output) throws IOException {
@@ -53,7 +54,7 @@ public final class Mp3Frames {
             skipId3v2(in);
             long bytes = 0L;
             long frames = 0L;
-            long samples = 0L;
+            long durationTicks = 0L; // 14,112,000 ticks/s exactly represents every MPEG sample rate.
             boolean started = false;
             byte[] headerBytes = new byte[4];
             int headerCount = 0;
@@ -80,18 +81,18 @@ public final class Mp3Frames {
                 int offset = 4;
                 while (remaining > 0) {
                     int read = in.read(frame, offset, remaining);
-                    if (read < 0) return new Stats(bytes, frames, samples <= 0L ? 0L : samples * 1000L / 16000L);
+                    if (read < 0) return new Stats(bytes, frames, durationTicks / 14_112L);
                     offset += read;
                     remaining -= read;
                 }
                 output.write(frame);
                 bytes += header.frameBytes;
                 frames++;
-                samples += header.samplesPerFrame;
+                durationTicks += (long) header.samplesPerFrame * (14_112_000L / header.sampleRate);
                 started = true;
                 headerCount = 0;
             }
-            long durationMs = samples <= 0L ? 0L : samples * 1000L / 16000L;
+            long durationMs = durationTicks / 14_112L;
             return new Stats(bytes, frames, durationMs);
         }
     }
@@ -148,13 +149,15 @@ public final class Mp3Frames {
         int sampleRate = rates[sampleRateIndex];
         int frameBytes = ((mpeg1 ? 144000 : 72000) * bitrate / sampleRate) + padding;
         if (frameBytes < 24) return null;
-        return new Header(frameBytes, mpeg1 ? 1152 : 576);
+        return new Header(frameBytes, mpeg1 ? 1152 : 576, sampleRate);
     }
 
     private static final class Header {
         final int frameBytes;
         final int samplesPerFrame;
-        Header(int frameBytes, int samplesPerFrame) {
+        final int sampleRate;
+        Header(int frameBytes, int samplesPerFrame, int sampleRate) {
+            this.sampleRate = sampleRate;
             this.frameBytes = frameBytes;
             this.samplesPerFrame = samplesPerFrame;
         }

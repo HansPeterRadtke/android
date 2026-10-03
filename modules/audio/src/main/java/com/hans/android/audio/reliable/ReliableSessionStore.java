@@ -975,28 +975,8 @@ public final class ReliableSessionStore {
             changed = true;
         }
         if (segment.mp3Bytes != localBytes || !localSha.equals(segment.sha256)) {
-            segment.mp3Bytes = localBytes;
-            segment.sha256 = localSha;
-            segment.remoteAccepted = false;
-            segment.remotePartialBytes = 0L;
-            segment.remoteServerId = "";
-            segment.remoteManifestRevision = 0L;
-            segment.remoteReceivedAtMs = 0L;
-            segment.remoteDurableAtMs = 0L;
-            segment.lastSendError = "";
-            segment.transcriptState = "PENDING";
-            segment.transcriptText = "";
-            segment.transcriptEngine = "";
-            segment.transcriptCreatedAtMs = 0L;
-            segment.transcriptError = "";
-            manifest.remoteCommitted = false;
-            manifest.remoteManifestRevision = 0L;
-            manifest.error = "";
-            if (manifest.recordingFinished && manifest.conversionFinished) {
-                manifest.state = "READY";
-            }
-            recalculate(manifest);
-            changed = true;
+            throw new IOException("Local audio integrity check failed; original expected hash and bytes retained. "
+                    + "Keep the recording and use recovery before retrying upload.");
         }
         if (changed) save(manifest);
         return true;
@@ -1261,10 +1241,20 @@ public final class ReliableSessionStore {
         if (!SAFE_ID.matcher(sessionId).matches()) return;
         ReliableSessionManifest manifest;
         File metadata = new File(dir, "manifest.json");
-        if (metadata.isFile()) {
-            try { manifest = ReliableSessionManifest.fromJson(new JSONObject(readText(metadata))); }
-            catch (Exception failure) { manifest = recoveredManifest(sessionId); }
-        } else manifest = recoveredManifest(sessionId);
+        boolean restoredBackup = false;
+        try {
+            manifest = ReliableSessionManifest.fromJson(new JSONObject(readText(metadata)));
+        } catch (Exception primaryFailure) {
+            try {
+                manifest = readManifestRecoveringBackup(metadata);
+                restoredBackup = true;
+            } catch (IOException noValidMetadata) {
+                manifest = recoveredManifest(sessionId);
+            }
+        }
+        // Restore before save() can rotate the corrupt primary over the valid backup.
+        // A failed restoration is a real durability error, not grounds to discard state.
+        if (restoredBackup) restoreManifestBackup(metadata);
         String folderId = dir.getParentFile().getParentFile().getName();
         try {
             Folder folder = getFolder(folderId);
@@ -1925,13 +1915,20 @@ public final class ReliableSessionStore {
     }
 
     @android.annotation.TargetApi(26)
-    private static void fsyncDirectory(File directory) {
-        if (directory == null || !directory.isDirectory()) return;
-        if (android.os.Build.VERSION.SDK_INT < 26) return;
-        try (FileChannel channel = FileChannel.open(directory.toPath(), StandardOpenOption.READ)) {
+    private static void fsyncDirectory(File directory) throws IOException {
+        if(directory==null||!directory.isDirectory())throw new IOException("Missing directory for durable publication");
+        if(android.os.Build.VERSION.SDK_INT>=24&&android.os.Build.VERSION.SDK_INT<26) {
+            java.io.FileDescriptor descriptor=null;
+            try {
+                descriptor=android.system.Os.open(directory.getAbsolutePath(),android.system.OsConstants.O_RDONLY,0);
+                android.system.Os.fsync(descriptor);
+            }catch(android.system.ErrnoException failure){throw new IOException("Directory sync failed; publication durability not confirmed",failure);}
+            finally{if(descriptor!=null)try{android.system.Os.close(descriptor);}catch(android.system.ErrnoException failure){throw new IOException("Directory close failed",failure);}}
+        } else try(java.nio.channels.FileChannel channel=java.nio.channels.FileChannel.open(directory.toPath(),java.nio.file.StandardOpenOption.READ)) {
             channel.force(true);
-        } catch (Exception ignored) {}
+        }
     }
+
 
     private String loadOrCreateConversationId() throws IOException {
         File file = new File(root, "conversation.id");

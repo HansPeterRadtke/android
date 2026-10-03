@@ -74,6 +74,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             PlayerPlaybackService.Snapshot.initial();
     private String lastPlayerError = "";
     private ThorStudioClient studioClient;
+    private ThorStudioClient waveformClient;
     private PlayerSource originalSource;
     private PlayerSource activeSource;
     private boolean studioActive;
@@ -141,20 +142,16 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             main.postDelayed(this, 500L);
         }
     };
-    private final Runnable sleepStop = () -> {
-        if (player != null) player.pause();
-        Toast.makeText(this, "Sleep timer stopped playback", Toast.LENGTH_LONG).show();
-    };
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         settings = new PlayerSettings(this);
         studioClient = new ThorStudioClient(this);
+        waveformClient = new ThorStudioClient(this);
         buildScreen();
         loadQueue(getIntent());
         PlayerSource requested = PlayerSource.fromIntent(getIntent());
         if (requested != null) openSource(requested, settings.autoplay);
-        scheduleSleepTimer();
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -188,8 +185,8 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
     @Override protected void onDestroy() {
         main.removeCallbacksAndMessages(null);
         studioGeneration.incrementAndGet();
-        if (studioFuture != null) studioFuture.cancel(true);
-        if (waveformFuture != null) waveformFuture.cancel(true);
+        if(studioFuture!=null){studioFuture.cancel(true);if(studioClient!=null)studioClient.cancel();}
+        if(waveformFuture!=null){waveformFuture.cancel(true);if(waveformClient!=null)waveformClient.cancel();}
         studioExecutor.shutdownNow(); fileExecutor.shutdownNow();
         if (waveformBitmap != null) waveformBitmap.recycle();
         super.onDestroy();
@@ -218,7 +215,8 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         titleText.setPadding(0, AndroidUi.dp(this, 3), 0, AndroidUi.dp(this, 3));
         root.addView(titleText);
         stateText = AndroidUi.small(this, "Choose audio from Library");
-        AndroidUi.stableLine(this, stateText, 30);
+        stateText.setSingleLine(false);
+        stateText.setEllipsize(null);
         root.addView(stateText);
 
         waveformView = new WaveformView(this);
@@ -260,12 +258,14 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             }
         });
         root.addView(seek, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 38)));
-        timeText = AndroidUi.text(this, "00:00 / 00:00", 16, true, AndroidUi.INK);
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 48)));
+        timeText = AndroidUi.text(this, "Position 00:00\nTotal 00:00\nRemaining 00:00", 16, true, AndroidUi.INK);
         timeText.setTypeface(android.graphics.Typeface.MONOSPACE,
                 android.graphics.Typeface.BOLD);
         timeText.setGravity(Gravity.CENTER);
-        AndroidUi.stableLine(this, timeText, 30);
+        timeText.setSingleLine(false);
+        timeText.setMinLines(3);
+        timeText.setEllipsize(null);
         root.addView(timeText);
 
         LinearLayout transport = row();
@@ -307,7 +307,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         });
         transport.addView(backSkipButton, weighted());
         LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(
-                0, AndroidUi.dp(this, 58), 1.35f);
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.35f);
         playParams.setMargins(AndroidUi.dp(this, 3), AndroidUi.dp(this, 3),
                 AndroidUi.dp(this, 3), AndroidUi.dp(this, 3));
         transport.addView(playButton, playParams);
@@ -328,7 +328,8 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
         modeText = AndroidUi.small(this, "Studio speed is ready");
         modeText.setGravity(Gravity.CENTER);
-        AndroidUi.stableLine(this, modeText, 28);
+        modeText.setSingleLine(false);
+        modeText.setEllipsize(null);
         root.addView(modeText);
         studioProgress = new ProgressBar(this, null,
                 android.R.attr.progressBarStyleHorizontal);
@@ -339,7 +340,8 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                 ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8)));
         studioText = AndroidUi.small(this, "Instant playback available");
         studioText.setGravity(Gravity.CENTER);
-        AndroidUi.stableLine(this, studioText, 28);
+        studioText.setSingleLine(false);
+        studioText.setEllipsize(null);
         root.addView(studioText);
 
         Button library = VoiceButtonMaterial.secondaryButton(this, "Library");
@@ -347,22 +349,47 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         root.addView(library, fullWidthButton(50));
         Button more = VoiceButtonMaterial.toolbarButton(this, "More");
         more.setOnClickListener(v -> showPlayerMenu());
-        root.addView(more, fullWidthButton(46));
+        root.addView(more, fullWidthButton(48));
+        // Scrolling information with an always-reachable playback dock.
+        root.removeView(transport);
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        while (root.getChildCount() > 1) {
+            View child = root.getChildAt(1);
+            root.removeView(child);
+            body.addView(child);
+        }
+        ScrollView bodyScroll = new ScrollView(this);
+        bodyScroll.setFillViewport(true);
+        bodyScroll.addView(body, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(bodyScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        root.addView(transport);
+        Button stop = VoiceButtonMaterial.secondaryButton(this, "Stop");
+        stop.setOnClickListener(v -> {
+            userPlaybackIntent = false;
+            player.stop();
+            stateText.setText("Stopped");
+            playButton.setText("Play");
+        });
+        root.addView(stop, fullWidthButton(48));
         setContentView(root);
         updateLabels();
     }
 
     private LinearLayout.LayoutParams fullWidthButton(int heightDp) {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, heightDp));
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         params.setMargins(0, AndroidUi.dp(this, 3), 0, AndroidUi.dp(this, 3));
         return params;
     }
 
     private void openSource(PlayerSource source, boolean autoplay) {
+        cancelStudio();
         originalSource = source; activeSource = source; studioActive = false; studioSpeed = 1f; logicalDurationMs = 0L;
         int generation = ++sourceGeneration;
-        if (waveformFuture != null) waveformFuture.cancel(true);
+        if(waveformFuture!=null){waveformFuture.cancel(true);if(waveformClient!=null)waveformClient.cancel();}
         if (waveformBitmap != null) { waveformBitmap.recycle(); waveformBitmap = null; }
         waveformBitmapBytes = 0L;
         waveformView.setImageDrawable(null);
@@ -381,18 +408,22 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                         "bytes", source.bytes,
                         "activity_thread", Thread.currentThread().getName()));
         player.open(source.uri, autoplay, settings.speed, settings.volume, settings.muted, settings.loop);
-        loadWaveform(source, generation);
+        if(AppSettings.preferences(this).getBoolean("automatic_waveform",true))loadWaveform(source,generation);
         applySpeed(); updateQueueButtons();
     }
 
     private void loadWaveform(PlayerSource source, int generation) {
         waveformFuture = studioExecutor.submit(() -> {
             try {
-                File image = studioClient.prepareWaveform(source, (phase, done, total) -> {
+                File image = waveformClient.prepareWaveform(source, (phase, done, total) -> {
                     if (generation == sourceGeneration) {
-                        runOnUiThread(() -> studioText.setText(phase));
+                        runOnUiThread(()->{if(generation==sourceGeneration&&!isFinishing())studioText.setText(phase);});
                     }
                 });
+                BitmapFactory.Options bounds=new BitmapFactory.Options();bounds.inJustDecodeBounds=true;
+                BitmapFactory.decodeFile(image.getAbsolutePath(),bounds);
+                if(bounds.outWidth<=0||bounds.outHeight<=0||(long)bounds.outWidth*bounds.outHeight>4L*1024L*1024L)
+                    throw new java.io.IOException("Waveform exceeds the display memory budget");
                 Bitmap bitmap = BitmapFactory.decodeFile(image.getAbsolutePath());
                 if (bitmap == null) throw new java.io.IOException("Thor returned an unreadable waveform");
                 runOnUiThread(() -> {
@@ -447,11 +478,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                     activeSource = new PlayerSource(Uri.fromFile(result.file), source.title,
                             PlayerSource.KIND_STUDIO, result.file.length(), source.sessionId, source.folderId, null);
                     studioActive = true; studioSpeed = result.speed;
-                    player.open(activeSource.uri, true, 1f, settings.volume, settings.muted, settings.loop);
-                    main.postDelayed(() -> {
-                        player.seek(PlayerTimeline.physicalTime(logical, true, studioSpeed));
-                        if (!playing) player.pause();
-                    }, 350L);
+                    player.openAt(activeSource.uri,logical,playing,1f,settings.volume,settings.muted,settings.loop);
                     studioProgress.setVisibility(View.INVISIBLE);
                     studioText.setText(result.engine + " · exact " + formatSpeed(result.speed));
                     modeText.setText("Studio · " + result.engine);
@@ -479,12 +506,13 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
     private void switchToOriginal() {
         long logical = logicalPosition(); boolean playing = player.isPlaying();
         studioActive = false; studioSpeed = 1f; activeSource = originalSource;
-        player.open(originalSource.uri, true, settings.speed, settings.volume, settings.muted, settings.loop);
-        main.postDelayed(() -> { player.seek(logical); if (!playing) player.pause(); }, 350L);
+        player.openAt(originalSource.uri,logical,playing,settings.speed,settings.volume,settings.muted,settings.loop);
     }
 
     private void cancelStudio() {
-        studioGeneration.incrementAndGet(); if (studioFuture != null) studioFuture.cancel(true); studioFuture = null;
+        studioGeneration.incrementAndGet();
+        if(studioFuture!=null){studioFuture.cancel(true);if(studioClient!=null)studioClient.cancel();}
+        studioFuture=null;
         studioProgress.setVisibility(View.INVISIBLE);
     }
 
@@ -506,7 +534,8 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                 "File actions",
                 "Memory and engine",
                 "Clear studio cache",
-                "About player"
+                "About player",
+                "Generate waveform now"
         };
         new MaterialAlertDialogBuilder(this).setTitle("More")
                 .setItems(actions, (dialog, which) -> {
@@ -514,7 +543,8 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                     else if (which == 1) showFileActions();
                     else if (which == 2) showMemory();
                     else if (which == 3) clearStudioCache();
-                    else showPlayerAbout();
+                    else if(which==4)showPlayerAbout();
+                    else if(originalSource!=null)loadWaveform(originalSource,sourceGeneration);
                 }).setNegativeButton("Back", null).show();
     }
 
@@ -535,20 +565,28 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         dialog.setOnShowListener(x->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
             try{
                 float newMin=parse(min),newMax=parse(max),newStep=parse(step);if(newMin<.25f||newMax>8f||newMin>newMax||newStep<.01f||newStep>1f)throw new Exception("Speed range must stay within 0.25× to 8×; step 0.01 to 1.0");
-                settings.speedMin=newMin;settings.speedMax=newMax;settings.speedStep=newStep;settings.speed=settings.normalize(parse(speed));settings.skipBack=PlayerSettings.clamp(parse(back),.1f,3600f);settings.skipForward=PlayerSettings.clamp(parse(forward),.1f,3600f);settings.volume=Math.max(0,Math.min(100,Math.round(parse(volume))));settings.sleepMinutes=Math.max(0,Math.min(1440,Math.round(parse(sleep))));settings.muted=muted.isChecked();settings.loop=loop.isChecked();settings.autoplay=autoplay.isChecked();settings.speedMode=studio.isChecked()?PlayerSettings.MODE_STUDIO:PlayerSettings.MODE_INSTANT;settings.setPresets(presets.getText().toString());settings.save();player.setVolume(settings.volume,settings.muted);player.setLoop(settings.loop);player.updateSkipValues(settings.skipBack,settings.skipForward);scheduleSleepTimer();applySpeed();dialog.dismiss();
+                PlayerSettings candidate=new PlayerSettings(this);
+                candidate.speedMin=newMin;candidate.speedMax=newMax;candidate.speedStep=newStep;candidate.speed=candidate.normalize(parse(speed));candidate.skipBack=PlayerSettings.clamp(parse(back),.1f,3600f);candidate.skipForward=PlayerSettings.clamp(parse(forward),.1f,3600f);candidate.volume=Math.max(0,Math.min(100,Math.round(parse(volume))));candidate.sleepMinutes=Math.max(0,Math.min(1440,Math.round(parse(sleep))));candidate.muted=muted.isChecked();candidate.loop=loop.isChecked();candidate.autoplay=autoplay.isChecked();candidate.speedMode=studio.isChecked()?PlayerSettings.MODE_STUDIO:PlayerSettings.MODE_INSTANT;candidate.setPresets(presets.getText().toString());candidate.save();settings=candidate;player.setVolume(candidate.volume,candidate.muted);player.setLoop(candidate.loop);player.updateSkipValues(candidate.skipBack,candidate.skipForward);scheduleSleepTimer();applySpeed();dialog.dismiss();
             }catch(Exception failure){Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show();}
         }));dialog.show();
     }
 
     private void showMemory() {
-        PlayerMemorySnapshot memory=PlayerMemorySnapshot.capture(this);
         String engine=player.technicalSummary()+(studioActive?"\nStudio: Rubber Band R3 fine at "+formatSpeed(studioSpeed):"");
-        new MaterialAlertDialogBuilder(this).setTitle("Player memory and engine")
-                .setMessage(memory.describe(activeSource==null?0L:activeSource.bytes,
-                        ThorStudioClient.cacheBytes(this), waveformBitmapBytes, engine))
-                .setPositiveButton("Refresh",(d,w)->showMemory())
-                .setNeutralButton("Clear studio cache",(d,w)->clearStudioCache())
-                .setNegativeButton("Back",null).show();
+        long sourceBytes=activeSource==null?0L:activeSource.bytes;
+        long waveformBytes=waveformBitmapBytes;
+        fileExecutor.execute(()->{
+            PlayerMemorySnapshot memory=PlayerMemorySnapshot.capture(getApplicationContext());
+            String description=memory.describe(sourceBytes,ThorStudioClient.cacheBytes(getApplicationContext()),waveformBytes,engine);
+            runOnUiThread(()->{
+                if(isFinishing()||isDestroyed())return;
+                new MaterialAlertDialogBuilder(this).setTitle("Player memory and engine")
+                        .setMessage(description)
+                        .setPositiveButton("Refresh",(d,w)->showMemory())
+                        .setNeutralButton("Clear studio cache",(d,w)->clearStudioCache())
+                        .setNegativeButton("Back",null).show();
+            });
+        });
     }
 
     private void showFileActions() {
@@ -732,14 +770,14 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             titleText.setText(originalSource.title);
             if (previous == null || !previous.uri.equals(originalSource.uri)) {
                 int generation = ++sourceGeneration;
-                if (waveformFuture != null) waveformFuture.cancel(true);
+                if(waveformFuture!=null){waveformFuture.cancel(true);if(waveformClient!=null)waveformClient.cancel();}
                 if (waveformBitmap != null) {
                     waveformBitmap.recycle();
                     waveformBitmap = null;
                 }
                 waveformBitmapBytes = 0L;
                 waveformView.setImageDrawable(null);
-                loadWaveform(originalSource, generation);
+                if(AppSettings.preferences(this).getBoolean("automatic_waveform",true))loadWaveform(originalSource, generation);
             }
         }
         if (!value.error.isEmpty() || "stopped".equals(value.state)
@@ -779,11 +817,11 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         updatePosition();
     }
 
-    private void updatePosition(){long logical=logicalPosition(),length=logicalDuration();timeText.setText(formatTime(logical)+" / "+formatTime(length));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));boolean optimistic=userPlaybackIntent&&playerSnapshot.error.isEmpty()&&(PlayerTerminalPolicy.startIsPending(playerSnapshot.state)||"ready".equals(playerSnapshot.state)||"paused".equals(playerSnapshot.state));playButton.setText(player.isPlaying()||optimistic?"Pause":"Play");}
+    private void updatePosition(){long logical=logicalPosition(),length=logicalDuration();timeText.setText("Position  " + formatTime(logical) + "\nTotal     " + formatTime(length) + "\nRemaining " + formatTime(Math.max(0L, length-logical)));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));boolean optimistic=userPlaybackIntent&&playerSnapshot.error.isEmpty()&&(PlayerTerminalPolicy.startIsPending(playerSnapshot.state)||"ready".equals(playerSnapshot.state)||"paused".equals(playerSnapshot.state));playButton.setText(player.isPlaying()||optimistic?"Pause":"Play");}
     private long logicalPosition(){return playerSnapshot.logicalTimeMs();}
     private long logicalDuration(){long value=playerSnapshot.logicalLengthMs();return value>0?value:logicalDurationMs;}
     private void updateLabels(){speedText.setText(formatSpeed(settings.speed));backSkipButton.setText("−"+formatSeconds(settings.skipBack));forwardSkipButton.setText("+"+formatSeconds(settings.skipForward));}
-    private void scheduleSleepTimer(){main.removeCallbacks(sleepStop);if(settings.sleepMinutes>0)main.postDelayed(sleepStop,settings.sleepMinutes*60_000L);}
+    private void scheduleSleepTimer(){player.configureSleepTimer(settings.sleepMinutes);}
 
     private List<PlayerSource> queueSources() {
         ArrayList<PlayerSource> result = new ArrayList<>();
@@ -804,6 +842,11 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         private boolean pendingOpen;
         private boolean pendingAutoplay;
         private Uri pendingUri;
+        private long pendingLogicalPosition;
+        private Integer pendingSleepMinutes;
+        void configureSleepTimer(int minutes){
+            if(service!=null)service.configureSleepTimer(minutes);else pendingSleepMinutes=minutes;
+        }
 
         void attach(PlayerPlaybackService value) {
             VoiceButtonLocalTrace.log(PlayerActivity.this, "ui.player.service_attach",
@@ -811,9 +854,10 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                     "source", originalSource == null ? "" : originalSource.title,
                     "active_uri", activeSource == null ? "" : activeSource.uri);
             service = value;
+            if(pendingSleepMinutes!=null){service.configureSleepTimer(pendingSleepMinutes);pendingSleepMinutes=null;}
             if (pendingOpen) {
-                open(activeSource == null ? pendingUri : activeSource.uri,
-                        pendingAutoplay, settings.speed, settings.volume,
+                openAt(activeSource == null ? pendingUri : activeSource.uri,
+                        pendingLogicalPosition, pendingAutoplay, settings.speed, settings.volume,
                         settings.muted, settings.loop);
             }
         }
@@ -838,6 +882,10 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
         void open(Uri uri, boolean autoplay, float speed, int volume,
                   boolean muted, boolean loop) {
+            openAt(uri,0L,autoplay,speed,volume,muted,loop);
+        }
+        void openAt(Uri uri,long logicalPosition,boolean autoplay,float speed,int volume,
+                    boolean muted,boolean loop) {
             if (originalSource == null || activeSource == null) {
                 VoiceButtonLocalTrace.log(PlayerActivity.this, "ui.player.bridge_open_no_source",
                         "autoplay", autoplay,
@@ -848,6 +896,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             pendingOpen = true;
             pendingAutoplay = autoplay;
             pendingUri = uri;
+            pendingLogicalPosition=logicalPosition;
             if (service == null) {
                 VoiceButtonLocalTrace.log(PlayerActivity.this, "ui.player.bridge_open_pending",
                         "source", originalSource.title,
@@ -875,7 +924,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                     "speed", speed,
                     "queue_index", queueIndex);
             service.open(originalSource, activeSource, queueSources(), queueIndex,
-                    0L, autoplay, studioActive, studioSpeed, speed,
+                    logicalPosition, autoplay, studioActive, studioSpeed, speed,
                     volume, muted, loop, settings.skipBack,
                     settings.skipForward, settings.autoplay);
         }
@@ -912,7 +961,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             pendingAutoplay = false;
             if(service!=null)service.pause();
         }
-        void stop(){if(service!=null)service.stopPlayback();}
+        void stop(){pendingOpen=false;pendingAutoplay=false;if(service!=null)service.stopPlayback();}
         void seek(long value){if(service!=null)service.seekPhysical(value);}
         void skip(float value){if(service!=null)service.skip(value);}
         void setSpeed(float value){if(service!=null)service.setSpeed(value);}
@@ -936,13 +985,13 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
     }
 
     private LinearLayout row(){LinearLayout row=new LinearLayout(this);row.setOrientation(LinearLayout.HORIZONTAL);row.setGravity(Gravity.CENTER);return row;}
-    private LinearLayout.LayoutParams weighted(){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,AndroidUi.dp(this,52),1f);p.setMargins(AndroidUi.dp(this,2),AndroidUi.dp(this,2),AndroidUi.dp(this,2),AndroidUi.dp(this,2));return p;}
+    private LinearLayout.LayoutParams weighted(){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f);p.setMargins(AndroidUi.dp(this,2),AndroidUi.dp(this,2),AndroidUi.dp(this,2),AndroidUi.dp(this,2));return p;}
     private Button compact(String text){return VoiceButtonMaterial.toolbarButton(this,text);}
     private EditText field(LinearLayout box,String label,float value){return textField(box,label,String.format(Locale.US,"%g",value));}
-    private EditText textField(LinearLayout box,String label,String value){box.addView(AndroidUi.small(this,label));EditText input=new TextInputEditText(this);input.setSingleLine(true);input.setText(value);box.addView(input);return input;}
-    private RadioButton radio(String label,boolean checked){RadioButton b=new RadioButton(this);b.setId(View.generateViewId());b.setText(label);b.setChecked(checked);return b;}
-    private CheckBox check(String label,boolean checked){CheckBox b=new CheckBox(this);b.setText(label);b.setChecked(checked);return b;}
-    private static float parse(EditText input)throws Exception{return Float.parseFloat(input.getText().toString().trim().replace(',','.'));}
+    private EditText textField(LinearLayout box,String label,String value){box.addView(AndroidUi.small(this,label));EditText input=new TextInputEditText(this);input.setSingleLine(true);input.setMinHeight(AndroidUi.dp(this,48));input.setText(value);box.addView(input);return input;}
+    private RadioButton radio(String label,boolean checked){RadioButton b=new RadioButton(this);b.setId(View.generateViewId());b.setText(label);b.setMinHeight(AndroidUi.dp(this,48));b.setChecked(checked);return b;}
+    private CheckBox check(String label,boolean checked){CheckBox b=new CheckBox(this);b.setText(label);b.setMinHeight(AndroidUi.dp(this,48));b.setChecked(checked);return b;}
+    private static float parse(EditText input)throws Exception{float value=Float.parseFloat(input.getText().toString().trim().replace(',','.'));if(Float.isNaN(value)||Float.isInfinite(value))throw new IllegalArgumentException("Enter a finite number");return value;}
     private static String stripExtension(String value){int index=value==null?-1:value.lastIndexOf('.');return index>0?value.substring(0,index):String.valueOf(value);}
     private static String formatSpeed(float speed){return String.format(Locale.US,"%.2f×",speed);}
     private static String formatSeconds(float seconds){return Math.abs(seconds-Math.round(seconds))<.001f?Math.round(seconds)+"s":String.format(Locale.US,"%.1fs",seconds);}

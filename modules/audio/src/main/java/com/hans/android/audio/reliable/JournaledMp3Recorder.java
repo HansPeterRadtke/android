@@ -49,6 +49,7 @@ public final class JournaledMp3Recorder {
     private static final int AUDIO_RECORD_BUFFER_MS = 30_000;
     private static final int PCM_SYNC_MS = 1_000;
     private static final int WRITER_QUEUE_WARN_BLOCKS = 200;
+    private static final int WRITER_QUEUE_CAPACITY = 600; // 30 seconds at the capture block rate.
     private static final long WRITER_JOIN_TIMEOUT_MS = 60_000L;
     private static final long NO_DATA_GRACE_MS = 3_000L;
 
@@ -240,6 +241,7 @@ public final class JournaledMp3Recorder {
                     inputSampleRate / 10L);
 
             while (recording.get()) {
+                writer.requireCapacity();
                 stage = "read_microphone_samples";
                 int read = recorder.read(readBuffer, 0,
                         readBuffer.length, AudioRecord.READ_BLOCKING);
@@ -254,8 +256,8 @@ public final class JournaledMp3Recorder {
                     }
                     stage = "enqueue_pcm_samples";
                     writer.enqueue(readBuffer, read, capturedSamples);
-                    writer.throwIfFailed();
                     capturedSamples += read;
+                    writer.throwIfFailed();
                     levelSampleCount += read;
 
                     if (levelSampleCount >= levelTarget) {
@@ -329,10 +331,12 @@ public final class JournaledMp3Recorder {
             }
             route.release();
 
+            boolean writerDrained = false;
             if (writer != null) {
                 try {
                     stage = "drain_pcm_writer";
-                    writerStats = writer.finishAndAwait(WRITER_JOIN_TIMEOUT_MS);
+                    writerStats = writer.finishAndAwait(RuntimePolicy.value("writer_drain_warning_ms"));
+                    writerDrained = true;
                 } catch (Throwable writerFailure) {
                     if (!failureReported) {
                         failureReported = true;
@@ -348,7 +352,11 @@ public final class JournaledMp3Recorder {
             if (journal != null) {
                 try {
                     stage = "close_direct_pcm_journal";
-                    if (capturedSamples > 0L) {
+                    if (!writerDrained) {
+                        journal.closePreservingOpenJournal();
+                        journal = null;
+                    } else if (writerStats.samplesWritten > 0L) {
+                        capturedSamples = writerStats.samplesWritten;
                         File closedFile = journal.publish();
                         journal = null;
                         store.fsyncSessionDirectory(sessionId);
@@ -497,7 +505,7 @@ public final class JournaledMp3Recorder {
 
     private static final class PcmJournalWriter {
         private final LinkedBlockingQueue<PcmBlock> queue =
-                new LinkedBlockingQueue<>();
+                new LinkedBlockingQueue<>((int)RuntimePolicy.value("pcm_queue_blocks"));
         private final AtomicReference<Throwable> failure =
                 new AtomicReference<>();
         private final DurablePcmJournal journal;
@@ -512,6 +520,7 @@ public final class JournaledMp3Recorder {
         private volatile long syncTotalMs;
         private volatile long syncMaxMs;
         private volatile int maxQueueDepth;
+        private volatile boolean finishing;
 
         PcmJournalWriter(DurablePcmJournal journal, int sequence,
                          int sampleRate, Listener listener) {
@@ -520,7 +529,7 @@ public final class JournaledMp3Recorder {
             this.sampleRate = sampleRate;
             this.listener = listener;
             this.syncTargetSamples = Math.max(1L,
-                    sampleRate * PCM_SYNC_MS / 1000L);
+                    sampleRate * RuntimePolicy.value("pcm_sync_ms") / 1000L);
             this.thread = new Thread(this::run, "reliable-audio-pcm-writer");
         }
 
@@ -528,11 +537,19 @@ public final class JournaledMp3Recorder {
             thread.start();
         }
 
+        void requireCapacity() throws IOException {
+            throwIfFailed();
+            if (queue.remainingCapacity() == 0) {
+                throw new IOException("Storage is too slow: capture paused before the bounded audio buffer fills. "
+                        + "Keep the app open while captured audio is saved; free storage before resuming.");
+            }
+        }
+
         void enqueue(short[] samples, int count, long capturedBefore)
                 throws IOException {
             throwIfFailed();
             PcmBlock block = PcmBlock.copyOf(samples, count);
-            queue.offer(block);
+            if (!queue.offer(block)) throw new IOException("Audio writer capacity exhausted");
             int depth = queue.size();
             if (depth > maxQueueDepth) maxQueueDepth = depth;
             if (depth >= WRITER_QUEUE_WARN_BLOCKS
@@ -548,25 +565,27 @@ public final class JournaledMp3Recorder {
         }
 
         Stats finishAndAwait(long timeoutMs) throws IOException {
-            queue.offer(PcmBlock.END);
+            finishing = true;
             long deadline = SystemClock.elapsedRealtime()
                     + Math.max(0L, timeoutMs);
             boolean interrupted = false;
+            boolean warned = false;
             while (thread.isAlive()) {
                 long remaining = deadline - SystemClock.elapsedRealtime();
-                if (remaining <= 0L) break;
+                if (remaining <= 0L && !warned) {
+                    warned = true;
+                    listener.onFailure("drain_pcm_writer", IOException.class.getName(),
+                            "Storage is still saving captured audio. Keep the app open; capture is paused.");
+                }
+                // Never publish/close a journal while its writer is still alive.
+                // Keep the bounded pending audio and foreground protection until drain completes.
+                if (remaining <= 0L) remaining = 250L;
                 try {
                     thread.join(Math.min(remaining, 250L));
                 } catch (InterruptedException interruption) {
                     interrupted = true;
                     Thread.interrupted();
                 }
-            }
-            if (thread.isAlive()) {
-                thread.interrupt();
-                failure.compareAndSet(null, new IOException(
-                        "PCM writer did not drain within " + timeoutMs
-                                + " ms"));
             }
             if (interrupted) Thread.currentThread().interrupt();
             throwIfFailed();
@@ -588,8 +607,11 @@ public final class JournaledMp3Recorder {
             Process.setThreadPriority(Process.THREAD_PRIORITY_DEFAULT);
             try {
                 while (true) {
-                    PcmBlock block = queue.take();
-                    if (block == PcmBlock.END) break;
+                    PcmBlock block = queue.poll(250L, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    if (block == null) {
+                        if (finishing) break;
+                        continue;
+                    }
                     journal.append(block.samples, block.count);
                     samplesWritten += block.count;
                     samplesSinceSync += block.count;

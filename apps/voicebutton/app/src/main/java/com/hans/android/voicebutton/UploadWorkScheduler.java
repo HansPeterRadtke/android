@@ -24,6 +24,11 @@ final class UploadWorkScheduler {
 
     static void initialize(Context context) {
         Context app = context.getApplicationContext();
+        if(!AppSettings.automaticUpload(app)) {
+            WorkManager.getInstance(app).cancelUniqueWork(PERIODIC_WORK);
+            if(!AppSettings.uploadPermitted(app))WorkManager.getInstance(app).cancelUniqueWork(IMMEDIATE_WORK);
+            return;
+        }
         Constraints connected = connectedConstraint();
         PeriodicWorkRequest periodic = new PeriodicWorkRequest.Builder(
                 RecordingUploadWorker.class, 15L, TimeUnit.MINUTES)
@@ -37,6 +42,7 @@ final class UploadWorkScheduler {
     }
 
     static void enqueue(Context context, String reason) {
+        if(!AppSettings.uploadPermitted(context))return;
         OneTimeWorkRequest request = new OneTimeWorkRequest.Builder(
                 RecordingUploadWorker.class)
                 .setConstraints(connectedConstraint())

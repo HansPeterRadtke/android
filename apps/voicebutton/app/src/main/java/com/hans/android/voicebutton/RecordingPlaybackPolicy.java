@@ -10,8 +10,8 @@ final class RecordingPlaybackPolicy {
     static Action decide(ReliableSessionManifest manifest,
                          boolean finalFileExists,
                          boolean captureActive) {
-        if (finalFileExists) return Action.READY;
         if (captureActive) return Action.BLOCK_CAPTURE;
+        if (finalFileExists) return Action.READY;
         if (manifest == null || manifest.isDiscardableEmptySession()) {
             return Action.NO_AUDIO;
         }

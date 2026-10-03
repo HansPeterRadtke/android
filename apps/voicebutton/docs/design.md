@@ -1,3 +1,5 @@
+> Current GUI, lifecycle, automation and limits are defined in `../GUI_CONTRACT.md` and `runtime-configuration.md`. Versioned requirements below document their historical introduction; later consolidated contracts supersede conflicting screen and lifecycle details.
+
 # Voice Button chunk architecture
 
 The microphone thread reads fifty-millisecond signed sixteen-bit mono PCM blocks and places them into a bounded queue. It never touches disk or network. A dedicated writer simultaneously journals raw PCM and encodes MP3. Every one hundred milliseconds it fsyncs both files. Every two seconds it closes an independent MP3 chunk, verifies complete frames, publishes rich metadata, and wakes the uploader.

@@ -77,6 +77,7 @@ final class VlcAudioPlayer {
         engineThread.start();
         engine = new Handler(engineThread.getLooper());
         engine.post(this::initializeEngine);
+        CapturePlaybackGate.register(this);
     }
 
     void setListener(Listener value) { listener = value; }
@@ -159,7 +160,7 @@ final class VlcAudioPlayer {
     void setVolume(int volume, boolean muted) {
         desiredVolume = Math.max(0, Math.min(100, volume));
         this.muted = muted;
-        post(() -> { if (player != null) player.setVolume(muted ? 0 : desiredVolume); });
+        post(() -> { if (player != null) player.setVolume(muted || (!pendingShouldPlay && pendingStartMs >= 0L) || CapturePlaybackGate.isCapturing() ? 0 : desiredVolume); });
     }
 
     String technicalSummary() {
@@ -173,6 +174,7 @@ final class VlcAudioPlayer {
     }
 
     void release() {
+        CapturePlaybackGate.unregister(this);
         released = true;
         listener = null;
         engine.post(() -> {
@@ -246,7 +248,7 @@ final class VlcAudioPlayer {
                     "autoplay", autoplay,
                     "summary", technicalSummary());
             media.release();
-            player.setVolume(muted ? 0 : desiredVolume);
+            player.setVolume(muted || (!pendingShouldPlay && pendingStartMs >= 0L) || CapturePlaybackGate.isCapturing() ? 0 : desiredVolume);
             player.setRate(desiredRate);
             cachedRate = desiredRate;
             engineState = "media-ready";
@@ -261,7 +263,17 @@ final class VlcAudioPlayer {
         }
     }
 
+    void pauseForCapture() throws java.io.IOException {
+        pendingShouldPlay=false;
+        java.util.concurrent.CountDownLatch paused=new java.util.concurrent.CountDownLatch(1);
+        if(!engine.post(()->{try{if(player!=null){player.setVolume(0);player.pause();}playing=false;}
+            finally{paused.countDown();}}))throw new java.io.IOException("Playback engine is closing; retry recording");
+        try {if(!paused.await(5,java.util.concurrent.TimeUnit.SECONDS))throw new java.io.IOException("Playback did not pause; stop playback before recording");}
+        catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw new java.io.IOException("Playback pause interrupted",interrupted);}
+    }
+
     private void playOnEngine() {
+        if(CapturePlaybackGate.isCapturing()){notifyError("Pause recording before playing audio");return;}
         VoiceButtonLocalTrace.log(app, "player.vlc.play_engine_enter",
                 "thread", Thread.currentThread().getName(),
                 "engine_state", engineState,
@@ -294,11 +306,12 @@ final class VlcAudioPlayer {
                 "summary", technicalSummary());
         switch (event.type) {
             case MediaPlayer.Event.Playing:
+                if(CapturePlaybackGate.isCapturing()){player.setVolume(0);player.pause();playing=false;notifyState("paused for recording");break;}
                 terminalError = false;
                 playing = true;
                 engineState = "playing";
                 player.setRate(desiredRate);
-                player.setVolume(muted ? 0 : desiredVolume);
+                player.setVolume(muted || (!pendingShouldPlay && pendingStartMs >= 0L) || CapturePlaybackGate.isCapturing() ? 0 : desiredVolume);
                 if (pendingStartMs >= 0L) {
                     long start = pendingStartMs;
                     boolean keepPlaying = pendingShouldPlay;
@@ -423,7 +436,7 @@ final class VlcAudioPlayer {
         post(() -> {
             if (change == AudioManager.AUDIOFOCUS_GAIN) {
                 focusHeld = true;
-                if (player != null) player.setVolume(muted ? 0 : desiredVolume);
+                if (player != null) player.setVolume(muted || (!pendingShouldPlay && pendingStartMs >= 0L) || CapturePlaybackGate.isCapturing() ? 0 : desiredVolume);
             } else if (change == AudioManager.AUDIOFOCUS_LOSS
                     || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
                     || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {

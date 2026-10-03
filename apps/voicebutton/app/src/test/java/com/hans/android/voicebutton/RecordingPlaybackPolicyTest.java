@@ -6,11 +6,13 @@ import com.hans.android.audio.reliable.ReliableSessionManifest;
 import org.junit.Test;
 
 public class RecordingPlaybackPolicyTest {
-    @Test public void existingFinalFileOpensImmediately() {
+    @Test public void existingFinalFileOpensWhenCaptureIsInactive() {
         ReliableSessionManifest manifest = new ReliableSessionManifest();
         assertEquals(RecordingPlaybackPolicy.Action.READY,
-                RecordingPlaybackPolicy.decide(manifest, true, true));
+                RecordingPlaybackPolicy.decide(manifest, true, false));
     }
+
+    @Test public void existingFinalFileCannotBypassActiveCapture(){assertEquals(RecordingPlaybackPolicy.Action.BLOCK_CAPTURE,RecordingPlaybackPolicy.decide(new ReliableSessionManifest(),true,true));}
 
     @Test public void finishedRecordingIsFinalizedBeforePlayback() {
         ReliableSessionManifest manifest = withAudio();

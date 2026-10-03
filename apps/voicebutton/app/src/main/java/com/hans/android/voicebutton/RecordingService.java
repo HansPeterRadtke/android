@@ -623,6 +623,7 @@ public final class RecordingService extends Service {
     }
 
     private void retrySynchronizationNow(String reason) throws IOException {
+        AppSettings.requestUpload(this);
         if (recorder.isRecording()) {
             diag(PhoneDiagnostics.INFO, "upload.manual_retry_deferred", currentSessionId,
                     "Synchronization retry was deferred until recording stops",
@@ -883,7 +884,14 @@ public final class RecordingService extends Service {
         return out.toString();
     }
 
+    public void applyAutomationSettings() {
+        ReliableUploader value=uploader;
+        if(!AppSettings.uploadPermitted(this)){if(value!=null)value.stop();return;}
+        signalUploader("settings_changed");
+    }
+
     private void signalUploader(String reason) {
+        if(!AppSettings.uploadPermitted(this))return;
         if (!RecordingIsolationPolicy.mayRunDeferredWork(
                 recorder.isRecording(), exitRequested.get())) return;
         ReliableUploader value = uploader;
@@ -1096,7 +1104,12 @@ public final class RecordingService extends Service {
                         "device_type", input.getDeviceType(), "label", input.getLabel(),
                         "base_duration_ms", recordingBaseDurationMs));
         refresh("PREPARING", "Opening " + input.getLabel(), true, "Opening microphone");
-        if (!recorder.start(this, input, store, sessionId, recorderListener)) {
+        CapturePlaybackGate.begin();
+        boolean captureStarted;
+        try {captureStarted=recorder.start(this,input,store,sessionId,recorderListener);}
+        catch(Exception failure){CapturePlaybackGate.end();throw failure;}
+        if (!captureStarted) {
+            CapturePlaybackGate.end();
             boolean removed = false;
             try { removed = store.discardIfEmpty(sessionId); }
             catch (Exception ignored) {}
@@ -1329,6 +1342,7 @@ public final class RecordingService extends Service {
         }
 
         @Override public void onStopped(String sessionId) {
+            CapturePlaybackGate.end();
             try {
                 maintenanceExecutor.execute(() ->
                         handleRecorderStopped(sessionId));
@@ -1924,9 +1938,7 @@ public final class RecordingService extends Service {
             ReliableUploader.LiveProgress live = uploader == null ? null : uploader.liveProgress();
             String operation = live == null || live.operation == null ? "idle" : live.operation;
             boolean idle = operation.isEmpty()
-                    || "idle".equals(operation)
-                    || "idle_ignored_unreadable_records".equals(operation)
-                    || "waiting_quarantined_recordings".equals(operation);
+                    || "idle".equals(operation);
             scheduleUploaderRefresh(new RefreshRequest(
                     idle ? "READY" : "SYNCHRONIZING",
                     idle ? "Server upload is complete" : snapshot.explanation,
@@ -1982,7 +1994,7 @@ public final class RecordingService extends Service {
                     statusStore = ReliableSessionStore.openForBrowsing(this);
                     conversion = Executors.newSingleThreadExecutor();
                     uploader = new ReliableUploader(this, store, BuildConfig.VOICE_BASE_URL, uploaderListener);
-                    uploader.start();
+                    if(AppSettings.uploadPermitted(this))uploader.start();
                     success = true;
                 }
             } catch (Exception failure) {
@@ -1996,7 +2008,7 @@ public final class RecordingService extends Service {
                         statusStore = ReliableSessionStore.openForBrowsing(this);
                         conversion = Executors.newSingleThreadExecutor();
                         uploader = new ReliableUploader(this, store, BuildConfig.VOICE_BASE_URL, uploaderListener);
-                        uploader.start();
+                        if(AppSettings.uploadPermitted(this))uploader.start();
                     } catch (Exception recoveryFailure) {
                         failureText = (failureText.isEmpty() ? "" : failureText + " ")
                                 + PhoneDiagnostics.exactFailure("Reopening app storage after cleanup failure", recoveryFailure);
@@ -2245,9 +2257,7 @@ public final class RecordingService extends Service {
                 && uploadPendingBytes <= 0L
                 && (liveOperation == null
                 || liveOperation.isEmpty()
-                || "idle".equals(liveOperation)
-                || "idle_ignored_unreadable_records".equals(liveOperation)
-                || "waiting_quarantined_recordings".equals(liveOperation))) {
+                || "idle".equals(liveOperation))) {
             state = "READY";
             explanation = "Server upload is complete; old unreadable local records are ignored";
         }

@@ -33,6 +33,7 @@ public final class RecordingUploadWorker extends Worker
     }
 
     @NonNull @Override public Result doWork() {
+        if(!AppSettings.uploadPermitted(getApplicationContext()))return Result.success();
         if (!UploadWorkCoordinator.beginBackground(this)) return Result.success();
         try {
             ReliableSessionStore store = new ReliableSessionStore(
@@ -48,7 +49,7 @@ public final class RecordingUploadWorker extends Worker
             setForegroundAsync(foregroundInfo()).get(30L, TimeUnit.SECONDS);
             value.start();
             value.signal();
-            while (!isStopped()) {
+            while (!isStopped() && AppSettings.uploadPermitted(getApplicationContext())) {
                 if (!value.hasPendingTransferWork()) {
                     value.stop();
                     value.awaitStopped(5000L);

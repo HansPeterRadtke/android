@@ -106,7 +106,17 @@ public final class ReliableUploader {
 
     public synchronized void start() { ensureRunning(); }
 
+    private boolean uploadPermitted() {
+        android.content.SharedPreferences p=context.getSharedPreferences("voicebutton_behavior",Context.MODE_PRIVATE);
+        return p.getBoolean("automatic_upload",true)||p.getLong("manual_upload_before_ms",0L)>0;
+    }
+    private boolean eligible(ReliableSessionManifest manifest) {
+        android.content.SharedPreferences p=context.getSharedPreferences("voicebutton_behavior",Context.MODE_PRIVATE);
+        return p.getBoolean("automatic_upload",true)||manifest.createdAt<=p.getLong("manual_upload_before_ms",0L);
+    }
+
     public synchronized boolean ensureRunning() {
+        if(!uploadPermitted())return false;
         Thread value = thread;
         if (value != null && value.isAlive()) return false;
         if (!backgroundWorker) {
@@ -134,7 +144,7 @@ public final class ReliableUploader {
         try {
             if (!store.foldersNeedingSync().isEmpty()) return true;
             for (ReliableSessionManifest manifest : store.list()) {
-                if (completedOnly && !manifest.recordingFinished) continue;
+                if (!eligible(manifest) || (completedOnly && !manifest.recordingFinished)) continue;
                 if (needsTransferWork(manifest)
                         && !quarantinedSessionIds.contains(manifest.sessionId)) {
                     return true;
@@ -164,7 +174,7 @@ public final class ReliableUploader {
         try {
             if (!store.foldersNeedingSync().isEmpty()) return true;
             for (ReliableSessionManifest manifest : store.list()) {
-                if (completedOnly && !manifest.recordingFinished) continue;
+                if (!eligible(manifest) || (completedOnly && !manifest.recordingFinished)) continue;
                 if (needsTransferWork(manifest)) return true;
             }
         } catch (Exception ignored) {
@@ -229,7 +239,9 @@ public final class ReliableUploader {
             }
             PROCESS_UPLOAD_LEASE.lockInterruptibly();
             leaseHeld = true;
-            while (running.get()) {
+            while (running.get() && uploadPermitted()) {
+                client.setAutomaticTranscription(context.getSharedPreferences("voicebutton_behavior",Context.MODE_PRIVATE)
+                        .getBoolean("automatic_transcription",true));
                 boolean found = false;
                 boolean actionable = false;
                 boolean quarantinedFound = false;
@@ -292,7 +304,7 @@ public final class ReliableUploader {
                         boolean audioPass = pass == 0;
                         for (ReliableSessionManifest manifest : sessions) {
                             if (!running.get()) break;
-                            if (completedOnly && !manifest.recordingFinished) continue;
+                            if (!eligible(manifest) || (completedOnly && !manifest.recordingFinished)) continue;
                             boolean readablePendingAudio = hasReadablePendingAudio(manifest, true);
                             if (audioPass != readablePendingAudio) continue;
                             boolean unreadablePendingAudio = !readablePendingAudio
@@ -342,16 +354,21 @@ public final class ReliableUploader {
                     }
                     retryAttempt = 0;
                     if (!quarantinedFound) lastFailureRetryable = true;
-                    if (!found) currentOperation = "idle";
+                    if (!found) {
+                        currentOperation="idle";
+                        context.getSharedPreferences("voicebutton_behavior",Context.MODE_PRIVATE).edit()
+                                .putLong("manual_upload_before_ms",0L).apply();
+                    }
                     else if (!actionable && quarantinedFound) {
-                        currentOperation = "idle_ignored_unreadable_records";
+                        currentOperation = "waiting_quarantined_recordings";
                         currentSessionId = "";
                         currentSequence = -1;
                         currentDurableBytes = 0L;
                         currentTotalBytes = 0L;
-                        lastFailureRetryable = true;
-                        lastFailure = "";
-                        listener.onState("", "Stored completely; old unreadable local records ignored");
+                        lastFailureRetryable = false;
+                        lastFailure = quarantinedSessionIds.size() + " recording(s) need recovery before backup can complete";
+                        listener.onState("", "Backup incomplete: " + lastFailure
+                                + ". Open Library and keep the affected local audio.");
                     }
                     waitForSignal(networkUnavailable ? 60_000L
                             : urgentAudio ? 250L
@@ -638,6 +655,7 @@ public final class ReliableUploader {
             store.markRemoteDisplayName(sessionId, manifest.displayName);
             manifest = store.load(sessionId);
         } catch (Exception metadataFailure) {
+            if(client.requiresTranscriptionPolicyConfirmation())throw metadataFailure;
             lastFailure = metadataFailure.getClass().getSimpleName()
                     + ": " + String.valueOf(metadataFailure.getMessage());
             listener.onDiagnostic("WARN", "upload.metadata_sync_deferred",
@@ -800,6 +818,19 @@ public final class ReliableUploader {
 
     private void applyStatus(ReliableSessionManifest local,
                              ReliableUploadClient.Status status) throws Exception {
+        List<ReliableSessionStore.RemoteChunkState> remoteChunks=validatedRemoteChunks(local,status);
+        List<ReliableSessionStore.TranscriptState> transcripts = new ArrayList<>();
+        for (ReliableUploadClient.Transcript transcript : status.transcripts.values()) {
+            transcripts.add(new ReliableSessionStore.TranscriptState(
+                    transcript.seq, transcript.state, transcript.text,
+                    transcript.engine, transcript.createdAtMs, transcript.error));
+        }
+        store.reconcileRemoteState(local.sessionId, remoteChunks, transcripts,
+                status.committed);
+    }
+
+    static List<ReliableSessionStore.RemoteChunkState> validatedRemoteChunks(
+            ReliableSessionManifest local,ReliableUploadClient.Status status) throws Exception {
         List<ReliableSessionStore.RemoteChunkState> remoteChunks = new ArrayList<>();
         for (Map.Entry<Integer, ReliableUploadClient.RemoteSegment> entry
                 : status.received.entrySet()) {
@@ -815,29 +846,16 @@ public final class ReliableUploader {
                     segment.seq, status.serverId, status.manifestRevision,
                     remote.receivedAtMs, remote.durableAtMs));
         }
-        if (status.committed && remoteChunks.isEmpty()
-                && local.recordingFinished && local.conversionFinished
-                && !local.segments.isEmpty()) {
-            for (ReliableSessionManifest.Segment segment : local.orderedSegments()) {
-                remoteChunks.add(new ReliableSessionStore.RemoteChunkState(
-                        segment.seq, status.serverId, status.manifestRevision,
-                        0L, 0L));
-            }
-            listener.onDiagnostic("INFO", "upload.committed_without_segments",
-                    local.sessionId,
-                    "Jetson reports the recording committed without per-chunk rows; marking local chunks remote complete",
-                    fields("chunk_count", local.segments.size(),
-                            "server_id", status.serverId,
-                            "manifest_revision", status.manifestRevision), null);
+        if (status.serverId == null || status.serverId.trim().isEmpty()) {
+            throw new ReliableUploadClient.ProtocolException(409, "Server identity is missing; local audio retained");
         }
-        List<ReliableSessionStore.TranscriptState> transcripts = new ArrayList<>();
-        for (ReliableUploadClient.Transcript transcript : status.transcripts.values()) {
-            transcripts.add(new ReliableSessionStore.TranscriptState(
-                    transcript.seq, transcript.state, transcript.text,
-                    transcript.engine, transcript.createdAtMs, transcript.error));
+        if (status.committed && (!local.recordingFinished || !local.conversionFinished
+                || local.segments.isEmpty() || remoteChunks.size() != local.segments.size()
+                || status.received.size() != local.segments.size())) {
+            throw new ReliableUploadClient.ProtocolException(409,
+                    "Server completion lacks matching proof for every audio chunk; local audio retained");
         }
-        store.reconcileRemoteState(local.sessionId, remoteChunks, transcripts,
-                status.committed);
+        return remoteChunks;
     }
 
     private boolean hasNetwork() {

@@ -155,6 +155,32 @@ public final class PlayerPlaybackService extends Service
     private boolean autoplay;
     private boolean foreground;
     private boolean closing;
+    private volatile long sleepDeadlineElapsedMs;
+    private final Runnable sleepCheck=new Runnable(){
+        @Override public void run(){
+            if(sleepDeadlineElapsedMs<=0L||closing)return;
+            long remaining=sleepDeadlineElapsedMs-SystemClock.elapsedRealtime();
+            if(remaining<=0L){pause();return;}
+            main.postDelayed(this,Math.min(remaining,1000L));
+        }
+    };
+    void configureSleepTimer(int minutes){
+        int bounded=Math.max(0,Math.min(1440,minutes));
+        if(settings!=null)settings.sleepMinutes=bounded;
+        sleepDeadlineElapsedMs=bounded==0?0L:SystemClock.elapsedRealtime()+bounded*60000L;
+        getSharedPreferences("voicebutton_player",MODE_PRIVATE).edit()
+                .putLong("sleep_deadline_elapsed_ms",sleepDeadlineElapsedMs)
+                .putInt("sleep_deadline_boot",android.provider.Settings.Global.getInt(getContentResolver(),android.provider.Settings.Global.BOOT_COUNT,0)).apply();
+        main.removeCallbacks(sleepCheck);main.post(sleepCheck);
+    }
+    private void restoreSleepTimer(){
+        android.content.SharedPreferences p=getSharedPreferences("voicebutton_player",MODE_PRIVATE);
+        int boot=android.provider.Settings.Global.getInt(getContentResolver(),android.provider.Settings.Global.BOOT_COUNT,0);
+        sleepDeadlineElapsedMs=p.getInt("sleep_deadline_boot",-1)==boot?p.getLong("sleep_deadline_elapsed_ms",0L):0L;
+        if(sleepDeadlineElapsedMs==0L&&settings!=null&&settings.sleepMinutes>0)configureSleepTimer(settings.sleepMinutes);
+        else{main.removeCallbacks(sleepCheck);main.post(sleepCheck);}
+    }
+
     private volatile Snapshot snapshot = Snapshot.initial();
 
     private final Runnable checkpointTicker = new Runnable() {
@@ -216,6 +242,7 @@ public final class PlayerPlaybackService extends Service
         checkpointExecutor.execute(() -> {
             checkpointStore = new PlayerCheckpointStore(this);
             settings = new PlayerSettings(this);
+            restoreSleepTimer();
             main.post(this::copySettingsFromPreferences);
         });
     }
@@ -327,14 +354,17 @@ public final class PlayerPlaybackService extends Service
                 "volume", volume,
                 "muted", muted,
                 "loop", loop);
-        player.openAt(activeSource.uri, physical, shouldPlay,
+        boolean allowed=shouldPlay&&!CapturePlaybackGate.isCapturing()
+                &&(sleepDeadlineElapsedMs<=0L||SystemClock.elapsedRealtime()<sleepDeadlineElapsedMs);
+        ThorStudioClient.protectPlayback(activeSource.uri);
+        player.openAt(activeSource.uri, physical, allowed,
                 playbackRate, volume, muted, loop);
-        snapshot = new Snapshot("opening", "", shouldPlay, false,
+        snapshot = new Snapshot("opening", "", allowed, false,
                 physical, 0L, playbackRate, originalSource, activeSource,
                 studioActive, studioSpeed, queueIndex, queue.size(),
                 player.technicalSummary());
         restartCheckpointTicker();
-        saveCheckpointAsync(shouldPlay);
+        saveCheckpointAsync(allowed);
         publish();
         updateMediaSession();
         updateNotification();
@@ -398,6 +428,9 @@ public final class PlayerPlaybackService extends Service
     }
 
     void play() {
+        if(CapturePlaybackGate.isCapturing()){publish();return;}
+        if(sleepDeadlineElapsedMs>0L&&SystemClock.elapsedRealtime()>=sleepDeadlineElapsedMs)
+            configureSleepTimer(settings==null?0:settings.sleepMinutes);
         if (!onPlayerCommandThread()) {
             enqueuePlayerCommand("play", this::play);
             return;
@@ -864,6 +897,7 @@ public final class PlayerPlaybackService extends Service
     }
 
     @Override public void onDestroy() {
+        main.removeCallbacks(sleepCheck);
         main.removeCallbacks(checkpointTicker);
         if (!closing && activeSource != null) {
             saveCheckpointAsync(player != null && player.isPlaying());
@@ -874,6 +908,7 @@ public final class PlayerPlaybackService extends Service
             noisyReceiverRegistered = false;
         }
         if (player != null) player.release();
+        ThorStudioClient.protectPlayback(null);
         if (mediaSession != null) {
             mediaSession.setActive(false);
             mediaSession.release();

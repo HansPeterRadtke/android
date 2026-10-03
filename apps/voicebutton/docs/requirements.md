@@ -1,3 +1,5 @@
+> Current GUI, lifecycle, automation and limits are defined in `../GUI_CONTRACT.md` and `runtime-configuration.md`. Versioned requirements below document their historical introduction; later consolidated contracts supersede conflicting screen and lifecycle details.
+
 # Voice Button requirements
 
 Voice Button is a continuously recording, loss-bounded audio journal with durable phone storage, immediate chunk replication to Jetson, per-chunk speech recognition, transcript return, folders, playback, pause, resume, finish, and explicit close.
