@@ -694,9 +694,6 @@ public class MainActivity extends Activity {
               || foregroundMode == ForegroundMode.RECONNECTING)) {
             setForegroundMode(ForegroundMode.LISTENING, null);
           }
-          if (autoSend && !pendingTurnId.isEmpty() && !draftEdit.getText().toString().trim().isEmpty()) {
-            submitDraft();
-          }
           updateTranscriptPanel();
         }
         return;
@@ -1210,7 +1207,6 @@ public class MainActivity extends Activity {
       historyPrefs.edit().putBoolean(AUTO_SEND_PREF_KEY, autoSend).apply();
       sendClientState();
       updateTranscriptPanel();
-      if (autoSend && !pendingTurnId.isEmpty() && !draftEdit.getText().toString().trim().isEmpty()) submitDraft();
     });
     cues.setOnCheckedChangeListener((button, checked) -> {
       voiceActivityCues = checked;
@@ -2139,9 +2135,6 @@ public class MainActivity extends Activity {
       persistAndRenderConversation();
       updateTranscriptPanel();
       updateReplayRow();
-      if (autoSend && !pendingTurnId.isEmpty() && !draftEdit.getText().toString().trim().isEmpty()) {
-        submitDraft();
-      }
     });
   }
 
