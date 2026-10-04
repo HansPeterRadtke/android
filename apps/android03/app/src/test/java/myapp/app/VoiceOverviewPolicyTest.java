@@ -9,8 +9,8 @@ public class VoiceOverviewPolicyTest {
     assertFalse(VoiceOverviewPolicy.showWorker("idle"));
     assertTrue(VoiceOverviewPolicy.showWorker("working"));
     assertTrue(VoiceOverviewPolicy.showWorker("input_required"));
-    assertFalse(VoiceOverviewPolicy.showWorker("completed"));
-    assertFalse(VoiceOverviewPolicy.showWorker("canceled"));
+    assertTrue(VoiceOverviewPolicy.showWorker("completed"));
+    assertTrue(VoiceOverviewPolicy.showWorker("canceled"));
   }
 
   @Test public void replayRowExistsOnlyWhenAudioExists() {

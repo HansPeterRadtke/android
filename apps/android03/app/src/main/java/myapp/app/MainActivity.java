@@ -174,7 +174,7 @@ public class MainActivity extends Activity {
   private final ConversationTextModel conversationTextModel = new ConversationTextModel();
   private volatile boolean replayUserAvailable = false;
   private volatile boolean replayAssistantAvailable = false;
-  private volatile int currentWorkerSequence = 0;
+  private final WorkerEventSequencePolicy workerEventSequences = new WorkerEventSequencePolicy();
   private volatile ForegroundMode foregroundMode = ForegroundMode.READY;
 
   private AcousticEchoCanceler aec;
@@ -1321,10 +1321,7 @@ public class MainActivity extends Activity {
     String eventType = obj.optString("event_type", "").trim();
     String message = obj.optString("message", "").trim();
     int sequence = obj.optInt("sequence", 0);
-    if (sequence > 0) {
-      if (sequence <= currentWorkerSequence) return;
-      currentWorkerSequence = sequence;
-    }
+    if (!workerEventSequences.accept(workerId, sequence)) return;
     boolean visible = VoiceOverviewPolicy.showWorker(status);
     String label = workerLabel(status, message);
     runOnUiThread(() -> {
@@ -1344,7 +1341,10 @@ public class MainActivity extends Activity {
       default: base = getString(R.string.background_generic, status); break;
     }
     String clean = message == null ? "" : message.trim();
-    if (clean.length() > appConfig.workerPreviewMaxChars) {
+    boolean compactProgress = "working".equals(status)
+        || "queued".equals(status)
+        || "cancellation_requested".equals(status);
+    if (compactProgress && clean.length() > appConfig.workerPreviewMaxChars) {
       clean = clean.substring(0, appConfig.workerPreviewMaxChars - 1).trim() + "…";
     }
     return clean.isEmpty() ? base : base + "\n" + clean;
@@ -1827,10 +1827,9 @@ public class MainActivity extends Activity {
   }
 
   private boolean hasRequiredAudioPermissions() {
-    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-        != PackageManager.PERMISSION_GRANTED) return false;
-    return Build.VERSION.SDK_INT < 31
-        || ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
+    // Bluetooth permission only enables Bluetooth inputs. The device microphone
+    // remains usable when Nearby devices permission is declined.
+    return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
         == PackageManager.PERMISSION_GRANTED;
   }
 

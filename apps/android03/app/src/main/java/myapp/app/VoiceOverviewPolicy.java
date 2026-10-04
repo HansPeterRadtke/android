@@ -6,11 +6,7 @@ final class VoiceOverviewPolicy {
   static boolean showWorker(String status) {
     if (status == null) return false;
     String value = status.trim();
-    return "working".equals(value)
-        || "queued".equals(value)
-        || "input_required".equals(value)
-        || "cancellation_requested".equals(value)
-        || "failed".equals(value);
+    return !value.isEmpty() && !"none".equals(value) && !"idle".equals(value);
   }
 
   static boolean showReplay(boolean userAudio, boolean assistantAudio) {
