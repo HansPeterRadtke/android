@@ -244,6 +244,7 @@ public class MainActivity extends Activity {
     wsClient = new OkHttpClient.Builder()
         .connectTimeout(appConfig.connectTimeoutMs, TimeUnit.MILLISECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
+        .pingInterval(15, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build();
     connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
@@ -2234,9 +2235,9 @@ public class MainActivity extends Activity {
   }
 
   @Override protected void onStop() {
-    if (running.get()) stopSession();
-    connectionWanted.set(false);
-    mainHandler.postDelayed(() -> closeCurrentSocket("app_backgrounded", true), 300L);
+    // Voice sessions are user-owned, not Activity-visibility-owned. Do not stop
+    // recording or deliberately tear down the WebSocket merely because the
+    // screen is covered or the Activity is temporarily backgrounded.
     super.onStop();
   }
 
