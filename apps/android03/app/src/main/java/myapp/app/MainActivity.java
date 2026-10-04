@@ -529,8 +529,14 @@ public class MainActivity extends Activity {
       String url = appConfig.websocketUrl
           + "?conversation=" + enc(conversationId)
           + "&generation=" + generation;
+      if (BuildConfig.VOICE_AUTH_TOKEN == null || BuildConfig.VOICE_AUTH_TOKEN.isEmpty()) {
+        throw new IllegalStateException("Voice WebSocket credential is not configured");
+      }
       WebSocket candidate = wsClient.newWebSocket(
-          new Request.Builder().url(url).build(),
+          new Request.Builder()
+              .url(url)
+              .header("Authorization", "Bearer " + BuildConfig.VOICE_AUTH_TOKEN)
+              .build(),
           new VoiceWebSocketListener(generation));
       if (connectionTracker.owns(generation)) webSocket = candidate;
       else candidate.cancel();
@@ -831,6 +837,7 @@ public class MainActivity extends Activity {
       state.put("type", "client_state");
       state.put("build", buildLabel());
       state.put("conversation", conversationId);
+      state.put("auto_transcribe", autoTranscribe);
       state.put("auto_send", VoiceAutomationPolicy.effectiveAutoSend(autoTranscribe, autoSend));
       socket.send(state.toString());
     } catch (Exception failure) {
@@ -902,6 +909,7 @@ public class MainActivity extends Activity {
       appendDiagnostic("Microphone active: " + currentMicrophoneLabel + " at " + captureRate + " Hz");
       int samplesPerChunk = Math.max(1, captureRate * appConfig.frameMs / 1000);
       short[] capture = new short[samplesPerChunk];
+      LocalVadGate localVad = new LocalVadGate(appConfig.frameMs);
       while (running.get()) {
         int got = readFully(recorder, capture, samplesPerChunk);
         if (got <= 0) continue;
@@ -913,7 +921,17 @@ public class MainActivity extends Activity {
           updateServiceHealth();
         }
         if (autoTranscribe) {
-          sendAudioFrame(pcm, pcm.length);
+          LocalVadGate.Result vad = localVad.accept(pcm, currentInputDbfs);
+          if (vad.started) {
+            sendControl("voice_activity", "start", nextSeq, 0.0, 0.0);
+            appendDiagnostic("Local voice activity started");
+          }
+          for (byte[] frame : vad.frames) sendAudioFrame(frame, frame.length);
+          if (vad.stopped) {
+            sendControl("voice_activity", "stop", nextSeq, 0.0, 0.0);
+            sendControl("segment_end", "local_vad_silence", nextSeq, 0.0, 0.0);
+            appendDiagnostic("Local voice activity stopped");
+          }
         } else {
           boolean accepted;
           synchronized (manualRecordingLock) {
