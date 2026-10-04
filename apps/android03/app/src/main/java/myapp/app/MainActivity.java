@@ -926,10 +926,11 @@ public class MainActivity extends Activity {
             if (voiceActivityCues && !builtIn) VoiceActivityCue.start();
             appendDiagnostic("Local voice activity started");
           }
-          for (byte[] frame : vad.frames) sendAudioFrame(frame, frame.length);
+          // Never let local VAD discard microphone audio. Jetson owns authoritative
+          // VAD/endpointing; this gate is UI/diagnostic feedback only.
+          sendAudioFrame(pcm, pcm.length);
           if (vad.stopped) {
             sendControl("voice_activity", "stop", nextSeq, 0.0, 0.0);
-            sendControl("segment_end", "local_vad_silence", nextSeq, 0.0, 0.0);
             if (voiceActivityCues && !builtIn) VoiceActivityCue.stop();
             appendDiagnostic("Local voice activity stopped");
           }
