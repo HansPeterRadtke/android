@@ -81,6 +81,7 @@ public class MainActivity extends Activity {
   private static final String MIC_USER_SELECTED_PREF_KEY = "microphone_user_selected_v2";
   private static final String AUTO_SEND_PREF_KEY = "send_automatically_v3";
   private static final String AUTO_TRANSCRIBE_PREF_KEY = "transcribe_automatically_v1";
+  private static final String VOICE_CUES_PREF_KEY = "voice_activity_cues_v1";
   private static final String DRAFT_PREF_KEY = "current_message_v1";
   private static final String VOCAB_PREF_KEY = "vocabulary_v1";
   private static final String VOCAB_CONFIGURED_PREF_KEY = "vocabulary_configured_v1";
@@ -154,6 +155,7 @@ public class MainActivity extends Activity {
   private String conversationId;
   private volatile boolean autoTranscribe = true;
   private volatile boolean autoSend = true;
+  private volatile boolean voiceActivityCues = true;
   private volatile boolean serverHelloReady = false;
   private volatile String serverVersion = "";
   private volatile String serverAsr = "";
@@ -231,6 +233,7 @@ public class MainActivity extends Activity {
     selectedDeviceId = historyPrefs.getInt(MIC_DEVICE_PREF_KEY, AudioInputOption.DEFAULT_DEVICE_ID);
     autoTranscribe = historyPrefs.getBoolean(AUTO_TRANSCRIBE_PREF_KEY, true);
     autoSend = VoiceAutomationPolicy.effectiveAutoSend(autoTranscribe, historyPrefs.getBoolean(AUTO_SEND_PREF_KEY, true));
+    voiceActivityCues = historyPrefs.getBoolean(VOICE_CUES_PREF_KEY, true);
     userVocabularyConfigured = historyPrefs.getBoolean(VOCAB_CONFIGURED_PREF_KEY, false);
     loadLocalVocabulary();
     conversationId = historyPrefs.getString(CONVERSATION_PREF_KEY, "");
@@ -529,14 +532,8 @@ public class MainActivity extends Activity {
       String url = appConfig.websocketUrl
           + "?conversation=" + enc(conversationId)
           + "&generation=" + generation;
-      if (BuildConfig.VOICE_AUTH_TOKEN == null || BuildConfig.VOICE_AUTH_TOKEN.isEmpty()) {
-        throw new IllegalStateException("Voice WebSocket credential is not configured");
-      }
       WebSocket candidate = wsClient.newWebSocket(
-          new Request.Builder()
-              .url(url)
-              .header("Authorization", "Bearer " + BuildConfig.VOICE_AUTH_TOKEN)
-              .build(),
+          new Request.Builder().url(url).build(),
           new VoiceWebSocketListener(generation));
       if (connectionTracker.owns(generation)) webSocket = candidate;
       else candidate.cancel();
@@ -851,6 +848,8 @@ public class MainActivity extends Activity {
     try {
       JSONObject obj = new JSONObject();
       obj.put("type", type);
+      obj.put("client_wall_time_ms", System.currentTimeMillis());
+      obj.put("client_elapsed_ms", android.os.SystemClock.elapsedRealtime());
       if (reason != null) obj.put("reason", reason);
       if (seq >= 0) obj.put("seq", seq);
       if (rms > 0) obj.put("rms", rms);
@@ -924,12 +923,14 @@ public class MainActivity extends Activity {
           LocalVadGate.Result vad = localVad.accept(pcm, currentInputDbfs);
           if (vad.started) {
             sendControl("voice_activity", "start", nextSeq, 0.0, 0.0);
+            if (voiceActivityCues && !builtIn) VoiceActivityCue.start();
             appendDiagnostic("Local voice activity started");
           }
           for (byte[] frame : vad.frames) sendAudioFrame(frame, frame.length);
           if (vad.stopped) {
             sendControl("voice_activity", "stop", nextSeq, 0.0, 0.0);
             sendControl("segment_end", "local_vad_silence", nextSeq, 0.0, 0.0);
+            if (voiceActivityCues && !builtIn) VoiceActivityCue.stop();
             appendDiagnostic("Local voice activity stopped");
           }
         } else {
@@ -1116,6 +1117,12 @@ public class MainActivity extends Activity {
     automatic.setMinHeight(dp(48));
     content.addView(automatic, fullWrap());
 
+    MaterialCheckBox cues = new MaterialCheckBox(this);
+    cues.setText("Voice activity start/end sounds");
+    cues.setChecked(voiceActivityCues);
+    cues.setMinHeight(dp(48));
+    content.addView(cues, fullWrap());
+
     TextInputLayout vocabLayout = new TextInputLayout(this);
     vocabLayout.setId(R.id.voice_vocabulary);
     vocabLayout.setHint(R.string.vocabulary_title);
@@ -1202,6 +1209,10 @@ public class MainActivity extends Activity {
       sendClientState();
       updateTranscriptPanel();
       if (autoSend && !pendingTurnId.isEmpty() && !draftEdit.getText().toString().trim().isEmpty()) submitDraft();
+    });
+    cues.setOnCheckedChangeListener((button, checked) -> {
+      voiceActivityCues = checked;
+      historyPrefs.edit().putBoolean(VOICE_CUES_PREF_KEY, checked).apply();
     });
     saveVocab.setOnClickListener(v -> {
       setVocabularyFromText(vocabEdit.getText() == null ? "" : vocabEdit.getText().toString(), true);
