@@ -3,6 +3,7 @@ package myapp.app;
 import android.Manifest;
 import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
@@ -495,6 +496,7 @@ public class MainActivity extends Activity {
 
   private void beginCaptureNow() {
     if (!running.compareAndSet(false, true)) return;
+    if (!startVoiceForegroundService()) return;
     captureStartPending = false;
     stopRequested = false;
     nextSeq = 0;
@@ -516,8 +518,28 @@ public class MainActivity extends Activity {
   private void stopSession() {
     captureStartPending = false;
     if (!running.getAndSet(false)) return;
+    stopVoiceForegroundService();
     runOnUiThread(() -> startButton.setText(R.string.start_recording));
     setForegroundMode(ForegroundMode.FINISHING, null);
+  }
+
+  private boolean startVoiceForegroundService() {
+    Intent intent = new Intent(this, VoiceForegroundService.class).setAction(VoiceForegroundService.ACTION_START);
+    try {
+      ContextCompat.startForegroundService(this, intent);
+      return true;
+    } catch (RuntimeException failure) {
+      running.set(false);
+      appendDiagnostic("Foreground service failed: " + failure.getClass().getSimpleName());
+      setForegroundMode(ForegroundMode.MICROPHONE_ERROR, null);
+      return false;
+    }
+  }
+
+  private void stopVoiceForegroundService() {
+    try {
+      stopService(new Intent(this, VoiceForegroundService.class).setAction(VoiceForegroundService.ACTION_STOP));
+    } catch (RuntimeException ignored) {}
   }
 
   private void connectWebSocket() {
@@ -959,6 +981,7 @@ public class MainActivity extends Activity {
       try { if (recorder != null) recorder.release(); } catch (Exception ignored) {}
       try { if (route != null) route.release(); } catch (Exception ignored) {}
       if (!autoTranscribe) mainHandler.post(this::finishManualRecordingCapture);
+      if (!running.get()) stopVoiceForegroundService();
       updateServiceHealth();
     }
   }
@@ -2237,6 +2260,7 @@ public class MainActivity extends Activity {
 
   @Override protected void onDestroy() {
     running.set(false);
+    stopVoiceForegroundService();
     if (mainHandler != null) mainHandler.removeCallbacksAndMessages(null);
     stopPlaybackLocal("activity_destroyed", false);
     closeCurrentSocket("activity_destroyed", true);
