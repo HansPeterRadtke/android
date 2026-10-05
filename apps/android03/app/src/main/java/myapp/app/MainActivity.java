@@ -856,6 +856,7 @@ public class MainActivity extends Activity {
       state.put("conversation", conversationId);
       state.put("auto_transcribe", autoTranscribe);
       state.put("auto_send", VoiceAutomationPolicy.effectiveAutoSend(autoTranscribe, autoSend));
+      state.put("microphone_label", currentMicrophoneLabel);
       socket.send(state.toString());
     } catch (Exception failure) {
       appendDiagnostic("Client state failed: " + failure.getClass().getSimpleName());
@@ -915,6 +916,9 @@ public class MainActivity extends Activity {
       recorder = setup.recorder;
       int captureRate = setup.sampleRate;
       boolean builtIn = selectedInput.getCategory() == AudioInputOption.Category.BUILT_IN;
+      boolean communicationPlayback = selectedInput.isBluetooth();
+      assistantPlayer.setCommunicationPlayback(communicationPlayback);
+      userPlayer.setCommunicationPlayback(communicationPlayback);
       if (!builtIn && !route.applyPreferredDevice(recorder, requestedDevice, selectedInput)) {
         throw new IllegalStateException("Android rejected the selected external microphone input");
       }

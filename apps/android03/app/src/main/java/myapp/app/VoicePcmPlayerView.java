@@ -67,6 +67,7 @@ final class VoicePcmPlayerView extends LinearLayout {
   private volatile boolean remoteCancelable;
   private volatile boolean autoHideAfterNaturalFinish;
   private VoiceStreamingPlaybackPolicy autoStartPolicy = new VoiceStreamingPlaybackPolicy(false);
+  private volatile boolean communicationPlayback = false;
   private volatile int positionBytes;
   private volatile long serial;
   private Runnable remoteStopListener;
@@ -137,6 +138,8 @@ final class VoicePcmPlayerView extends LinearLayout {
   }
 
   void setRemoteStopListener(Runnable listener) { remoteStopListener = listener; }
+  void setCommunicationPlayback(boolean value) { communicationPlayback = value; }
+
 
   boolean startStream(boolean autoPlay, boolean cancelable, boolean autoHideAfterFinish) {
     synchronized (lock) {
@@ -322,8 +325,11 @@ final class VoicePcmPlayerView extends LinearLayout {
 
   private void initTrackLocked() {
     int min = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+    int usage = communicationPlayback
+        ? AudioAttributes.USAGE_VOICE_COMMUNICATION
+        : AudioAttributes.USAGE_MEDIA;
     track = new AudioTrack.Builder()
-        .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+        .setAudioAttributes(new AudioAttributes.Builder().setUsage(usage).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
         .setAudioFormat(new AudioFormat.Builder().setSampleRate(sampleRate).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
         .setBufferSizeInBytes(Math.max(min, sampleRate * SAMPLE_WIDTH / 2))
         .setTransferMode(AudioTrack.MODE_STREAM)
