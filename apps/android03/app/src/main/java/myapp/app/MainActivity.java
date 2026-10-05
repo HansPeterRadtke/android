@@ -920,6 +920,7 @@ public class MainActivity extends Activity {
         if (autoTranscribe) {
           LocalVadGate.Result vad = localVad.accept(pcm, currentInputDbfs);
           if (vad.started) {
+            stopPlaybackLocal("local_barge_in", false);
             sendControl("voice_activity", "start", nextSeq, 0.0, 0.0);
             if (voiceActivityCues && !builtIn) VoiceActivityCue.start();
             appendDiagnostic("Local voice activity started");
