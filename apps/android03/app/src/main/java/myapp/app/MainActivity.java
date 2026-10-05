@@ -251,7 +251,7 @@ public class MainActivity extends Activity {
     connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
     buildScreen();
     registerNetworkObserver();
-    refreshPreferredMicrophonePreview();
+    refreshPreferredMicrophonePreviewAsync();
     startConnectionMonitor();
     restoreManualRecording();
     connectionWanted.set(true);
@@ -1074,6 +1074,15 @@ public class MainActivity extends Activity {
         .putBoolean(MIC_USER_SELECTED_PREF_KEY,
             userSelected || historyPrefs.getBoolean(MIC_USER_SELECTED_PREF_KEY, false))
         .apply();
+  }
+
+  private void refreshPreferredMicrophonePreviewAsync() {
+    Thread preview = new Thread(() -> {
+      refreshPreferredMicrophonePreview();
+      if (mainHandler != null) mainHandler.post(this::updateServiceHealth);
+    }, "voice-microphone-preview");
+    preview.setDaemon(true);
+    preview.start();
   }
 
   private void refreshPreferredMicrophonePreview() {
