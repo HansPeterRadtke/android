@@ -21,12 +21,20 @@ android {
     }
     defaultConfig {
         def voiceAuthToken = System.getenv('VOICE_AGENT_AUTH_TOKEN') ?: ''
+        def voiceAuthTokenFile = project.findProperty('voiceAgentAuthTokenFile')
+        if (voiceAuthToken.isEmpty() && voiceAuthTokenFile != null) {
+            voiceAuthToken = file(voiceAuthTokenFile.toString()).getText('UTF-8').trim()
+        }
+        def localVoiceCredential = file('/data/var/voice-agent-build/credential')
+        if (voiceAuthToken.isEmpty() && localVoiceCredential.isFile()) {
+            voiceAuthToken = localVoiceCredential.getText('UTF-8').trim()
+        }
         buildConfigField 'String', 'VOICE_AUTH_TOKEN', '"' + voiceAuthToken.replace('\\', '\\\\').replace('\"', '\\"') + '"'
         applicationId "myapp.app"
         minSdk 24
         targetSdk 34
-        versionCode 15
-        versionName "1.7.7"
+        versionCode 16
+        versionName "1.7.8"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {

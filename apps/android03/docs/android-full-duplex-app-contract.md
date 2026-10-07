@@ -19,6 +19,12 @@ The authoritative Android endpoint values are resources in `app/src/main/res/val
 
 Do not duplicate host names, ports, tunnel addresses, or fallback URLs in Java source or this document. Deployment changes update the resource/config source of truth.
 
+## WebSocket credential
+
+The public WebSocket upgrade requires a Bearer credential. Credential material is never committed in Android source. Builds resolve it in this order: `VOICE_AGENT_AUTH_TOKEN`, the explicit Gradle `voiceAgentAuthTokenFile` property, then Nitro's private runtime-only `/data/var/voice-agent-build/credential` fallback when that file exists. The local fallback is mode 0600 and exists only to make the canonical Nitro acceptance build reproducible without printing a credential on the command line. A build with no credential refuses to open the protected WebSocket rather than silently falling back to an unauthenticated path.
+
+An APK containing the injected credential is credential-bearing output and belongs only in the intended private distribution path. Credential rotation remains a deployment operation coordinated with Jetson.
+
 ## Audio uplink
 
 After the WebSocket handshake, Android continuously sends binary PCM while automatic transcription is enabled and the microphone session is active:

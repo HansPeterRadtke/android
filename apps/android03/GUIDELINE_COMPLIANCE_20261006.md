@@ -62,13 +62,15 @@ Trading-, finance-, chart-, table-, game-, web-, presentation-, mail-, video-, a
 
 ## Automated evidence obtained
 
-- Server/config/core/direct-SWAAG/LuxTTS suite: 51 relevant tests passed after the final server changes.
+- Server/config/core/direct-SWAAG/LuxTTS suite: 52 relevant tests passed after the final server changes.
 - Android JVM suite: 31 tests passed with zero failures, errors, or skips after the final Android changes.
 - The final debug APK builds with a non-empty injected credential while source control remains credential-free.
+- The Android build accepts credential injection by environment variable or explicit Gradle credential-file property and has a Nitro-only runtime fallback at `/data/var/voice-agent-build/credential`; that file is outside Git and mode 0600. This avoids putting credential material in source or command output.
 - Public WSS smoke: unauthenticated upgrade rejected; authenticated upgrade accepted and returned the normal voice-agent hello.
 - Jetson health reports server, primary/secondary STT, SWAAG agent, and TTS dependencies healthy.
+- Jetson production now executes the pushed voice server commit from the clean `/data/src/worktrees/voice-infra-gaps-20261003` deployment worktree rather than the dirty historical `master` checkout. The clean worktree was first started on a spare port and returned healthy server/STT/SWAAG/TTS status before systemd was switched; the production process command line and working directory were verified afterward.
 - Thor's global orchestrator projection was checked directly; at audit time it reported zero active workers and zero open/blocking questions, demonstrating the live read-only question/status path.
-- Android direct instrumentation suite on the API 34 emulator: 9 tests completed successfully; 8 passed and the offline-network-only acceptance test was intentionally skipped in the ordinary suite. The previously failing live streaming-player visibility test passed after the final layout correction.
+- All 11 current Android instrumentation tests have passing evidence across the ordinary and dedicated API 34 emulator runs. The offline-network-only acceptance is intentionally skipped in an ordinary online run and was executed separately with networking disabled. The previously failing live streaming-player visibility test passed after the final layout correction.
 - Dedicated offline acceptance was then run with emulator Wi-Fi and mobile data disabled and its cached-history/latest-navigation test passed.
 - The six core first-screen and streaming-player instrumentation tests passed at Android font scale 2.0.
 - The same six core UI/player tests passed in forced landscape at normal font scale. Emulator font scale, rotation, Wi-Fi, and mobile-data settings were restored after verification.
@@ -81,6 +83,7 @@ Trading-, finance-, chart-, table-, game-, web-, presentation-, mail-, video-, a
 
 ## Remaining release gates and non-violating limitations
 
+- Physical-phone acceptance build is version `1.7.8` / versionCode 16 so it is distinguishable from the earlier `1.7.7` APK.
 - A physical-phone acceptance pass is still mandatory. Emulator, unit, and server evidence cannot prove real microphone routing, speaker behavior, Bluetooth/OEM audio routing, acoustic semantic interruption, mobile-radio loss/recovery, background restrictions, thermal behavior, or real-device lifecycle behavior.
 - Complete screen-reader acceptance is not yet proven. Maximum supported font scale, portrait/landscape/tablet-sized layout, accessible names/touch targets, permission revocation, network loss/reconnect, and process-death recovery of the unsent draft plus manual audio now have emulator evidence. TalkBack is not installed in the current AVD, so real TalkBack traversal/announcement quality and physical-device accessibility behavior remain unverified. Foldable-specific postures also remain untested.
 - Android exposes a compact global question count rather than a complete on-device question browser. The infra guideline describes a dedicated question channel as a design possibility, not a mandatory duplicate store. Exact questions remain available from the authoritative SWAAG orchestrator. If an Android browser is added, it must remain a read-only projection.
