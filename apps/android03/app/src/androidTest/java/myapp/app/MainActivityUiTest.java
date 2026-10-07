@@ -1,6 +1,7 @@
 package myapp.app;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import android.Manifest;
@@ -50,6 +51,33 @@ public class MainActivityUiTest {
     }
   }
 
+
+  @Test public void primaryControlsHaveAccessibleNamesAndTouchTargets() {
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(screen -> {
+        int minimum = Math.round(48f * screen.getResources().getDisplayMetrics().density);
+        int[] ids = {
+            R.id.voice_settings, R.id.voice_draft, R.id.voice_start_stop, R.id.voice_send
+        };
+        for (int id : ids) {
+          View view = screen.findViewById(id);
+          assertNotNull(view);
+          CharSequence description = view.getContentDescription();
+          CharSequence text = view instanceof android.widget.TextView
+              ? ((android.widget.TextView) view).getText() : null;
+          CharSequence hint = view instanceof android.widget.TextView
+              ? ((android.widget.TextView) view).getHint() : null;
+          boolean named = (description != null && description.length() > 0)
+              || (text != null && text.length() > 0)
+              || (hint != null && hint.length() > 0);
+          assertTrue("interactive view has no accessible name: " + id, named);
+          if (id != R.id.voice_draft) {
+            assertTrue("touch target too short: " + id, view.getHeight() >= minimum);
+          }
+        }
+      });
+    }
+  }
 
   @Test public void currentMessageIsGenuinelyMultiline() {
     try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
