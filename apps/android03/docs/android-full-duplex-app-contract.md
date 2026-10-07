@@ -1,63 +1,63 @@
-# Android Full-Duplex App Contract, Corrected
+# Android Voice Agent Transport Contract
 
-## Direct Jetson target
+This document describes the current Android-to-SWAAG voice path. The former direct HTTP `/fdx` polling design on port 13482 is obsolete and must not be used by `android03`.
 
-`BASE_URL = http://10.8.0.3:13482`
+## Responsibility boundary
 
-Use this when the phone can route to Jetson's tunnel address.
+The Android application is the human interface. It captures and plays audio, displays and edits the current user message, exposes manual fallbacks, sends finalized text, shows agent text and operational state, and reconnects across network/lifecycle changes.
 
-If the phone is on Jetson's physical LAN instead, use:
+Jetson is the real-time voice transport and speech boundary. It owns authoritative voice endpointing, speech recognition, semantic interruption handling, WebSocket media delivery, and the presentation-side transcript/audio state needed by the phone.
 
-`BASE_URL = http://192.168.8.52:13482`
+SWAAG remains the working conversational/orchestration system. The voice application and Jetson glue must not replace SWAAG reasoning, worker scheduling, durable question handling, or tool execution. Only finalized/submitted user text reaches SWAAG; partial ASR is presentation state only.
 
-Do not use G3 in the Android app. Do not use ADB reverse in the Android app. Do not use `https://jetsonsystem.jimmyandjonny.work/fdx` right now; that public URL currently routes only the System Server and returns 404 for `/fdx`.
+## Client endpoints
 
-## Server
+The authoritative Android endpoint values are resources in `app/src/main/res/values/voice_config.xml`:
 
-`full_duplex_server.py --host 0.0.0.0 --port 13482`
+- `voice_ws_url` for the persistent WebSocket.
+- `voice_health_url` for explicit health/diagnostic checks.
 
-Port `13482` is inside the infra agent range `13000-13999`.
+Do not duplicate host names, ports, tunnel addresses, or fallback URLs in Java source or this document. Deployment changes update the resource/config source of truth.
 
-## Health
+## Audio uplink
 
-`GET {BASE_URL}/health`
+After the WebSocket handshake, Android continuously sends binary PCM while automatic transcription is enabled and the microphone session is active:
 
-Expected: `ok=true`, `service=no_omni_full_duplex`, `model_ready=true`.
+- signed PCM sixteen-bit little-endian,
+- mono,
+- sixteen kilohertz after Android-side resampling,
+- frame duration from `voice_frame_ms`.
 
-## Start session
+Local VAD is only a UI/diagnostic hint. It never owns transport and never decides that reply playback should stop. Jetson receives the microphone stream while reply audio is playing and performs semantic interruption classification. Android stops automatic reply playback when Jetson sends the explicit audio-cancel event.
 
-`POST {BASE_URL}/fdx/start`
+In fully manual transcription mode Android retains the recording locally instead of streaming it into the agent path. The user can replay it, explicitly transcribe it, edit the resulting text, and explicitly send it.
 
-Body is empty. Response contains `sid`.
+## Text lifecycle
 
-## Upload audio
+Partial ASR may update the visible current-message editor, but unstable partial text is not submittable. A final transcript stabilizes the draft. If the user deliberately edits a visible partial in manual-send mode, the user-edited text takes ownership and later ASR updates do not overwrite it.
 
-`POST {BASE_URL}/fdx/upload?sid={sid}&seq={seq}&final={0_or_1}`
+The current editable message is separate from confirmed conversation history. A submitted turn is the only user text promoted into history and into SWAAG. Typed-from-scratch messages use the same submitted-turn boundary.
 
-Header: `Content-Type: audio/wav`.
+Automatic transcription and automatic sending are independently user-controllable, with the constraint that automatic sending is disabled when automatic transcription is disabled.
 
-Body is complete WAV bytes, including header: RIFF/WAVE, PCM signed 16-bit little-endian, mono, 16000 Hz.
+## Background workers and questions
 
-Do not send raw PCM. Do not send Opus, AAC, MP3, Ogg, WebM, or MediaRecorder compressed output.
+Android does not own worker or question state. Jetson projects SWAAG's global orchestrator event stream into compact UI events. The source of truth for outstanding questions remains SWAAG's complete `orchestration.questions.list` inventory, including worker identity, question id, criticality, importance, revision state, reason, and provisional assumption where applicable.
 
-## Downlink poll
+Blocking or important questions may make the background status conspicuous. Optional/minor questions must remain discoverable without interrupting the current conversation; the Android first screen therefore exposes a compact question-count surface even when the worker status itself is otherwise idle/hidden. The user can ask the SWAAG orchestrator to review the exact outstanding questions. Android must not maintain a competing durable question store or infer answers itself.
 
-Run this in a second thread while upload continues:
+## Downlink and playback
 
-`GET {BASE_URL}/fdx/poll?sid={sid}`
+Agent reply audio arrives as binary PCM frames bracketed by JSON audio start/end events. Playback begins as soon as the first usable PCM arrives; it does not wait for the complete reply. While audio is still growing, the player keeps Play/Pause, Stop, seek, backward/forward jump, current position, remaining available time, and total/available duration visible and updates them as data arrives.
 
-Poll every 100 to 250 ms. When `audio_queue` contains a new `chunk_id`, download it.
+Manual Stop is immediate. Automatic interruption requires Jetson's semantic decision; local VAD, loudness, coughs, laughter, acknowledgements, or background speech alone are not cancellation authority.
 
-## Download reply audio
+## Connection and lifecycle
 
-`GET {BASE_URL}/fdx/audio?sid={sid}&chunk={chunk_id}`
+The WebSocket is long-lived and uses generation ownership so stale sockets cannot mutate current UI state. Reconnect uses bounded backoff/jitter. The current unsent draft and retained manual recording survive activity recreation. Active microphone capture uses the Android foreground-service path required by the supported platform lifecycle.
 
-Response is `audio/wav`, RIFF/WAVE PCM signed 16-bit little-endian, mono, 16000 Hz.
+Typed text remains usable when microphone permission, STT, or TTS is unavailable. The primary status reports the user-visible degraded effect; component/raw details remain in diagnostics.
 
-## Full-duplex rule
+## Verification
 
-One thread records and uploads WAV chunks. A second thread polls and downloads reply WAV chunks. Playback starts immediately and must not stop the microphone upload thread.
-
-## Pass condition
-
-The phone starts playing downloaded reply audio before the final microphone upload completes.
+A passing desktop/unit build is not release evidence. Automated tests must cover submission gating, automation constraints, stale connection ownership, semantic interruption non-trigger behavior, player math/state, lifecycle recovery, and invalid/failure paths. Android instrumentation must cover the screen contract, growing-audio controls, lifecycle, offline/degraded state, and supported window/font configurations. Release completion additionally requires the physical-phone journeys listed in `../GUI_CONTRACT.md`.

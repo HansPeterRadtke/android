@@ -89,8 +89,6 @@ final class VoicePcmPlayerView extends LinearLayout {
 
     LinearLayout transportRow = new LinearLayout(context);
     transportRow.setOrientation(HORIZONTAL);
-    LinearLayout seekControlsRow = new LinearLayout(context);
-    seekControlsRow.setOrientation(HORIZONTAL);
     playPause = button(context, R.string.play);
     playPause.setId(R.id.voice_player_play_pause);
     stop = button(context, R.string.stop_audio);
@@ -99,15 +97,17 @@ final class VoicePcmPlayerView extends LinearLayout {
     back.setId(R.id.voice_player_back);
     forward = button(context, R.string.jump_forward);
     forward.setId(R.id.voice_player_forward);
+    // Keep all required transport actions in one touch-sized row. Two rows made
+    // seek/timing controls fall below the live-player viewport on ordinary phones.
+    transportRow.addView(back, weighted());
     transportRow.addView(playPause, weighted());
     transportRow.addView(stop, weighted());
-    seekControlsRow.addView(back, weighted());
-    seekControlsRow.addView(forward, weighted());
+    transportRow.addView(forward, weighted());
     addView(transportRow, matchWrap());
-    addView(seekControlsRow, matchWrap());
 
     seek = new SeekBar(context);
     seek.setId(R.id.voice_player_seek);
+    seek.setContentDescription(context.getString(R.string.player_seek_description, label));
     seek.setMax(1);
     addView(seek, matchWrap());
     LinearLayout timeRow = new LinearLayout(context);
@@ -357,14 +357,15 @@ final class VoicePcmPlayerView extends LinearLayout {
     if (getVisibility() != VISIBLE) return;
     int available = availableMs();
     int current = Math.min(currentMs(), available);
-    boolean compactLive = autoHideAfterNaturalFinish;
-    title.setVisibility(compactLive ? GONE : VISIBLE);
-    back.setVisibility(compactLive ? GONE : VISIBLE);
-    forward.setVisibility(compactLive ? GONE : VISIBLE);
-    seek.setVisibility(compactLive ? GONE : VISIBLE);
-    currentTime.setVisibility(compactLive ? GONE : VISIBLE);
-    remainingTime.setVisibility(compactLive ? GONE : VISIBLE);
-    totalTime.setVisibility(compactLive ? GONE : VISIBLE);
+    // Live/growing audio is still a real exposed player. Keep the full transport,
+    // timeline, and all three time values visible while new PCM is arriving.
+    title.setVisibility(VISIBLE);
+    back.setVisibility(VISIBLE);
+    forward.setVisibility(VISIBLE);
+    seek.setVisibility(VISIBLE);
+    currentTime.setVisibility(VISIBLE);
+    remainingTime.setVisibility(VISIBLE);
+    totalTime.setVisibility(VISIBLE);
     seek.setMax(Math.max(1, available));
     if (!userSeeking) seek.setProgress(current);
     playPause.setText(playing ? R.string.pause : R.string.play);

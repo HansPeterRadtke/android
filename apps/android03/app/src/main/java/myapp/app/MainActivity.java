@@ -92,7 +92,7 @@ public class MainActivity extends Activity {
   private static final int AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
 
   private enum ForegroundMode {
-    READY, CONNECTING, VERIFYING, LISTENING, RECORDING_LOCAL, TRANSCRIBING,
+    READY, TEXT_ONLY, CONNECTING, VERIFYING, LISTENING, RECORDING_LOCAL, TRANSCRIBING,
     THINKING, BUFFERING, SPEAKING, RECONNECTING, UNAVAILABLE, PERMISSION,
     MICROPHONE_ERROR, REVIEW, FINISHING
   }
@@ -108,6 +108,7 @@ public class MainActivity extends Activity {
   private TextView statusDetailView;
   private TextView componentHealthView;
   private TextView workerView;
+  private TextView questionView;
   private TextView conversationView;
   private ScrollView conversationScrollView;
   private MaterialButton latestButton;
@@ -138,6 +139,9 @@ public class MainActivity extends Activity {
   private volatile boolean manualTranscribePending = false;
   private volatile boolean manualTranscriptPendingSubmission = false;
   private volatile boolean typedSendPending = false;
+  private volatile boolean draftContainsUnstableAsrPartial = false;
+  private volatile boolean userClaimedAsrPartial = false;
+  private boolean applyingAsrDraftText = false;
   private volatile boolean stopRequested = false;
   private volatile int nextSeq = 0;
   private volatile long droppedLiveFrames = 0L;
@@ -200,8 +204,14 @@ public class MainActivity extends Activity {
       // LinearLayout may hand wrap-content children an UNSPECIFIED height. Use the
       // real window height instead so the lower controls can never consume the
       // entire phone and erase the conversation viewport.
-      int windowHeight = getResources().getDisplayMetrics().heightPixels;
-      int cap = Math.max(dp(220), Math.round(windowHeight * 0.52f));
+      // Configuration.screenHeightDp follows the current app window, including
+      // multi-window/resizing, instead of treating the physical display as the UI.
+      int windowHeight = Math.round(
+          getResources().getConfiguration().screenHeightDp
+              * getResources().getDisplayMetrics().density);
+      int minimum = getResources().getDimensionPixelSize(R.dimen.voice_lower_controls_min_height);
+      float fraction = getResources().getFraction(R.fraction.voice_lower_controls_max_fraction, 1, 1);
+      int cap = Math.max(minimum, Math.round(windowHeight * fraction));
       super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(cap, MeasureSpec.AT_MOST));
     }
   }
@@ -312,6 +322,13 @@ public class MainActivity extends Activity {
     workerView.setVisibility(View.GONE);
     root.addView(workerView, fullWrap());
 
+    questionView = new TextView(this);
+    questionView.setId(R.id.voice_question_status);
+    questionView.setTextSize(14);
+    questionView.setPadding(dp(10), dp(6), dp(10), dp(6));
+    questionView.setVisibility(View.GONE);
+    root.addView(questionView, fullWrap());
+
     conversationView = new TextView(this);
     conversationView.setId(R.id.voice_conversation);
     conversationView.setTextSize(18);
@@ -375,6 +392,12 @@ public class MainActivity extends Activity {
       @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) {}
       @Override public void onTextChanged(CharSequence value, int start, int before, int count) {}
       @Override public void afterTextChanged(Editable editable) {
+        if (!applyingAsrDraftText && draftContainsUnstableAsrPartial) {
+          // A real user edit deliberately takes ownership of the visible partial.
+          // Later ASR partial/final updates must not overwrite that correction.
+          draftContainsUnstableAsrPartial = false;
+          userClaimedAsrPartial = true;
+        }
         historyPrefs.edit().putString(DRAFT_PREF_KEY, editable.toString()).apply();
         updateTranscriptPanel();
       }
@@ -400,8 +423,8 @@ public class MainActivity extends Activity {
       transcribeButton.setText(R.string.transcribe_wide);
       for (MaterialButton button : new MaterialButton[] {transcribeButton, startButton, sendDraftButton}) {
         button.setTextSize(12);
-        button.setSingleLine(true);
-        button.setMaxHeight(dp(56));
+        button.setSingleLine(false);
+        button.setMaxLines(2);
       }
     }
     messageActions.addView(transcribeButton, weightedWrap());
@@ -536,6 +559,15 @@ public class MainActivity extends Activity {
     }
   }
 
+  // Local VAD is only a hint. It must never decide that the user intended to
+  // interrupt reply audio; Jetson's semantic interruption classifier owns that
+  // decision and sends an explicit audio cancel when takeover is confirmed.
+  void handleLocalVoiceActivityStarted(int sequence, boolean builtIn) {
+    sendControl("voice_activity", "start", sequence, 0.0, 0.0);
+    if (voiceActivityCues && !builtIn) VoiceActivityCue.start();
+    appendDiagnostic("Local voice activity started");
+  }
+
   private void stopVoiceForegroundService() {
     try {
       stopService(new Intent(this, VoiceForegroundService.class).setAction(VoiceForegroundService.ACTION_STOP));
@@ -555,8 +587,14 @@ public class MainActivity extends Activity {
       String url = appConfig.websocketUrl
           + "?conversation=" + enc(conversationId)
           + "&generation=" + generation;
+      if (BuildConfig.VOICE_AUTH_TOKEN == null || BuildConfig.VOICE_AUTH_TOKEN.isEmpty()) {
+        throw new IllegalStateException("Voice WebSocket credential is not configured");
+      }
       WebSocket candidate = wsClient.newWebSocket(
-          new Request.Builder().url(url).build(),
+          new Request.Builder()
+              .url(url)
+              .header("Authorization", "Bearer " + BuildConfig.VOICE_AUTH_TOKEN)
+              .build(),
           new VoiceWebSocketListener(generation));
       if (connectionTracker.owns(generation)) webSocket = candidate;
       else candidate.cancel();
@@ -758,7 +796,9 @@ public class MainActivity extends Activity {
         connectionTracker.onMediaAck(listenerGeneration, System.currentTimeMillis());
         String heard = obj.optString("text", "").trim();
         if ("partial".equals(event)) {
-          if (!heard.isEmpty() && pendingTurnId.isEmpty()) setDraftText(heard, true);
+          if (!heard.isEmpty() && pendingTurnId.isEmpty() && !userClaimedAsrPartial) {
+            setAsrDraftText(heard, true);
+          }
         } else if ("final".equals(event)) {
           pendingTurnId = obj.optString("turn_id", "");
           latestUserTurnId = pendingTurnId;
@@ -767,15 +807,16 @@ public class MainActivity extends Activity {
             manualTranscriptPendingSubmission = true;
             manualTranscribePending = false;
           }
-          setDraftText(heard, true);
+          if (!userClaimedAsrPartial) setAsrDraftText(heard, false);
+          else draftContainsUnstableAsrPartial = false;
           updateReplayRow();
           if (!autoSend) setForegroundMode(ForegroundMode.REVIEW, null);
           updateTranscriptPanel();
         }
       } else if ("turn".equals(type) && "submitted".equals(event)) {
-        String submitted = obj.optString("text", "").trim();
+        String submitted = obj.optString("text", "");
         String turnId = obj.optString("turn_id", "");
-        if (!submitted.isEmpty()) {
+        if (!submitted.trim().isEmpty()) {
           conversationTextModel.confirmUser(turnId, submitted);
           persistAndRenderConversation();
         }
@@ -946,10 +987,7 @@ public class MainActivity extends Activity {
         if (autoTranscribe) {
           LocalVadGate.Result vad = localVad.accept(pcm, currentInputDbfs);
           if (vad.started) {
-            stopPlaybackLocal("local_barge_in", false);
-            sendControl("voice_activity", "start", nextSeq, 0.0, 0.0);
-            if (voiceActivityCues && !builtIn) VoiceActivityCue.start();
-            appendDiagnostic("Local voice activity started");
+            handleLocalVoiceActivityStarted(nextSeq, builtIn);
           }
           // Never let local VAD discard microphone audio. Jetson owns authoritative
           // VAD/endpointing; this gate is UI/diagnostic feedback only.
@@ -1388,9 +1426,19 @@ public class MainActivity extends Activity {
     if (!workerEventSequences.accept(workerId, sequence)) return;
     boolean visible = VoiceOverviewPolicy.showWorker(status);
     String label = workerLabel(status, message);
+    JSONObject semantic = obj.optJSONObject("semantic_status");
+    int openQuestions = semantic == null ? 0 : Math.max(0, semantic.optInt("open_questions", 0));
+    int blockingQuestions = semantic == null ? 0 : Math.max(0, semantic.optInt("blocking_questions", 0));
+    boolean questionsVisible = VoiceOverviewPolicy.showQuestions(openQuestions);
+    String questionLabel = blockingQuestions > 0
+        ? getString(R.string.background_questions_with_blocking, openQuestions, blockingQuestions)
+        : getResources().getQuantityString(
+            R.plurals.background_questions_available, openQuestions, openQuestions);
     runOnUiThread(() -> {
       workerView.setText(label);
       workerView.setVisibility(visible ? View.VISIBLE : View.GONE);
+      questionView.setText(questionLabel);
+      questionView.setVisibility(questionsVisible ? View.VISIBLE : View.GONE);
     });
   }
 
@@ -1415,8 +1463,12 @@ public class MainActivity extends Activity {
   }
 
   private void submitDraft() {
-    String value = draftEdit.getText().toString().trim();
-    if (value.isEmpty()) {
+    String value = draftEdit.getText().toString();
+    if (draftContainsUnstableAsrPartial) {
+      setForegroundMode(ForegroundMode.REVIEW, getString(R.string.partial_transcript_not_ready));
+      return;
+    }
+    if (value.trim().isEmpty()) {
       setForegroundMode(ForegroundMode.REVIEW, getString(R.string.transcript_empty));
       return;
     }
@@ -1700,6 +1752,26 @@ public class MainActivity extends Activity {
       componentHealthView.setText(value);
       componentHealthView.setVisibility(visible ? View.VISIBLE : View.GONE);
     });
+    if (!running.get()) {
+      if (foregroundMode == ForegroundMode.READY) {
+        if (!microphoneAvailable) {
+          setForegroundMode(ForegroundMode.PERMISSION, null);
+        } else if (!connected) {
+          setForegroundMode(
+              connectionWanted.get() && hasUsableNetwork() ? ForegroundMode.CONNECTING : ForegroundMode.TEXT_ONLY,
+              null);
+        } else if (!serverReady || !serverAgentReady) {
+          setForegroundMode(ForegroundMode.UNAVAILABLE, null);
+        } else if (!serverSttReady || !serverTtsReady) {
+          setForegroundMode(ForegroundMode.TEXT_ONLY, null);
+        }
+      } else if ((foregroundMode == ForegroundMode.TEXT_ONLY || foregroundMode == ForegroundMode.UNAVAILABLE)
+          && connected && serverReady && serverAgentReady) {
+        setForegroundMode(
+            serverSttReady && serverTtsReady ? ForegroundMode.READY : ForegroundMode.TEXT_ONLY,
+            null);
+      }
+    }
   }
 
 
@@ -1726,17 +1798,26 @@ public class MainActivity extends Activity {
     }
   }
 
-  private void setDraftText(String text, boolean editable) {
+  private void setAsrDraftText(String text, boolean partial) {
     String value = text == null ? "" : text;
     runOnUiThread(() -> {
-      draftEdit.setText(value);
-      draftEdit.setSelection(draftEdit.length());
-      draftEdit.setEnabled(true);
+      applyingAsrDraftText = true;
+      try {
+        draftContainsUnstableAsrPartial = partial;
+        if (!partial) userClaimedAsrPartial = false;
+        draftEdit.setText(value);
+        draftEdit.setSelection(draftEdit.length());
+        draftEdit.setEnabled(true);
+      } finally {
+        applyingAsrDraftText = false;
+      }
       updateTranscriptPanel();
     });
   }
 
   private void clearDraft() {
+    draftContainsUnstableAsrPartial = false;
+    userClaimedAsrPartial = false;
     runOnUiThread(() -> {
       draftEdit.setText("");
       draftEdit.setEnabled(true);
@@ -1752,7 +1833,8 @@ public class MainActivity extends Activity {
       transcriptPanel.setVisibility(View.VISIBLE);
       draftEdit.setEnabled(true);
       sendDraftButton.setVisibility(View.VISIBLE);
-      sendDraftButton.setEnabled(!text.isEmpty() && !typedSendPending);
+      sendDraftButton.setEnabled(VoiceDraftPolicy.canSubmit(
+          text, typedSendPending, draftContainsUnstableAsrPartial));
       boolean showTranscribe = !autoTranscribe && manualRecordingAvailable && !running.get();
       transcribeButton.setVisibility(showTranscribe ? View.VISIBLE : View.GONE);
       transcribeButton.setEnabled(showTranscribe && !manualTranscribePending);
@@ -1978,14 +2060,26 @@ public class MainActivity extends Activity {
   }
 
   private void setForegroundMode(ForegroundMode mode, String detailOverride) {
-    if (mode == ForegroundMode.READY && !hasRequiredAudioPermissions()) {
-      mode = ForegroundMode.PERMISSION;
+    if (mode == ForegroundMode.READY) {
+      if (!hasRequiredAudioPermissions()) {
+        mode = ForegroundMode.PERMISSION;
+      } else if (!connectionTracker.isOpen() || !serverHelloReady) {
+        mode = connectionWanted.get() && hasUsableNetwork()
+            ? ForegroundMode.CONNECTING
+            : ForegroundMode.TEXT_ONLY;
+      } else if (!serverReady || !serverAgentReady) {
+        mode = ForegroundMode.UNAVAILABLE;
+      } else if (!serverSttReady || !serverTtsReady) {
+        mode = ForegroundMode.TEXT_ONLY;
+      }
       detailOverride = null;
     }
     foregroundMode = mode;
     int titleRes;
     int detailRes;
     switch (mode) {
+      case TEXT_ONLY:
+        titleRes = R.string.status_text_only; detailRes = R.string.detail_text_only; diagnosticConnectionState = "text only"; break;
       case CONNECTING:
         titleRes = R.string.status_connecting; detailRes = R.string.detail_connecting; diagnosticConnectionState = "connecting"; break;
       case VERIFYING:
@@ -2048,7 +2142,8 @@ public class MainActivity extends Activity {
   private void setPrimaryStatus(String title, String detail) {
     runOnUiThread(() -> {
       String clean = detail == null ? "" : detail.trim();
-      boolean actionableDetail = foregroundMode == ForegroundMode.CONNECTING
+      boolean actionableDetail = foregroundMode == ForegroundMode.TEXT_ONLY
+          || foregroundMode == ForegroundMode.CONNECTING
           || foregroundMode == ForegroundMode.VERIFYING
           || foregroundMode == ForegroundMode.RECONNECTING
           || foregroundMode == ForegroundMode.UNAVAILABLE

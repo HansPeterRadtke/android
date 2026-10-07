@@ -46,6 +46,12 @@ public class StreamingPlaybackUiTest {
         assertDisplayed(playPause);
         assertEquals(activity.getString(R.string.pause), playPause.getText().toString());
         assertDisplayed(stop);
+        assertDisplayed(player.findViewById(R.id.voice_player_back));
+        assertDisplayed(player.findViewById(R.id.voice_player_forward));
+        assertDisplayed(player.findViewById(R.id.voice_player_seek));
+        assertDisplayed(player.findViewById(R.id.voice_player_current));
+        assertDisplayed(player.findViewById(R.id.voice_player_remaining));
+        assertDisplayed(player.findViewById(R.id.voice_player_total));
         assertDisplayed(activity.findViewById(R.id.voice_conversation));
         assertDisplayed(activity.findViewById(R.id.voice_draft));
         assertDisplayed(activity.findViewById(R.id.voice_send));
@@ -80,4 +86,22 @@ public class StreamingPlaybackUiTest {
       scenario.onActivity(activity -> assertDisplayed(activity.findViewById(R.id.voice_assistant_player)));
     }
   }
+  @Test public void localVoiceActivityHintDoesNotStopAssistantPlayback() throws Exception {
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(activity -> {
+        VoicePcmPlayerView player = activity.findViewById(R.id.voice_assistant_player);
+        player.startStream(true, true, true);
+        player.append(new byte[16000 * 2]);
+        activity.handleLocalVoiceActivityStarted(1, true);
+      });
+      Thread.sleep(250L);
+      scenario.onActivity(activity -> {
+        VoicePcmPlayerView player = activity.findViewById(R.id.voice_assistant_player);
+        MaterialButton playPause = player.findViewById(R.id.voice_player_play_pause);
+        assertDisplayed(player);
+        assertEquals(activity.getString(R.string.pause), playPause.getText().toString());
+      });
+    }
+  }
+
 }

@@ -42,6 +42,7 @@ public class MainActivityUiTest {
         assertDisplayed(screen.findViewById(R.id.voice_send));
         assertDisplayed(screen.findViewById(R.id.voice_settings));
         assertEquals(View.GONE, screen.findViewById(R.id.voice_worker_status).getVisibility());
+        assertEquals(View.GONE, screen.findViewById(R.id.voice_question_status).getVisibility());
         assertEquals(View.GONE, screen.findViewById(R.id.voice_user_player).getVisibility());
         assertEquals(View.GONE, screen.findViewById(R.id.voice_assistant_player).getVisibility());
         assertEquals(View.GONE, screen.findViewById(R.id.voice_transcribe).getVisibility());

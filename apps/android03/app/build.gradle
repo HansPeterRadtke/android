@@ -16,7 +16,12 @@ dependencies {
 android {
     namespace 'myapp.app'
     compileSdk 34
+    buildFeatures {
+        buildConfig true
+    }
     defaultConfig {
+        def voiceAuthToken = System.getenv('VOICE_AGENT_AUTH_TOKEN') ?: ''
+        buildConfigField 'String', 'VOICE_AUTH_TOKEN', '"' + voiceAuthToken.replace('\\', '\\\\').replace('\"', '\\"') + '"'
         applicationId "myapp.app"
         minSdk 24
         targetSdk 34

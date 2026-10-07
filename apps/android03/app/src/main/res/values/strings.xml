@@ -1,5 +1,6 @@
 <resources>
     <string name="status_ready">Ready</string>
+    <string name="status_text_only">Text only</string>
     <string name="status_connecting">Connecting</string>
     <string name="status_checking_audio">Checking audio path</string>
     <string name="status_listening">Live • Listening</string>
@@ -66,6 +67,13 @@
     <string name="no_answer_audio">No answer audio is available yet.</string>
     <string name="not_connected_action">This action needs a live connection.</string>
     <string name="transcript_empty">Transcript cannot be empty.</string>
+    <string name="partial_transcript_not_ready">Transcription is still changing. Wait for the final text or edit it before sending.</string>
+    <string name="player_seek_description">%1$s playback position</string>
+    <plurals name="background_questions_available">
+        <item quantity="one">%d background question is available for review. Ask the agent to review it.</item>
+        <item quantity="other">%d background questions are available for review. Ask the agent to review them.</item>
+    </plurals>
+    <string name="background_questions_with_blocking">%1$d background question(s) open • %2$d blocking. Ask the agent to review them.</string>
     <string name="server_error">The voice service reported an error.</string>
     <string name="buffering_reply">Live • Buffering reply</string>
     <string name="detail_buffering_reply">Building a small playback buffer for continuous speech.</string>
@@ -83,6 +91,7 @@
     <string name="detail_recording_local">Audio stays on this phone until you press Transcribe.</string>
     <string name="detail_transcribing">Sending the buffered recording to the local GPU speech recognizer.</string>
     <string name="detail_ready_text">Type a message or start recording.</string>
+    <string name="detail_text_only">Voice is unavailable; typed messages remain available.</string>
     <string name="start_recording">Mic</string>
     <string name="stop_recording">Stop</string>
     <string name="transcribe">Transcribe</string>

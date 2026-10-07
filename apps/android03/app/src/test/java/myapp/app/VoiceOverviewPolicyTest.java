@@ -13,6 +13,12 @@ public class VoiceOverviewPolicyTest {
     assertTrue(VoiceOverviewPolicy.showWorker("canceled"));
   }
 
+  @Test public void optionalQuestionsRemainDiscoverableWithoutInterrupting() {
+    assertFalse(VoiceOverviewPolicy.showQuestions(0));
+    assertTrue(VoiceOverviewPolicy.showQuestions(1));
+    assertTrue(VoiceOverviewPolicy.showQuestions(12));
+  }
+
   @Test public void replayRowExistsOnlyWhenAudioExists() {
     assertFalse(VoiceOverviewPolicy.showReplay(false, false));
     assertTrue(VoiceOverviewPolicy.showReplay(true, false));

@@ -1,0 +1,83 @@
+# Voice Agent infra-guideline compliance audit — 2026-10-06
+
+Scope: Android `android03`, the Jetson WebSocket/STT/TTS glue used by that client, Nitro LuxTTS, and the read-only SWAAG status/question projection. SWAAG itself is explicitly outside the implementation scope and remains the authority for conversation, orchestration, workers, questions, tools, and task execution.
+
+## Documentation coverage
+
+The complete `/data/infra/docs` tree was inventoried before this audit: 236 files, including normalized guidelines, preserved source recordings, operational documentation, system descriptions, speech documentation, and project reports. The normalized guideline tree was treated as normative according to its own authority rules, with the preserved recordings used as source evidence. All agent and GUI guidance was reviewed, plus the cross-cutting security/privacy, networking, configuration, performance/reliability, logging, testing, programming, source-traceability, speech, system-description, SWAAG-launch, and voice-audio operational documents that can constrain this application.
+
+Trading-, finance-, chart-, table-, game-, web-, presentation-, mail-, video-, and LLM-benchmark-specific requirements were classified as non-applicable to this Android voice interface except for universal rules that are already represented in the core agent/GUI/testing/security guidance.
+
+## Architecture and ownership
+
+- SWAAG remains the working agent and orchestration authority. The voice layer forwards finalized user turns to SWAAG; it does not run a competing reasoning loop or conversation authority.
+- The Jetson worker/status stream is a read-only projection of SWAAG's global orchestrator state through `/orchestrator/events`. It does not maintain an independent worker/question database.
+- Android renders compact background-work state and question counts from the projection. Critical/blocking counts remain distinguishable. Exact question handling remains available through the SWAAG orchestrator conversation, which owns the authoritative inventory.
+- Replay is media inspection and does not cancel SWAAG work. Semantic interruption is authoritative; local VAD is only capture/UI evidence and cannot itself cancel a spoken answer.
+- Cancellation of an intentional interruption propagates to the SWAAG run rather than only terminating a local waiter.
+
+## User-input and transcription behavior
+
+- The current editable message is separate from submitted history and behaves as a normal Android text editor, including cursor positioning, selection, insertion, deletion, replacement, cut, copy, and paste through platform behavior.
+- Typed fallback remains usable when microphone permission, STT, TTS, or the voice path is unavailable.
+- Automatic transcription can be disabled. Automatic send can be disabled and is forced off when automatic transcription is disabled.
+- Fully manual mode records locally, exposes the user's unsent audio, requires explicit transcription, allows editing, and requires explicit Send.
+- A provisional ASR partial can update the editor but is marked unstable and cannot be submitted. A real user edit takes ownership of that visible text so a later ASR update cannot silently overwrite the correction.
+- Exact typed or user-corrected submission text is preserved across Android -> Jetson -> SWAAG. Whitespace normalization is used only to decide whether input is semantically empty; it is no longer applied to the retained submitted text.
+- Correction learning is based on retained submitted corrections and explicit vocabulary rather than raw keystroke history or discarded intermediate ASR text.
+
+## First-screen and Android UI compliance
+
+- A written Module Purpose Contract and Screen Question Contract exist in `GUI_CONTRACT.md`.
+- The first view is question-first: primary readiness state at the top, conversation as the dominant surface, contextual audio, then a persistent editable composer with Mic/Stop and Send. Settings and diagnostics are secondary.
+- Healthy backend component detail is hidden. Degraded component state is surfaced in human terms rather than existing only in logs.
+- The primary state no longer says `Ready` when the voice path is unavailable. Idle degraded operation now becomes `Text only`, `Connecting`, `Permission required`, or `Connection unavailable` according to the actual dependency state. Typed input remains available in the text-only state.
+- User and assistant history are textually distinguished and therefore do not rely on color alone. Agent messages are not editable in normal operation.
+- Main controls use at least 48 dp targets. Text uses Android scalable text sizing. The Settings icon and player seek control have accessibility descriptions where visible text alone is insufficient.
+- Wide/short and large-window layouts use app-window configuration rather than raw physical screen pixels. The composer remains pinned while secondary audio can scroll independently.
+- The microphone is explicitly user-controlled: `Mic` begins capture and changes to `Stop`; Stop tears down active capture/foreground recording service. The microphone is not permanently open merely because the app is connected.
+- Unsent draft text and retained manual recording state survive Activity recreation. Active user-requested recording uses a foreground service rather than relying on unrestricted background execution.
+
+## Playback and interruption
+
+- Both user and assistant PCM players provide play/pause/resume, Stop, seek, backward/forward jumps, current position, remaining time, and total/available duration.
+- Streaming reply audio keeps the player usable while the available duration grows.
+- Manual Stop is immediate. Acoustic activity alone does not cancel assistant playback; a semantic interruption decision is required.
+- Replay of prior user or assistant audio is separate from conversational interruption and cannot cancel an unrelated active SWAAG run.
+
+## Networking, security, and reliability
+
+- The public voice path uses WSS through the existing managed proxy.
+- WebSocket upgrades now require an explicit Bearer credential. The committed configuration contains only the credential-file path; the credential itself is not in Git or ordinary logs.
+- Jetson stores the deployed credential at `/etc/voice-agent/ws.token`, mode 0600, owned by the service account that must read it. Android receives the matching value only through build-time `VOICE_AGENT_AUTH_TOKEN` injection; source does not contain the secret.
+- Public verification rejects an unauthenticated WebSocket upgrade and accepts the same endpoint with the configured credential. The health endpoint remains unauthenticated for monitoring and exposes no credential.
+- Connection ownership uses generations so stale sockets cannot mutate current UI state. Heartbeat/media acknowledgement monitoring, reconnect backoff, bounded queues/buffers, and single-session-per-conversation behavior are explicit.
+- Jetson cannot resolve `nitro.lan`; therefore the canonical Jetson configuration uses the verified LAN address for the Nitro LuxTTS service instead of a hostname that fails on the target host.
+
+## TTS latency and continuity
+
+- LuxTTS exposes a framed streaming endpoint. Its text chunker now preserves sentence boundaries and bounds long unpunctuated chunks instead of merging ordinary replies back into one large synthesis unit.
+- Live measurement proved multiple independently arriving PCM frames. The Jetson WebSocket begins forwarding first PCM before later reply speech has finished synthesis, so streaming is real rather than post-generation chunking.
+- The normal Jetson path retains the local Piper fallback if the Nitro LuxTTS service fails.
+
+## Automated evidence obtained
+
+- Server/config/core/direct-SWAAG/LuxTTS suite: 51 relevant tests passed after the final server changes.
+- Android JVM suite: 31 tests passed with zero failures, errors, or skips after the final Android changes.
+- The final debug APK builds with a non-empty injected credential while source control remains credential-free.
+- Public WSS smoke: unauthenticated upgrade rejected; authenticated upgrade accepted and returned the normal voice-agent hello.
+- Jetson health reports server, primary/secondary STT, SWAAG agent, and TTS dependencies healthy.
+- Thor's global orchestrator projection was checked directly; at audit time it reported zero active workers and zero open/blocking questions, demonstrating the live read-only question/status path.
+- Android direct instrumentation suite on the API 34 emulator: 9 tests completed successfully; 8 passed and the offline-network-only acceptance test was intentionally skipped because its host-side network block was not enabled. The previously failing live streaming-player visibility test passed after the final layout correction.
+
+## Remaining release gates and non-violating limitations
+
+- A physical-phone acceptance pass is still mandatory. Emulator, unit, and server evidence cannot prove real microphone routing, speaker behavior, Bluetooth/OEM audio routing, acoustic semantic interruption, mobile-radio loss/recovery, background restrictions, thermal behavior, or real-device lifecycle behavior.
+- Complete accessibility acceptance is not yet proven. Existing tests cover key first-screen hierarchy and controls, but release evidence still needs the supported maximum font-scale layout, TalkBack traversal/labels, permission revoke/restore, supported resize/window classes, network loss/reconnect, and process-death recreation on the intended Android range.
+- Android exposes a compact global question count rather than a complete on-device question browser. The infra guideline describes a dedicated question channel as a design possibility, not a mandatory duplicate store. Exact questions remain available from the authoritative SWAAG orchestrator. If an Android browser is added, it must remain a read-only projection.
+- Conversation history currently renders into one selectable text surface with explicit role labels. This satisfies current role distinction without color dependence, but per-message accessibility semantics and very-large-history rendering remain reasonable future improvements if actual history size or TalkBack testing shows a need.
+- The Android build-time Bearer token is possession-based application authentication, not per-device identity. It closes the current unauthenticated trust-boundary violation, but credential rotation and per-device provisioning remain separate security concerns if the threat model later requires them.
+
+## Release decision
+
+Do not call the voice client fully release-verified until the physical-phone/accessibility/failure-path acceptance above is completed. The ordinary emulator instrumentation suite is now green; the dedicated offline acceptance still requires its explicit host-side network-block setup. The implemented architecture itself now matches the applicable agent/voice/UI ownership, fallback, input-stability, interruption, playback, readiness, authentication, configuration, and streaming requirements reviewed in this audit.

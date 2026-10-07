@@ -1,4 +1,6 @@
 <resources>
-    <fraction name="voice_controls_max_fraction">24%</fraction>
-    <dimen name="voice_controls_min_height">88dp</dimen>
+    <fraction name="voice_controls_max_fraction">45%</fraction>
+    <dimen name="voice_controls_min_height">160dp</dimen>
+    <fraction name="voice_lower_controls_max_fraction">52%</fraction>
+    <dimen name="voice_lower_controls_min_height">220dp</dimen>
 </resources>

@@ -9,6 +9,10 @@ final class VoiceOverviewPolicy {
     return !value.isEmpty() && !"none".equals(value) && !"idle".equals(value);
   }
 
+  static boolean showQuestions(int openQuestions) {
+    return openQuestions > 0;
+  }
+
   static boolean showReplay(boolean userAudio, boolean assistantAudio) {
     return userAudio || assistantAudio;
   }
