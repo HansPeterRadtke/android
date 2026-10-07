@@ -65,6 +65,7 @@ Trading-, finance-, chart-, table-, game-, web-, presentation-, mail-, video-, a
 - Server/config/core/direct-SWAAG/LuxTTS suite: 52 relevant tests passed after the final server changes.
 - Android JVM suite: 31 tests passed with zero failures, errors, or skips after the final Android changes.
 - The final debug APK builds with a non-empty injected credential while source control remains credential-free.
+- The physical-phone acceptance artifact is `android03-voice-agent-1.7.8.apk`, versionName 1.7.8 / versionCode 16, published in the authenticated Nitro Explorer upload root. Its SHA-256 is `06173feb6b03c79c5d45ba500b312b0219e984c267cda72a9208f20e0cb37458`, exactly matching the APK that passed the final JVM/instrumentation checks.
 - The Android build accepts credential injection by environment variable or explicit Gradle credential-file property and has a Nitro-only runtime fallback at `/data/var/voice-agent-build/credential`; that file is outside Git and mode 0600. This avoids putting credential material in source or command output.
 - Public WSS smoke: unauthenticated upgrade rejected; authenticated upgrade accepted and returned the normal voice-agent hello.
 - Jetson health reports server, primary/secondary STT, SWAAG agent, and TTS dependencies healthy.
