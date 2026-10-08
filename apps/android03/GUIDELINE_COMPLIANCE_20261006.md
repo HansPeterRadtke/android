@@ -59,6 +59,7 @@ Trading-, finance-, chart-, table-, game-, web-, presentation-, mail-, video-, a
 - LuxTTS exposes a framed streaming endpoint. Its text chunker now preserves sentence boundaries and bounds long unpunctuated chunks instead of merging ordinary replies back into one large synthesis unit.
 - Live measurement proved multiple independently arriving PCM frames. The Jetson WebSocket begins forwarding first PCM before later reply speech has finished synthesis, so streaming is real rather than post-generation chunking.
 - The normal Jetson path retains the local Piper fallback if the Nitro LuxTTS service fails.
+- Live fallback acceptance was exercised by deliberately stopping only the LuxTTS SSH tunnel. Health remained usable with `tts_primary=false`, `tts_fallback=true`; a real authenticated SWAAG turn returned a non-empty assistant answer, started `piper_en_US-lessac-medium_16000` audio, delivered the first 1,920-byte PCM frame at 10.437 s, and completed audio at 13.340 s. The tunnel was then restored and health returned to both primary and fallback TTS ready.
 
 ## Automated evidence obtained
 
