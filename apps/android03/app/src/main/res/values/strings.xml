@@ -70,10 +70,18 @@
     <string name="partial_transcript_not_ready">Transcription is still changing. Wait for the final text or edit it before sending.</string>
     <string name="player_seek_description">%1$s playback position</string>
     <plurals name="background_questions_available">
-        <item quantity="one">%d background question is available for review. Ask the agent to review it.</item>
-        <item quantity="other">%d background questions are available for review. Ask the agent to review them.</item>
+        <item quantity="one">%d background question is available. Tap to review it or ask the agent.</item>
+        <item quantity="other">%d background questions are available. Tap to review them or ask the agent.</item>
     </plurals>
-    <string name="background_questions_with_blocking">%1$d background question(s) open • %2$d blocking. Ask the agent to review them.</string>
+    <string name="background_questions_with_blocking">%1$d background question(s) open • %2$d blocking. Tap to review them or ask the agent.</string>
+    <string name="worker_questions_title">Worker questions</string>
+    <string name="worker_questions_top_question">Highest priority: %1$s Tap to review all.</string>
+    <string name="worker_questions_details_unavailable">Exact question details are temporarily unavailable; ask the agent to review them.</string>
+    <string name="worker_questions_none">No outstanding worker questions.</string>
+    <string name="worker_question_blocking">Blocking</string>
+    <string name="worker_question_optional">Optional</string>
+    <string name="worker_question_reason">Reason: %1$s</string>
+    <string name="worker_question_assumption">Assumption if unanswered: %1$s</string>
     <string name="server_error">The voice service reported an error.</string>
     <string name="buffering_reply">Live • Buffering reply</string>
     <string name="detail_buffering_reply">Building a small playback buffer for continuous speech.</string>

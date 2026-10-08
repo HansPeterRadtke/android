@@ -184,6 +184,8 @@ public class MainActivity extends Activity {
   private volatile boolean replayUserAvailable = false;
   private volatile boolean replayAssistantAvailable = false;
   private final WorkerEventSequencePolicy workerEventSequences = new WorkerEventSequencePolicy();
+  private volatile String workerQuestionInventoryJson = "[]";
+  private volatile boolean workerQuestionInventoryComplete = true;
   private volatile ForegroundMode foregroundMode = ForegroundMode.READY;
 
   private AcousticEchoCanceler aec;
@@ -329,7 +331,12 @@ public class MainActivity extends Activity {
     questionView.setId(R.id.voice_question_status);
     questionView.setTextSize(14);
     questionView.setPadding(dp(10), dp(6), dp(10), dp(6));
+    questionView.setMinHeight(dp(48));
+    questionView.setGravity(Gravity.CENTER_VERTICAL);
     questionView.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+    questionView.setClickable(true);
+    questionView.setFocusable(true);
+    questionView.setOnClickListener(v -> showWorkerQuestions());
     questionView.setVisibility(View.GONE);
     root.addView(questionView, fullWrap());
 
@@ -1421,7 +1428,7 @@ public class MainActivity extends Activity {
     });
   }
 
-  private void handleWorkerEvent(JSONObject obj) {
+  void handleWorkerEvent(JSONObject obj) {
     String workerId = obj.optString("worker_id", "").trim();
     String status = obj.optString("status", "none").trim();
     String eventType = obj.optString("event_type", "").trim();
@@ -1434,16 +1441,92 @@ public class MainActivity extends Activity {
     int openQuestions = semantic == null ? 0 : Math.max(0, semantic.optInt("open_questions", 0));
     int blockingQuestions = semantic == null ? 0 : Math.max(0, semantic.optInt("blocking_questions", 0));
     boolean questionsVisible = VoiceOverviewPolicy.showQuestions(openQuestions);
-    String questionLabel = blockingQuestions > 0
-        ? getString(R.string.background_questions_with_blocking, openQuestions, blockingQuestions)
-        : getResources().getQuantityString(
-            R.plurals.background_questions_available, openQuestions, openQuestions);
+    if ("snapshot".equals(obj.optString("event", ""))) {
+      workerQuestionInventoryComplete = obj.optBoolean("question_inventory_complete", false);
+      JSONArray exact = obj.optJSONArray("questions");
+      workerQuestionInventoryJson = exact == null ? "[]" : exact.toString();
+    }
+    String questionLabel = questionOverviewLabel(openQuestions, blockingQuestions);
     runOnUiThread(() -> {
       workerView.setText(label);
       workerView.setVisibility(visible ? View.VISIBLE : View.GONE);
       questionView.setText(questionLabel);
+      questionView.setContentDescription(questionLabel);
       questionView.setVisibility(questionsVisible ? View.VISIBLE : View.GONE);
     });
+  }
+
+  private String questionOverviewLabel(int openQuestions, int blockingQuestions) {
+    String base = blockingQuestions > 0
+        ? getString(R.string.background_questions_with_blocking, openQuestions, blockingQuestions)
+        : getResources().getQuantityString(
+            R.plurals.background_questions_available, openQuestions, openQuestions);
+    if (!workerQuestionInventoryComplete) {
+      return base + " " + getString(R.string.worker_questions_details_unavailable);
+    }
+    try {
+      JSONArray questions = new JSONArray(workerQuestionInventoryJson);
+      if (questions.length() > 0) {
+        String exact = questions.optJSONObject(0) == null
+            ? "" : questions.optJSONObject(0).optString("question", "").trim();
+        if (!exact.isEmpty()) {
+          int limit = 180;
+          if (exact.length() > limit) exact = exact.substring(0, limit - 1).trim() + "…";
+          return base + " " + getString(R.string.worker_questions_top_question, exact);
+        }
+      }
+    } catch (Exception ignored) {}
+    return base;
+  }
+
+  String workerQuestionDetailsText() {
+    if (!workerQuestionInventoryComplete) return getString(R.string.worker_questions_details_unavailable);
+    try {
+      JSONArray questions = new JSONArray(workerQuestionInventoryJson);
+      if (questions.length() == 0) return getString(R.string.worker_questions_none);
+      StringBuilder out = new StringBuilder();
+      for (int i = 0; i < questions.length(); i++) {
+        JSONObject question = questions.optJSONObject(i);
+        if (question == null) continue;
+        if (out.length() > 0) out.append("\n\n");
+        String criticality = question.optString("criticality", "optional").trim();
+        String importance = question.optString("importance", "normal").trim();
+        String worker = question.optString("worker_id", "").trim();
+        out.append(i + 1).append(". ")
+            .append("blocking".equals(criticality)
+                ? getString(R.string.worker_question_blocking)
+                : getString(R.string.worker_question_optional));
+        if (!importance.isEmpty()) out.append(" • ").append(importance);
+        if (!worker.isEmpty()) out.append(" • ").append(worker);
+        String exact = question.optString("question", "");
+        if (!exact.isEmpty()) out.append("\n").append(exact);
+        String reason = question.optString("reason", "").trim();
+        if (!reason.isEmpty()) out.append("\n").append(getString(R.string.worker_question_reason, reason));
+        String assumption = question.optString("assumption_if_unanswered", "").trim();
+        if (!assumption.isEmpty()) {
+          out.append("\n").append(getString(R.string.worker_question_assumption, assumption));
+        }
+      }
+      return out.length() == 0 ? getString(R.string.worker_questions_none) : out.toString();
+    } catch (Exception failure) {
+      return getString(R.string.worker_questions_details_unavailable);
+    }
+  }
+
+  private void showWorkerQuestions() {
+    String details = workerQuestionDetailsText();
+    TextView body = new TextView(this);
+    body.setText(details);
+    body.setTextSize(16);
+    body.setTextIsSelectable(true);
+    body.setPadding(dp(20), dp(12), dp(20), dp(12));
+    ScrollView scroll = new ScrollView(this);
+    scroll.addView(body, fullWrap());
+    new MaterialAlertDialogBuilder(this)
+        .setTitle(R.string.worker_questions_title)
+        .setView(scroll)
+        .setPositiveButton(android.R.string.ok, null)
+        .show();
   }
 
   private String workerLabel(String status, String message) {

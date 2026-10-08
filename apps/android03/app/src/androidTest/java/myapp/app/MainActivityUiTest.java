@@ -16,6 +16,9 @@ import androidx.test.rule.GrantPermissionRule;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.textfield.TextInputEditText;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -87,6 +90,62 @@ public class MainActivityUiTest {
         assertEquals(View.ACCESSIBILITY_LIVE_REGION_POLITE, status.getAccessibilityLiveRegion());
         assertEquals(View.ACCESSIBILITY_LIVE_REGION_POLITE, questions.getAccessibilityLiveRegion());
       });
+    }
+  }
+
+  @Test public void exactWorkerQuestionsAreInspectableFromDedicatedField() throws Exception {
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(screen -> {
+        try {
+          JSONObject snapshot = new JSONObject();
+          snapshot.put("type", "worker");
+          snapshot.put("event", "snapshot");
+          snapshot.put("worker_id", "swaag-orchestrator");
+          snapshot.put("status", "input_required");
+          snapshot.put("sequence", 0);
+          snapshot.put("message", "Two questions need review.");
+          snapshot.put("question_inventory_complete", true);
+          snapshot.put("semantic_status", new JSONObject()
+              .put("open_questions", 2)
+              .put("blocking_questions", 1)
+              .put("major_or_critical_questions", 1));
+          snapshot.put("questions", new JSONArray()
+              .put(new JSONObject()
+                  .put("question_id", "q-critical")
+                  .put("worker_id", "worker-a")
+                  .put("question", "Which deployment target should I use exactly?")
+                  .put("criticality", "blocking")
+                  .put("importance", "critical")
+                  .put("reason", "The choice changes the result."))
+              .put(new JSONObject()
+                  .put("question_id", "q-optional")
+                  .put("worker_id", "worker-b")
+                  .put("question", "Would you prefer the compact label?")
+                  .put("criticality", "optional")
+                  .put("importance", "minor")
+                  .put("assumption_if_unanswered", "Keep the current label.")));
+          screen.handleWorkerEvent(snapshot);
+        } catch (Exception failure) {
+          throw new AssertionError(failure);
+        }
+      });
+      scenario.onActivity(screen -> {
+        android.widget.TextView questions = screen.findViewById(R.id.voice_question_status);
+        assertDisplayed(questions);
+        assertTrue(questions.isClickable());
+        assertTrue(questions.isFocusable());
+        int minimum = Math.round(48f * screen.getResources().getDisplayMetrics().density);
+        assertTrue("question field touch target too short", questions.getHeight() >= minimum);
+        assertTrue(questions.getText().toString().contains("Which deployment target should I use exactly?"));
+        String details = screen.workerQuestionDetailsText();
+        assertTrue(details.contains("Blocking • critical • worker-a"));
+        assertTrue(details.contains("Which deployment target should I use exactly?"));
+        assertTrue(details.contains("Optional • minor • worker-b"));
+        assertTrue(details.contains("Would you prefer the compact label?"));
+        assertTrue(details.contains("Keep the current label."));
+        assertTrue(questions.performClick());
+      });
+      Thread.sleep(200L);
     }
   }
 
