@@ -110,6 +110,7 @@
     <string name="health_strip_stt_unavailable">Speech transcription unavailable • typed messages remain available</string>
     <string name="health_strip_agent_unavailable">Agent unavailable • your current message is kept</string>
     <string name="health_strip_tts_unavailable">Voice playback unavailable • text replies remain available</string>
+    <string name="health_strip_tts_fallback">Fallback voice active • high-quality voice temporarily unavailable</string>
     <string name="health_strip_mic">%1$s • Mic %2$.0f dBFS</string>
     <string name="user_audio">Your recording</string>
     <string name="assistant_audio">Agent audio</string>

@@ -169,6 +169,8 @@ public class MainActivity extends Activity {
   private volatile boolean serverSttReady = false;
   private volatile boolean serverAgentReady = false;
   private volatile boolean serverTtsReady = false;
+  private volatile boolean serverTtsPrimaryReady = false;
+  private volatile boolean serverTtsFallbackReady = false;
   private final ArrayList<String> currentVocabulary = new ArrayList<>();
   private volatile boolean userVocabularyConfigured = false;
   private final Object manualRecordingLock = new Object();
@@ -289,6 +291,7 @@ public class MainActivity extends Activity {
     statusView.setTextSize(18);
     statusView.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
     statusView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+    statusView.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
     statusStack.addView(statusView, fullWrap());
     statusDetailView = new TextView(this);
     statusDetailView.setId(R.id.voice_status_detail);
@@ -326,6 +329,7 @@ public class MainActivity extends Activity {
     questionView.setId(R.id.voice_question_status);
     questionView.setTextSize(14);
     questionView.setPadding(dp(10), dp(6), dp(10), dp(6));
+    questionView.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
     questionView.setVisibility(View.GONE);
     root.addView(questionView, fullWrap());
 
@@ -1695,6 +1699,11 @@ public class MainActivity extends Activity {
     serverSttReady = components.optBoolean("stt", false);
     serverAgentReady = components.optBoolean("agent", false);
     serverTtsReady = components.optBoolean("tts", false);
+    serverTtsPrimaryReady = components.has("tts_primary")
+        ? components.optBoolean("tts_primary", false)
+        : serverTtsReady;
+    serverTtsFallbackReady = components.has("tts_fallback")
+        && components.optBoolean("tts_fallback", false);
     updateServiceHealth();
   }
 
@@ -1703,6 +1712,8 @@ public class MainActivity extends Activity {
     serverSttReady = false;
     serverAgentReady = false;
     serverTtsReady = false;
+    serverTtsPrimaryReady = false;
+    serverTtsFallbackReady = false;
   }
 
   private String healthWord(boolean ready) {
@@ -1737,6 +1748,10 @@ public class MainActivity extends Activity {
       visible = true;
     } else if (!serverTtsReady) {
       value = getString(R.string.health_strip_tts_unavailable);
+      visible = true;
+    } else if (VoiceOverviewPolicy.showTtsFallback(
+        serverTtsReady, serverTtsPrimaryReady, serverTtsFallbackReady)) {
+      value = getString(R.string.health_strip_tts_fallback);
       visible = true;
     } else if (running.get()) {
       value = getString(

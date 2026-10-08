@@ -13,6 +13,10 @@ final class VoiceOverviewPolicy {
     return openQuestions > 0;
   }
 
+  static boolean showTtsFallback(boolean ttsReady, boolean primaryReady, boolean fallbackReady) {
+    return ttsReady && !primaryReady && fallbackReady;
+  }
+
   static boolean showReplay(boolean userAudio, boolean assistantAudio) {
     return userAudio || assistantAudio;
   }

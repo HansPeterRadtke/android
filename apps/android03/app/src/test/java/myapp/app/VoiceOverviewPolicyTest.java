@@ -30,4 +30,11 @@ public class VoiceOverviewPolicyTest {
     assertTrue(VoiceOverviewPolicy.showTranscript("partial speech", false));
     assertTrue(VoiceOverviewPolicy.showTranscript("", true));
   }
+
+  @Test public void ttsFallbackIsShownOnlyForUsableDegradedVoice() {
+    assertTrue(VoiceOverviewPolicy.showTtsFallback(true, false, true));
+    assertFalse(VoiceOverviewPolicy.showTtsFallback(true, true, true));
+    assertFalse(VoiceOverviewPolicy.showTtsFallback(false, false, true));
+    assertFalse(VoiceOverviewPolicy.showTtsFallback(true, false, false));
+  }
 }

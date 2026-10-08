@@ -61,6 +61,30 @@ public class StreamingPlaybackUiTest {
     }
   }
 
+  @Test public void exposedPlayerControlsHaveAccessibleNames() {
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(activity -> {
+        VoicePcmPlayerView player = activity.findViewById(R.id.voice_assistant_player);
+        player.startStream(false, false, false);
+        player.append(new byte[3200]);
+        int[] ids = {
+            R.id.voice_player_play_pause, R.id.voice_player_stop, R.id.voice_player_back,
+            R.id.voice_player_forward, R.id.voice_player_seek
+        };
+        for (int id : ids) {
+          View view = player.findViewById(id);
+          CharSequence description = view.getContentDescription();
+          CharSequence text = view instanceof android.widget.TextView
+              ? ((android.widget.TextView) view).getText() : null;
+          assertTrue(
+              "player control has no accessible name: " + id,
+              (description != null && description.length() > 0)
+                  || (text != null && text.length() > 0));
+        }
+      });
+    }
+  }
+
   @Test public void completedLiveReplyCollapsesButReplayPlayerRemains() throws Exception {
     try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
       scenario.onActivity(activity -> {

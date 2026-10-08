@@ -79,6 +79,17 @@ public class MainActivityUiTest {
     }
   }
 
+  @Test public void statusAndQuestionsAreAccessibilityLiveRegions() {
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(screen -> {
+        View status = screen.findViewById(R.id.voice_status);
+        View questions = screen.findViewById(R.id.voice_question_status);
+        assertEquals(View.ACCESSIBILITY_LIVE_REGION_POLITE, status.getAccessibilityLiveRegion());
+        assertEquals(View.ACCESSIBILITY_LIVE_REGION_POLITE, questions.getAccessibilityLiveRegion());
+      });
+    }
+  }
+
   @Test public void currentMessageIsGenuinelyMultiline() {
     try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
       scenario.onActivity(screen -> {

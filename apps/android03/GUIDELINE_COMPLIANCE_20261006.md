@@ -52,7 +52,7 @@ Trading-, finance-, chart-, table-, game-, web-, presentation-, mail-, video-, a
 - Jetson stores the deployed credential at `/etc/voice-agent/ws.token`, mode 0600, owned by the service account that must read it. Android receives the matching value only through build-time `VOICE_AGENT_AUTH_TOKEN` injection; source does not contain the secret.
 - Public verification rejects an unauthenticated WebSocket upgrade and accepts the same endpoint with the configured credential. The health endpoint remains unauthenticated for monitoring and exposes no credential.
 - Connection ownership uses generations so stale sockets cannot mutate current UI state. Heartbeat/media acknowledgement monitoring, reconnect backoff, bounded queues/buffers, and single-session-per-conversation behavior are explicit.
-- Jetson cannot resolve `nitro.lan`; therefore the canonical Jetson configuration uses the verified LAN address for the Nitro LuxTTS service instead of a hostname that fails on the target host.
+- Jetson reaches Nitro LuxTTS only through the authenticated SSH tunnel bound at `127.0.0.1:15304`; the voice server no longer sends LuxTTS HTTP directly across the LAN. The dedicated tunnel service is enabled and active, and the voice configuration points both LuxTTS synthesis and health checks at that localhost tunnel.
 
 ## TTS latency and continuity
 
@@ -62,17 +62,18 @@ Trading-, finance-, chart-, table-, game-, web-, presentation-, mail-, video-, a
 
 ## Automated evidence obtained
 
-- Server/config/core/direct-SWAAG/LuxTTS suite: 52 relevant tests passed after the final server changes.
-- Android JVM suite: 31 tests passed with zero failures, errors, or skips after the final Android changes.
+- Server/config/core/direct-SWAAG/LuxTTS suite: 56 relevant tests passed on the current server head, including primary/fallback TTS-health semantics.
+- Android JVM suite: 32 tests passed with zero failures, errors, or skips on the current 1.7.9 source.
 - The final debug APK builds with a non-empty injected credential while source control remains credential-free.
-- The physical-phone acceptance artifact is `android03-voice-agent-1.7.8.apk`, versionName 1.7.8 / versionCode 16, published in the authenticated Nitro Explorer upload root. Its SHA-256 is `06173feb6b03c79c5d45ba500b312b0219e984c267cda72a9208f20e0cb37458`, exactly matching the APK that passed the final JVM/instrumentation checks.
+- The current physical-phone acceptance artifact is `android03-voice-agent-1.7.9.apk`, versionName 1.7.9 / versionCode 17. The exact app APK that passed the current JVM and fourteen-test instrumentation run has SHA-256 `2fe78b461186d71b61592ea19bc41225678614be7747b634b27732689dd7b0e8`.
+- The authenticated download root is updated to expose the current 1.7.9 acceptance APK; older acceptance/pre-auth APKs are retained outside the primary download slot for rollback/audit rather than being presented as the current install.
 - The Android build accepts credential injection by environment variable or explicit Gradle credential-file property and has a Nitro-only runtime fallback at `/data/var/voice-agent-build/credential`; that file is outside Git and mode 0600. This avoids putting credential material in source or command output.
 - Public WSS smoke: unauthenticated upgrade rejected; authenticated upgrade accepted and returned the normal voice-agent hello.
 - A full authenticated public WSS transaction also passed: the exact typed submission was echoed unchanged, SWAAG produced a non-empty assistant answer at 8.801 s, the first 1,920-byte PCM frame arrived at 11.697 s, and the audio stream ended at 16.900 s. This proves the public proxy path carries authenticated text -> SWAAG -> streamed TTS end to end.
 - Jetson health reports server, primary/secondary STT, SWAAG agent, and TTS dependencies healthy.
 - Jetson production now executes the pushed voice server commit from the clean `/data/src/worktrees/voice-infra-gaps-20261003` deployment worktree rather than the dirty historical `master` checkout. The clean worktree was first started on a spare port and returned healthy server/STT/SWAAG/TTS status before systemd was switched; the production process command line and working directory were verified afterward.
 - Thor's global orchestrator projection was checked directly; at audit time it reported zero active workers and zero open/blocking questions, demonstrating the live read-only question/status path.
-- All 11 current Android instrumentation tests have passing evidence across the ordinary and dedicated API 34 emulator runs. The offline-network-only acceptance is intentionally skipped in an ordinary online run and was executed separately with networking disabled. The previously failing live streaming-player visibility test passed after the final layout correction.
+- All 14 current Android instrumentation tests have passing evidence on the API 34 emulator. The ordinary online run completed with every executable case passing and the offline-only case assumption-skipped; that offline case then passed separately with both emulator radios disabled. The expanded suite includes accessibility live regions, accessible player controls, process-death recovery, manual recording background/foreground continuity, and streaming-player behavior.
 - Dedicated offline acceptance was then run with emulator Wi-Fi and mobile data disabled and its cached-history/latest-navigation test passed.
 - The six core first-screen and streaming-player instrumentation tests passed at Android font scale 2.0.
 - The same six core UI/player tests passed in forced landscape at normal font scale. Emulator font scale, rotation, Wi-Fi, and mobile-data settings were restored after verification.
@@ -83,11 +84,11 @@ Trading-, finance-, chart-, table-, game-, web-, presentation-, mail-, video-, a
 - Microphone permission was revoked on the emulator: the first-screen status became `Microphone permission required`, explicitly stated that typed messages still work, and the conversation, editable current-message field, Mic, and Send controls remained reachable. Permission was restored afterward.
 - Emulator Wi-Fi and mobile data were disabled during an active client session: the primary state became `Reconnecting` with an explicit server-unreachable explanation; after connectivity was restored the state returned to `Ready`.
 - An unsent editor draft remained present after a forced application stop and relaunch, providing additional process-recreation evidence beyond the Activity-recreation instrumentation test.
-- A dedicated lifecycle instrumentation test now verifies that user-started manual recording remains active across Activity background/foreground transitions and can still be stopped normally after resume, exercising the foreground-service ownership path.
+- A dedicated lifecycle instrumentation test verifies that user-started manual recording remains active across Activity background/foreground transitions and can still be stopped normally after resume, exercising the foreground-service ownership path. Its setup now establishes manual mode before Activity launch; the corrected lifecycle class passes all four tests.
 
 ## Remaining release gates and non-violating limitations
 
-- Physical-phone acceptance build is version `1.7.8` / versionCode 16 so it is distinguishable from the earlier `1.7.7` APK.
+- Physical-phone acceptance build is version `1.7.9` / versionCode 17, superseding the authenticated 1.7.8 acceptance build.
 - A physical-phone acceptance pass is still mandatory. Emulator, unit, and server evidence cannot prove real microphone routing, speaker behavior, Bluetooth/OEM audio routing, acoustic semantic interruption, mobile-radio loss/recovery, background restrictions, thermal behavior, or real-device lifecycle behavior.
 - Complete screen-reader acceptance is not yet proven. Maximum supported font scale, portrait/landscape/tablet-sized layout, accessible names/touch targets, permission revocation, network loss/reconnect, and process-death recovery of the unsent draft plus manual audio now have emulator evidence. TalkBack is not installed in the current AVD, so real TalkBack traversal/announcement quality and physical-device accessibility behavior remain unverified. Foldable-specific postures also remain untested.
 - Android exposes a compact global question count rather than a complete on-device question browser. The infra guideline describes a dedicated question channel as a design possibility, not a mandatory duplicate store. Exact questions remain available from the authoritative SWAAG orchestrator. If an Android browser is added, it must remain a read-only projection.

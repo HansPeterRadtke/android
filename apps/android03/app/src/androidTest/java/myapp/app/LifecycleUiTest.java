@@ -89,12 +89,13 @@ public class LifecycleUiTest {
   }
 
   @Test public void manualRecordingContinuesAcrossBackgroundAndForeground() throws Exception {
+    Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
+    target.getSharedPreferences("voice_agent_history", Context.MODE_PRIVATE).edit()
+        .putBoolean("transcribe_automatically_v1", false)
+        .putBoolean("send_automatically_v3", false)
+        .commit();
     try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
       scenario.onActivity(activity -> {
-        activity.getSharedPreferences("voice_agent_history", Context.MODE_PRIVATE).edit()
-            .putBoolean("transcribe_automatically_v1", false)
-            .putBoolean("send_automatically_v3", false)
-            .commit();
         com.google.android.material.button.MaterialButton mic = activity.findViewById(R.id.voice_start_stop);
         assertTrue(mic.performClick());
       });
@@ -109,11 +110,12 @@ public class LifecycleUiTest {
         com.google.android.material.button.MaterialButton mic = activity.findViewById(R.id.voice_start_stop);
         assertEquals(activity.getString(R.string.stop_recording), mic.getText().toString());
         assertTrue(mic.performClick());
-        activity.getSharedPreferences("voice_agent_history", Context.MODE_PRIVATE).edit()
-            .putBoolean("transcribe_automatically_v1", true)
-            .putBoolean("send_automatically_v3", true)
-            .commit();
       });
+    } finally {
+      target.getSharedPreferences("voice_agent_history", Context.MODE_PRIVATE).edit()
+          .putBoolean("transcribe_automatically_v1", true)
+          .putBoolean("send_automatically_v3", true)
+          .commit();
     }
   }
 
