@@ -82,6 +82,7 @@ Trading-, finance-, chart-, table-, game-, web-, presentation-, mail-, video-, a
 - Microphone permission was revoked on the emulator: the first-screen status became `Microphone permission required`, explicitly stated that typed messages still work, and the conversation, editable current-message field, Mic, and Send controls remained reachable. Permission was restored afterward.
 - Emulator Wi-Fi and mobile data were disabled during an active client session: the primary state became `Reconnecting` with an explicit server-unreachable explanation; after connectivity was restored the state returned to `Ready`.
 - An unsent editor draft remained present after a forced application stop and relaunch, providing additional process-recreation evidence beyond the Activity-recreation instrumentation test.
+- A dedicated lifecycle instrumentation test now verifies that user-started manual recording remains active across Activity background/foreground transitions and can still be stopped normally after resume, exercising the foreground-service ownership path.
 
 ## Remaining release gates and non-violating limitations
 
