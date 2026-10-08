@@ -77,6 +77,7 @@ Trading-, finance-, chart-, table-, game-, web-, presentation-, mail-, video-, a
 - The six core first-screen and streaming-player instrumentation tests passed at Android font scale 2.0.
 - The same six core UI/player tests passed in forced landscape at normal font scale. Emulator font scale, rotation, Wi-Fi, and mobile-data settings were restored after verification.
 - The same six core UI/player tests also passed in a tablet-sized portrait window (800 x 1280 dp equivalent), then the emulator display override was restored.
+- The current seven primary-screen/streaming-player tests also passed in a deliberately wide tablet-landscape display, exercising the two-pane branch; the emulator display/orientation overrides were restored afterward.
 - A dedicated accessibility regression now requires accessible names on Settings, current-message, Mic/Stop, and Send plus at least 48 dp touch height on the primary buttons; it passes on the clean API 34 AVD.
 - A dedicated process-death regression now writes an unsent draft and retained manual PCM recording, terminates the app process, cold-launches the Activity, and requires both the draft and the complete user-audio player/Transcribe path to be restored; it passes on the clean AVD.
 - Microphone permission was revoked on the emulator: the first-screen status became `Microphone permission required`, explicitly stated that typed messages still work, and the conversation, editable current-message field, Mic, and Send controls remained reachable. Permission was restored afterward.
