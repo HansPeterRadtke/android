@@ -31,7 +31,8 @@ The first view must answer, in order:
 Secondary questions:
 - Voice automation mode, microphone choice, preferred spellings/vocabulary and installed version live in Settings.
 - Component health details and raw diagnostics live behind the compact readiness state or an Advanced/Diagnostics action inside Settings.
-- Background worker state is invisible when idle and compact when working; blocking/attention-required state becomes conspicuous.
+- Background worker state is invisible when idle and compact when working; blocking/attention-required state becomes conspicuous. The dedicated question surface opens the complete read-only SWAAG question inventory with exact question text, worker identity and criticality; it is never a second question authority.
+- Worker progress comes only from SWAAG. Show a determinate percentage only when SWAAG provides a defensible single-worker overall percentage; otherwise use activity/indeterminate progress. Intentionally endless work is labeled as continuous and never shown as approaching one hundred percent.
 
 Interaction rules:
 - Typed text remains usable with microphone permission denied, STT unavailable, or voice service unavailable.

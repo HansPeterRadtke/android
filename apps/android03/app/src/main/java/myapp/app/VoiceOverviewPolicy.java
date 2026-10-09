@@ -13,6 +13,42 @@ final class VoiceOverviewPolicy {
     return openQuestions > 0;
   }
 
+  static boolean showForegroundProgress(String mode) {
+    if (mode == null) return false;
+    switch (mode.trim()) {
+      case "CONNECTING":
+      case "VERIFYING":
+      case "TRANSCRIBING":
+      case "THINKING":
+      case "BUFFERING":
+      case "RECONNECTING":
+      case "FINISHING":
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  static boolean isIntentionallyEndless(String progressKind) {
+    if (progressKind == null) return false;
+    String value = progressKind.trim();
+    return "intentionally_endless".equals(value)
+        || "contains_intentionally_endless_work".equals(value)
+        || "continuous".equals(value);
+  }
+
+  static boolean showWorkerProgress(String status) {
+    if (status == null) return false;
+    switch (status.trim()) {
+      case "queued":
+      case "working":
+      case "cancellation_requested":
+        return true;
+      default:
+        return false;
+    }
+  }
+
   static boolean showTtsFallback(boolean ttsReady, boolean primaryReady, boolean fallbackReady) {
     return ttsReady && !primaryReady && fallbackReady;
   }

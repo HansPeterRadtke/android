@@ -1,7 +1,9 @@
 <resources>
     <item name="voice_status" type="id"/>
     <item name="voice_status_detail" type="id"/>
+    <item name="voice_status_progress" type="id"/>
     <item name="voice_worker_status" type="id"/>
+    <item name="voice_worker_progress" type="id"/>
     <item name="voice_question_status" type="id"/>
     <item name="voice_conversation" type="id"/>
     <item name="voice_transcript_panel" type="id"/>

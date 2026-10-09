@@ -1,5 +1,8 @@
 <resources>
     <string name="status_ready">Ready</string>
+    <string name="status_progress_description">Current voice operation in progress</string>
+    <string name="worker_progress_description">Background worker progress</string>
+    <string name="worker_progress_endless_description">Background work is intentionally continuous; no overall completion percentage applies</string>
     <string name="status_text_only">Text only</string>
     <string name="status_connecting">Connecting</string>
     <string name="status_checking_audio">Checking audio path</string>

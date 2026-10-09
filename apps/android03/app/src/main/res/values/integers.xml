@@ -1,0 +1,3 @@
+<resources>
+    <integer name="worker_question_preview_chars">180</integer>
+</resources>

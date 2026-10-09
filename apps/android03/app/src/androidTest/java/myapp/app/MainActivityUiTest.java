@@ -8,6 +8,7 @@ import android.Manifest;
 import android.graphics.Rect;
 import android.text.InputType;
 import android.view.View;
+import android.widget.ProgressBar;
 
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -137,6 +138,7 @@ public class MainActivityUiTest {
         int minimum = Math.round(48f * screen.getResources().getDisplayMetrics().density);
         assertTrue("question field touch target too short", questions.getHeight() >= minimum);
         assertTrue(questions.getText().toString().contains("Which deployment target should I use exactly?"));
+        assertTrue("blocking questions must be visually conspicuous", questions.getTypeface().isBold());
         String details = screen.workerQuestionDetailsText();
         assertTrue(details.contains("Blocking • critical • worker-a"));
         assertTrue(details.contains("Which deployment target should I use exactly?"));
@@ -146,6 +148,122 @@ public class MainActivityUiTest {
         assertTrue(questions.performClick());
       });
       Thread.sleep(200L);
+    }
+  }
+
+  @Test public void foregroundProgressTracksOnlyActiveOperationStates() throws Exception {
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(screen -> {
+        try {
+          java.lang.reflect.Method mode = MainActivity.class.getDeclaredMethod(
+              "setForegroundMode",
+              Class.forName("myapp.app.MainActivity$ForegroundMode"),
+              String.class);
+          mode.setAccessible(true);
+          Class<?> enumType = Class.forName("myapp.app.MainActivity$ForegroundMode");
+          @SuppressWarnings({"unchecked", "rawtypes"})
+          Object transcribing = Enum.valueOf((Class<? extends Enum>) enumType, "TRANSCRIBING");
+          mode.invoke(screen, transcribing, null);
+        } catch (Exception failure) { throw new AssertionError(failure); }
+      });
+      scenario.onActivity(screen -> assertEquals(
+          View.VISIBLE, screen.findViewById(R.id.voice_status_progress).getVisibility()));
+      scenario.onActivity(screen -> {
+        try {
+          java.lang.reflect.Method mode = MainActivity.class.getDeclaredMethod(
+              "setForegroundMode",
+              Class.forName("myapp.app.MainActivity$ForegroundMode"),
+              String.class);
+          mode.setAccessible(true);
+          Class<?> enumType = Class.forName("myapp.app.MainActivity$ForegroundMode");
+          @SuppressWarnings({"unchecked", "rawtypes"})
+          Object listening = Enum.valueOf((Class<? extends Enum>) enumType, "LISTENING");
+          mode.invoke(screen, listening, null);
+        } catch (Exception failure) { throw new AssertionError(failure); }
+      });
+      scenario.onActivity(screen -> assertEquals(
+          View.GONE, screen.findViewById(R.id.voice_status_progress).getVisibility()));
+    }
+  }
+
+  @Test public void endlessWorkerProgressIsExplicitlyMarkedAsContinuous() throws Exception {
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(screen -> {
+        try {
+          screen.handleWorkerEvent(new JSONObject()
+              .put("type", "worker").put("event", "snapshot")
+              .put("worker_id", "swaag-orchestrator").put("status", "working").put("sequence", 0)
+              .put("message", "1 background worker is active; intentionally continuous work with no overall completion target.")
+              .put("question_inventory_complete", true).put("questions", new JSONArray())
+              .put("semantic_status", new JSONObject()
+                  .put("active_workers", 1).put("open_questions", 0)
+                  .put("blocking_questions", 0).put("major_or_critical_questions", 0)
+                  .put("progress_percent", JSONObject.NULL)
+                  .put("progress_kind", "intentionally_endless")));
+        } catch (Exception failure) { throw new AssertionError(failure); }
+      });
+      scenario.onActivity(screen -> {
+        ProgressBar progress = screen.findViewById(R.id.voice_worker_progress);
+        assertEquals(View.VISIBLE, progress.getVisibility());
+        assertTrue(progress.isIndeterminate());
+        assertTrue(progress.getContentDescription().toString().contains("intentionally continuous"));
+        android.widget.TextView worker = screen.findViewById(R.id.voice_worker_status);
+        assertTrue(worker.getText().toString().contains("intentionally continuous work"));
+      });
+    }
+  }
+
+  @Test public void workerProgressIsDeterminateOnlyWhenSwaagProvidesRealPercent() throws Exception {
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(screen -> {
+        try {
+          screen.handleWorkerEvent(new JSONObject()
+              .put("type", "worker").put("event", "snapshot")
+              .put("worker_id", "swaag-orchestrator").put("status", "working").put("sequence", 0)
+              .put("question_inventory_complete", true).put("questions", new JSONArray())
+              .put("semantic_status", new JSONObject()
+                  .put("active_workers", 1).put("open_questions", 0)
+                  .put("blocking_questions", 0).put("major_or_critical_questions", 0)
+                  .put("progress_percent", 42.4).put("progress_kind", "finite")));
+        } catch (Exception failure) { throw new AssertionError(failure); }
+      });
+      scenario.onActivity(screen -> {
+        ProgressBar progress = screen.findViewById(R.id.voice_worker_progress);
+        assertEquals(View.VISIBLE, progress.getVisibility());
+        assertTrue(!progress.isIndeterminate());
+        assertEquals(42, progress.getProgress());
+      });
+      scenario.onActivity(screen -> {
+        try {
+          screen.handleWorkerEvent(new JSONObject()
+              .put("type", "worker").put("event", "snapshot")
+              .put("worker_id", "swaag-orchestrator").put("status", "working").put("sequence", 0)
+              .put("question_inventory_complete", true).put("questions", new JSONArray())
+              .put("semantic_status", new JSONObject()
+                  .put("active_workers", 2).put("open_questions", 0)
+                  .put("blocking_questions", 0).put("major_or_critical_questions", 0)
+                  .put("progress_percent", JSONObject.NULL).put("progress_kind", "")));
+        } catch (Exception failure) { throw new AssertionError(failure); }
+      });
+      scenario.onActivity(screen -> {
+        ProgressBar progress = screen.findViewById(R.id.voice_worker_progress);
+        assertEquals(View.VISIBLE, progress.getVisibility());
+        assertTrue(progress.isIndeterminate());
+      });
+      scenario.onActivity(screen -> {
+        try {
+          screen.handleWorkerEvent(new JSONObject()
+              .put("type", "worker").put("event", "snapshot")
+              .put("worker_id", "swaag-orchestrator").put("status", "completed").put("sequence", 0)
+              .put("question_inventory_complete", true).put("questions", new JSONArray())
+              .put("semantic_status", new JSONObject()
+                  .put("active_workers", 0).put("open_questions", 0)
+                  .put("blocking_questions", 0).put("major_or_critical_questions", 0)
+                  .put("progress_percent", JSONObject.NULL).put("progress_kind", "")));
+        } catch (Exception failure) { throw new AssertionError(failure); }
+      });
+      scenario.onActivity(screen -> assertEquals(
+          View.GONE, screen.findViewById(R.id.voice_worker_progress).getVisibility()));
     }
   }
 

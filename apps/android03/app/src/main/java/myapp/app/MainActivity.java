@@ -29,6 +29,7 @@ import android.view.View;
 import android.view.ViewTreeObserver;
 import android.view.ViewGroup;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -106,8 +107,10 @@ public class MainActivity extends Activity {
 
   private TextView statusView;
   private TextView statusDetailView;
+  private ProgressBar statusProgressView;
   private TextView componentHealthView;
   private TextView workerView;
+  private ProgressBar workerProgressView;
   private TextView questionView;
   private TextView conversationView;
   private ScrollView conversationScrollView;
@@ -300,6 +303,12 @@ public class MainActivity extends Activity {
     statusDetailView.setTextSize(13);
     statusDetailView.setPadding(0, dp(1), 0, 0);
     statusStack.addView(statusDetailView, fullWrap());
+    statusProgressView = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+    statusProgressView.setId(R.id.voice_status_progress);
+    statusProgressView.setIndeterminate(true);
+    statusProgressView.setContentDescription(getString(R.string.status_progress_description));
+    statusProgressView.setVisibility(View.GONE);
+    statusStack.addView(statusProgressView, fullWrap());
     header.addView(statusStack, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
     settingsButton = new MaterialButton(this);
     settingsButton.setId(R.id.voice_settings);
@@ -326,6 +335,12 @@ public class MainActivity extends Activity {
     workerView.setPadding(dp(10), dp(6), dp(10), dp(6));
     workerView.setVisibility(View.GONE);
     root.addView(workerView, fullWrap());
+    workerProgressView = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+    workerProgressView.setId(R.id.voice_worker_progress);
+    workerProgressView.setMax(100);
+    workerProgressView.setContentDescription(getString(R.string.worker_progress_description));
+    workerProgressView.setVisibility(View.GONE);
+    root.addView(workerProgressView, fullWrap());
 
     questionView = new TextView(this);
     questionView.setId(R.id.voice_question_status);
@@ -1441,6 +1456,13 @@ public class MainActivity extends Activity {
     int openQuestions = semantic == null ? 0 : Math.max(0, semantic.optInt("open_questions", 0));
     int blockingQuestions = semantic == null ? 0 : Math.max(0, semantic.optInt("blocking_questions", 0));
     boolean questionsVisible = VoiceOverviewPolicy.showQuestions(openQuestions);
+    boolean workerProgressVisible = VoiceOverviewPolicy.showWorkerProgress(status);
+    String workerProgressKind = semantic == null ? "" : semantic.optString("progress_kind", "").trim();
+    boolean intentionallyEndless = VoiceOverviewPolicy.isIntentionallyEndless(workerProgressKind);
+    boolean hasWorkerPercent = semantic != null && !semantic.isNull("progress_percent");
+    int workerPercent = hasWorkerPercent
+        ? Math.max(0, Math.min(100, (int) Math.round(semantic.optDouble("progress_percent", 0.0))))
+        : 0;
     if ("snapshot".equals(obj.optString("event", ""))) {
       workerQuestionInventoryComplete = obj.optBoolean("question_inventory_complete", false);
       JSONArray exact = obj.optJSONArray("questions");
@@ -1450,8 +1472,15 @@ public class MainActivity extends Activity {
     runOnUiThread(() -> {
       workerView.setText(label);
       workerView.setVisibility(visible ? View.VISIBLE : View.GONE);
+      workerProgressView.setIndeterminate(workerProgressVisible && !hasWorkerPercent);
+      if (hasWorkerPercent) workerProgressView.setProgress(workerPercent);
+      workerProgressView.setContentDescription(getString(
+          intentionallyEndless ? R.string.worker_progress_endless_description
+              : R.string.worker_progress_description));
+      workerProgressView.setVisibility(workerProgressVisible ? View.VISIBLE : View.GONE);
       questionView.setText(questionLabel);
       questionView.setContentDescription(questionLabel);
+      questionView.setTypeface(Typeface.DEFAULT, blockingQuestions > 0 ? Typeface.BOLD : Typeface.NORMAL);
       questionView.setVisibility(questionsVisible ? View.VISIBLE : View.GONE);
     });
   }
@@ -1470,7 +1499,7 @@ public class MainActivity extends Activity {
         String exact = questions.optJSONObject(0) == null
             ? "" : questions.optJSONObject(0).optString("question", "").trim();
         if (!exact.isEmpty()) {
-          int limit = 180;
+          int limit = getResources().getInteger(R.integer.worker_question_preview_chars);
           if (exact.length() > limit) exact = exact.substring(0, limit - 1).trim() + "…";
           return base + " " + getString(R.string.worker_questions_top_question, exact);
         }
@@ -1890,8 +1919,10 @@ public class MainActivity extends Activity {
       obj.put("type", "assistant".equals(kind) ? "replay_assistant" : "replay_user");
       obj.put("turn_id", turnId);
       socket.send(obj.toString());
+      setStatusProgressVisible(true);
       setPrimaryStatus(getString(R.string.loading_replay), "");
     } catch (Exception failure) {
+      setStatusProgressVisible(false);
       appendDiagnostic("Replay request failed: " + failure.getClass().getSimpleName());
     }
   }
@@ -1958,7 +1989,10 @@ public class MainActivity extends Activity {
     boolean liveAssistant = !user && "audio".equals(type);
     player.startStream(true, liveAssistant, liveAssistant);
     if (liveAssistant) setForegroundMode(ForegroundMode.BUFFERING, null);
-    else setPrimaryStatus(getString(R.string.loading_replay), "");
+    else {
+      setStatusProgressVisible(false);
+      setPrimaryStatus(getString(R.string.loading_replay), "");
+    }
   }
 
   private void handleWsAudio(byte[] pcm) {
@@ -2213,7 +2247,13 @@ public class MainActivity extends Activity {
     }
     String title = getString(titleRes);
     String detail = detailOverride == null ? getString(detailRes) : detailOverride;
+    setStatusProgressVisible(VoiceOverviewPolicy.showForegroundProgress(mode.name()));
     setPrimaryStatus(title, detail);
+  }
+
+  private void setStatusProgressVisible(boolean visible) {
+    if (statusProgressView == null) return;
+    runOnUiThread(() -> statusProgressView.setVisibility(visible ? View.VISIBLE : View.GONE));
   }
 
   private void showListeningState() {
