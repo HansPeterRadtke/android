@@ -164,25 +164,13 @@ public class MainActivityUiTest {
           @SuppressWarnings({"unchecked", "rawtypes"})
           Object transcribing = Enum.valueOf((Class<? extends Enum>) enumType, "TRANSCRIBING");
           mode.invoke(screen, transcribing, null);
-        } catch (Exception failure) { throw new AssertionError(failure); }
-      });
-      scenario.onActivity(screen -> assertEquals(
-          View.VISIBLE, screen.findViewById(R.id.voice_status_progress).getVisibility()));
-      scenario.onActivity(screen -> {
-        try {
-          java.lang.reflect.Method mode = MainActivity.class.getDeclaredMethod(
-              "setForegroundMode",
-              Class.forName("myapp.app.MainActivity$ForegroundMode"),
-              String.class);
-          mode.setAccessible(true);
-          Class<?> enumType = Class.forName("myapp.app.MainActivity$ForegroundMode");
+          assertEquals(View.VISIBLE, screen.findViewById(R.id.voice_status_progress).getVisibility());
           @SuppressWarnings({"unchecked", "rawtypes"})
           Object listening = Enum.valueOf((Class<? extends Enum>) enumType, "LISTENING");
           mode.invoke(screen, listening, null);
+          assertEquals(View.GONE, screen.findViewById(R.id.voice_status_progress).getVisibility());
         } catch (Exception failure) { throw new AssertionError(failure); }
       });
-      scenario.onActivity(screen -> assertEquals(
-          View.GONE, screen.findViewById(R.id.voice_status_progress).getVisibility()));
     }
   }
 
