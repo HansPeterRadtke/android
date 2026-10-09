@@ -47,7 +47,7 @@ final class ConversationTextModel {
       confirmed = append(confirmed, "You", value);
       lastConfirmedUserTurnId = id;
     }
-    clearLiveUser();
+    if (!id.isEmpty() && id.equals(liveUserTurnId)) clearLiveUser();
   }
 
   synchronized void confirmAssistant(String turnId, String text) {
@@ -57,7 +57,7 @@ final class ConversationTextModel {
       confirmed = append(confirmed, "Agent", value);
       lastConfirmedAssistantTurnId = id;
     }
-    clearLiveAssistant();
+    if (!id.isEmpty() && id.equals(liveAssistantTurnId)) clearLiveAssistant();
   }
 
   synchronized String confirmedText() {

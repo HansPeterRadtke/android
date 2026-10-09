@@ -297,11 +297,11 @@ public class MainActivityUiTest {
             new Class<?>[] {String.class, boolean.class}, "wrong recognition", true);
         assertEquals("exact /data/source/File.java", editor.getText().toString());
         callPrivate(activity, "clearSubmittedDraft",
-            new Class<?>[] {String.class}, "some independently submitted speech");
+            new Class<?>[] {String.class, boolean.class}, "some independently submitted speech", false);
         assertEquals("exact /data/source/File.java", editor.getText().toString());
         assertTrue(send.isEnabled());
         callPrivate(activity, "clearSubmittedDraft",
-            new Class<?>[] {String.class}, "exact /data/source/File.java");
+            new Class<?>[] {String.class, boolean.class}, "exact /data/source/File.java", true);
         assertEquals("", editor.getText().toString());
         assertTrue(!send.isEnabled());
       });
@@ -409,6 +409,103 @@ public class MainActivityUiTest {
           assertEquals("Second separate typed message", second.getString("text"));
           assertTrue(!requestId.equals(second.getString("client_request_id")));
         } catch (Exception e) { throw new AssertionError(e); }
+      });
+    }
+  }
+
+  @Test public void liveAutomaticSpeechNeverPollutesTypedComposer() {
+    android.content.SharedPreferences prefs =
+        androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        .getTargetContext().getSharedPreferences("voice_agent_history", android.content.Context.MODE_PRIVATE);
+    prefs.edit().putBoolean("transcribe_automatically_v1", true)
+        .putBoolean("send_automatically_v3", true)
+        .remove("user_entered_message_v2").commit();
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(activity -> {
+        TextInputEditText editor = activity.findViewById(R.id.voice_draft);
+        android.widget.TextView conversation = activity.findViewById(R.id.voice_conversation);
+        assertEquals("", editor.getText().toString());
+        try {
+          callPrivate(activity, "handleWsJson",
+              new Class<?>[]{String.class, long.class},
+              new JSONObject().put("type","asr").put("event","partial")
+                  .put("text","ghost words definitely never spoken").toString(), 0L);
+          assertEquals("partial must never enter the typed field", "", editor.getText().toString());
+          assertTrue("live provisional speech should be visible",
+              conversation.getText().toString().contains("ghost words definitely never spoken"));
+          callPrivate(activity, "handleWsJson",
+              new Class<?>[]{String.class, long.class},
+              new JSONObject().put("type","asr").put("event","artifact")
+                  .put("reason","non_speech_annotation").toString(), 0L);
+          assertEquals("", editor.getText().toString());
+          assertTrue("suppressed hallucination must disappear",
+              !conversation.getText().toString().contains("ghost words definitely never spoken"));
+          callPrivate(activity, "handleWsJson",
+              new Class<?>[]{String.class, long.class},
+              new JSONObject().put("type","asr").put("event","final")
+                  .put("text","This is what I actually said.")
+                  .put("turn_id","turn-trusted").toString(), 0L);
+          assertEquals("", editor.getText().toString());
+          assertTrue(conversation.getText().toString().contains("This is what I actually said."));
+          callPrivate(activity, "handleWsJson",
+              new Class<?>[]{String.class, long.class},
+              new JSONObject().put("type","turn").put("event","submitted")
+                  .put("turn_id","turn-trusted")
+                  .put("text","This is what I actually said.").toString(), 0L);
+          assertEquals("", editor.getText().toString());
+          assertTrue(conversation.getText().toString().contains("This is what I actually said."));
+        } catch (Exception e) { throw new AssertionError(e); }
+      });
+    }
+  }
+
+  @Test public void legacyRecognizedDraftIsBackedUpNotRestoredAsTyping() {
+    android.content.SharedPreferences prefs =
+        androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        .getTargetContext().getSharedPreferences("voice_agent_history", android.content.Context.MODE_PRIVATE);
+    prefs.edit().remove("user_entered_message_v2").remove("previous_message_backup_v1")
+        .putString("current_message_v1", "WRONG AUTOMATIC SPEECH FROM 1.7.12").commit();
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(activity -> {
+        TextInputEditText editor = activity.findViewById(R.id.voice_draft);
+        assertEquals("", editor.getText().toString());
+        assertEquals("WRONG AUTOMATIC SPEECH FROM 1.7.12",
+            prefs.getString("previous_message_backup_v1",""));
+        assertTrue(!prefs.contains("current_message_v1"));
+      });
+    } finally {
+      prefs.edit().remove("previous_message_backup_v1").commit();
+    }
+  }
+
+  @Test public void backendErrorRemainsVisibleAndHistoryShowsFailure() {
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(activity -> {
+        android.widget.TextView conversation = activity.findViewById(R.id.voice_conversation);
+        android.widget.TextView status = activity.findViewById(R.id.voice_status);
+        android.widget.TextView detail = activity.findViewById(R.id.voice_status_detail);
+        TextInputEditText editor = activity.findViewById(R.id.voice_draft);
+        editor.setText("My real typed text");
+        try {
+          callPrivate(activity, "handleWsJson", new Class<?>[]{String.class,long.class},
+              new JSONObject().put("type","error").put("stage","answer")
+                  .put("turn_id","failed-1").put("message","swaag_answer_failed").toString(), 0L);
+          assertEquals(activity.getString(R.string.status_answer_failed), status.getText().toString());
+          assertEquals(View.VISIBLE, detail.getVisibility());
+          callPrivate(activity, "handleWsJson", new Class<?>[]{String.class,long.class},
+              new JSONObject().put("type","state").put("state","listening").toString(), 0L);
+          assertEquals(activity.getString(R.string.status_answer_failed), status.getText().toString());
+          JSONObject turn = new JSONObject().put("turn_id","failed-1")
+              .put("user","Make a little Python program").put("status","answer_error")
+              .put("answer_failed",true);
+          callPrivate(activity, "handleWsJson", new Class<?>[]{String.class,long.class},
+              new JSONObject().put("type","history")
+                  .put("turns",new JSONArray().put(turn)).toString(),0L);
+          assertTrue(conversation.getText().toString().contains("Make a little Python program"));
+          assertTrue(conversation.getText().toString().contains(
+              activity.getString(R.string.conversation_answer_failed)));
+          assertEquals("My real typed text", editor.getText().toString());
+        } catch(Exception e) {throw new AssertionError(e);}
       });
     }
   }

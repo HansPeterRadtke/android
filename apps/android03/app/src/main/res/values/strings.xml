@@ -14,6 +14,13 @@
     <string name="status_permission">Microphone permission required</string>
     <string name="status_microphone_error">Microphone unavailable</string>
     <string name="status_review">Review transcript</string>
+    <string name="status_answer_queued">Waiting for previous answer</string>
+    <string name="detail_answer_queued">Your message was received; SWAAG will answer it after the preceding turn.</string>
+    <string name="status_answer_failed">SWAAG did not answer</string>
+    <string name="detail_answer_failed">Your message arrived, but SWAAG failed to complete it. It was not automatically retried; the requested work may need inspection.</string>
+    <string name="conversation_answer_failed">This request reached SWAAG, but its answer failed. No successful completion is confirmed.</string>
+    <string name="restore_previous_message">Restore previous unsent message</string>
+
     <string name="status_finishing">Finishing</string>
 <string name="detail_connecting">Speech is not being sent yet.</string>
     <string name="detail_checking_audio">Connected. Waiting for the server to confirm microphone audio.</string>

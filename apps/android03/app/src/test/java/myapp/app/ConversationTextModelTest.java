@@ -39,6 +39,24 @@ public class ConversationTextModelTest {
     assertFalse(model.render("empty").contains("Interrupted draft"));
   }
 
+  @Test public void lateConfirmationsMustNotEraseLaterMessages() {
+    ConversationTextModel model = new ConversationTextModel();
+    model.replaceHistory("You\nEarlier question", "old-user", "old-agent");
+    model.setLiveUser("", "new speech is being recognized");
+    model.confirmUser("old-user-2", "an earlier submitted message");
+    assertTrue(model.render("empty").contains("new speech is being recognized"));
+    model.setLiveUser("new-user", "the finalized newer question");
+    model.confirmUser("other-user", "another previous message");
+    assertTrue(model.render("empty").contains("the finalized newer question"));
+    model.confirmUser("new-user", "the finalized newer question");
+    assertEquals(1, occurrences(model.render("empty"), "the finalized newer question"));
+    model.setLiveAssistant("new-reply", "current answer being generated");
+    model.confirmAssistant("older-reply", "older reply");
+    assertTrue(model.render("empty").contains("current answer being generated"));
+    model.confirmAssistant("new-reply", "current answer being generated");
+    assertEquals(1, occurrences(model.render("empty"), "current answer being generated"));
+  }
+
   private static int occurrences(String value, String needle) {
     int count=0, at=0;
     while ((at=value.indexOf(needle, at)) >= 0) { count++; at += needle.length(); }

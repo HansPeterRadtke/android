@@ -20,6 +20,7 @@ final class VoiceOverviewPolicy {
       case "VERIFYING":
       case "TRANSCRIBING":
       case "THINKING":
+      case "QUEUED":
       case "BUFFERING":
       case "RECONNECTING":
       case "FINISHING":

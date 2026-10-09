@@ -84,7 +84,9 @@ public class MainActivity extends Activity {
   private static final String AUTO_SEND_PREF_KEY = "send_automatically_v3";
   private static final String AUTO_TRANSCRIBE_PREF_KEY = "transcribe_automatically_v1";
   private static final String VOICE_CUES_PREF_KEY = "voice_activity_cues_v1";
-  private static final String DRAFT_PREF_KEY = "current_message_v1";
+  private static final String LEGACY_DRAFT_PREF_KEY = "current_message_v1";
+  private static final String LEGACY_DRAFT_BACKUP_PREF_KEY = "previous_message_backup_v1";
+  private static final String USER_DRAFT_PREF_KEY = "user_entered_message_v2";
   private static final String VOCAB_PREF_KEY = "vocabulary_v1";
   private static final String VOCAB_CONFIGURED_PREF_KEY = "vocabulary_configured_v1";
   private static final String MANUAL_RECORDING_FILE = "voice_unsent_manual.pcm";
@@ -95,8 +97,8 @@ public class MainActivity extends Activity {
 
   private enum ForegroundMode {
     READY, TEXT_ONLY, CONNECTING, VERIFYING, LISTENING, RECORDING_LOCAL, TRANSCRIBING,
-    THINKING, BUFFERING, SPEAKING, RECONNECTING, UNAVAILABLE, PERMISSION,
-    MICROPHONE_ERROR, REVIEW, FINISHING
+    THINKING, QUEUED, BUFFERING, SPEAKING, RECONNECTING, UNAVAILABLE, PERMISSION,
+    MICROPHONE_ERROR, REVIEW, ANSWER_ERROR, FINISHING
   }
 
   private VoiceAppConfig appConfig;
@@ -151,6 +153,9 @@ public class MainActivity extends Activity {
   private volatile long sendAttemptSequence = 0L;
   private volatile boolean draftContainsUnstableAsrPartial = false;
   private volatile boolean userClaimedAsrPartial = false;
+  private volatile boolean automaticLiveAsrPartial = false;
+  private volatile String lastFinalAsrText = "";
+  private volatile String lastFinalAsrTurnId = "";
   private boolean applyingAsrDraftText = false;
   private volatile boolean stopRequested = false;
   private volatile int nextSeq = 0;
@@ -255,6 +260,7 @@ public class MainActivity extends Activity {
     appConfig = VoiceAppConfig.from(this);
     mainHandler = new Handler(Looper.getMainLooper());
     historyPrefs = getSharedPreferences("voice_agent_history", MODE_PRIVATE);
+    migrateLegacyDraft();
     selectedDeviceId = historyPrefs.getInt(MIC_DEVICE_PREF_KEY, AudioInputOption.DEFAULT_DEVICE_ID);
     autoTranscribe = historyPrefs.getBoolean(AUTO_TRANSCRIBE_PREF_KEY, true);
     autoSend = VoiceAutomationPolicy.effectiveAutoSend(autoTranscribe, historyPrefs.getBoolean(AUTO_SEND_PREF_KEY, true));
@@ -281,6 +287,20 @@ public class MainActivity extends Activity {
     connectionWanted.set(true);
     if (hasUsableNetwork()) connectWebSocket();
     else updateServiceHealth();
+  }
+
+  private void migrateLegacyDraft() {
+    // 1.7.12 persisted all ASR guesses in the same preference as real user
+    // typing. Do not silently resurrect those guesses as a user-authored draft.
+    // Keep the old bytes retrievable in Settings rather than destroying them.
+    if (!historyPrefs.contains(LEGACY_DRAFT_PREF_KEY)) return;
+    String older = historyPrefs.getString(LEGACY_DRAFT_PREF_KEY, "");
+    SharedPreferences.Editor edit = historyPrefs.edit().remove(LEGACY_DRAFT_PREF_KEY);
+    if (older != null && !older.isEmpty()
+        && !historyPrefs.contains(LEGACY_DRAFT_BACKUP_PREF_KEY)) {
+      edit.putString(LEGACY_DRAFT_BACKUP_PREF_KEY, older);
+    }
+    edit.apply();
   }
 
   private boolean useWideShortLayout() {
@@ -426,12 +446,15 @@ public class MainActivity extends Activity {
       @Override public void onTextChanged(CharSequence value, int start, int before, int count) {}
       @Override public void afterTextChanged(Editable editable) {
         if (!applyingAsrDraftText) {
-          // ANY user typing takes ownership. Previously only editing a partial did
-          // so, allowing new ASR partials to overwrite a typed-from-scratch draft.
+          // Only human modifications of the current message are persisted.
           draftContainsUnstableAsrPartial = false;
           userClaimedAsrPartial = editable.length() > 0;
+          if (userClaimedAsrPartial) {
+            historyPrefs.edit().putString(USER_DRAFT_PREF_KEY, editable.toString()).apply();
+          } else {
+            historyPrefs.edit().remove(USER_DRAFT_PREF_KEY).apply();
+          }
         }
-        historyPrefs.edit().putString(DRAFT_PREF_KEY, editable.toString()).apply();
         updateTranscriptPanel();
       }
     });
@@ -505,7 +528,7 @@ public class MainActivity extends Activity {
     setContentView(root);
     loadConversationHistory();
     setForegroundMode(ForegroundMode.READY, null);
-    draftEdit.setText(historyPrefs.getString(DRAFT_PREF_KEY, ""));
+    draftEdit.setText(historyPrefs.getString(USER_DRAFT_PREF_KEY, ""));
     draftEdit.setSelection(draftEdit.length());
     updateServiceHealth();
     updateTranscriptPanel();
@@ -733,7 +756,13 @@ public class MainActivity extends Activity {
 
     @Override public void onMessage(WebSocket socket, String text) {
       if (!current(socket)) return;
-      handleWsJson(text, generation);
+      // All text/UI state transitions must run in wire order on Android's main
+      // thread; the previous background callback posted inconsistent UI updates.
+      runOnUiThread(() -> {
+        if (connectionTracker.owns(generation) && connectionTracker.isOpen()) {
+          handleWsJson(text, generation);
+        }
+      });
     }
 
     @Override public void onMessage(WebSocket socket, ByteString bytes) {
@@ -825,12 +854,18 @@ public class MainActivity extends Activity {
       } else if ("state".equals(type)) {
         String state = obj.optString("state", "");
         if ("thinking".equals(state)) setForegroundMode(ForegroundMode.THINKING, null);
-        else if ("awaiting_send".equals(state)) {
+        else if ("queued".equals(state)) {
+          setForegroundMode(ForegroundMode.QUEUED, null);
+        } else if ("awaiting_send".equals(state)) {
           pendingTurnId = obj.optString("turn_id", pendingTurnId);
+          if (!userClaimedAsrPartial && pendingTurnId.equals(lastFinalAsrTurnId)) {
+            setAsrDraftText(lastFinalAsrText, false);
+          }
           setForegroundMode(ForegroundMode.REVIEW, null);
           updateTranscriptPanel();
         } else if ("listening".equals(state)) {
-          if (pendingTurnId.isEmpty()) showListeningState();
+          if (pendingTurnId.isEmpty() && foregroundMode != ForegroundMode.ANSWER_ERROR)
+            showListeningState();
         }
       } else if ("asr".equals(type)) {
         connectionTracker.onMediaAck(listenerGeneration, System.currentTimeMillis());
@@ -838,9 +873,7 @@ public class MainActivity extends Activity {
         if ("artifact".equals(event)) {
           discardRejectedAsrPartial();
         } else if ("partial".equals(event)) {
-          if (!heard.isEmpty() && pendingTurnId.isEmpty() && !userClaimedAsrPartial) {
-            setAsrDraftText(heard, true);
-          }
+          if (!heard.isEmpty() && pendingTurnId.isEmpty()) showSpeechPartial(heard);
         } else if ("final".equals(event)) {
           pendingTurnId = obj.optString("turn_id", "");
           latestUserTurnId = pendingTurnId;
@@ -849,8 +882,9 @@ public class MainActivity extends Activity {
             manualTranscriptPendingSubmission = true;
             manualTranscribePending = false;
           }
-          if (!userClaimedAsrPartial) setAsrDraftText(heard, false);
-          else draftContainsUnstableAsrPartial = false;
+          lastFinalAsrText = heard;
+          lastFinalAsrTurnId = pendingTurnId;
+          showSpeechFinal(heard, pendingTurnId);
           updateReplayRow();
           if (!autoSend) setForegroundMode(ForegroundMode.REVIEW, null);
           updateTranscriptPanel();
@@ -860,18 +894,25 @@ public class MainActivity extends Activity {
         String turnId = obj.optString("turn_id", "");
         if (!submitted.trim().isEmpty()) {
           conversationTextModel.confirmUser(turnId, submitted);
+          automaticLiveAsrPartial = false;
+          if (turnId.equals(lastFinalAsrTurnId)) {
+            lastFinalAsrTurnId = "";
+            lastFinalAsrText = "";
+          }
           persistAndRenderConversation();
         }
-        pendingTurnId = "";
-        if (manualSendAwaitingAck && submitted.equals(manualSendText)) {
+        if (pendingTurnId.equals(turnId)) pendingTurnId = "";
+        boolean manualAcknowledged = manualSendAwaitingAck
+            && submitted.equals(manualSendText);
+        if (manualAcknowledged) {
           manualSendAwaitingAck = false;
           manualSendText = "";
           manualRequestId = "";
           manualRequestText = "";
         }
-        // A spoken automatic turn must never erase an unrelated typed message,
-        // nor may a late acknowledgement erase text typed after Send was tapped.
-        clearSubmittedDraft(submitted);
+        // Automatic speech never clears unrelated human text. A matching
+        // manual acknowledgement may clear only its own unchanged text.
+        clearSubmittedDraft(submitted, manualAcknowledged);
         manualTranscribePending = false;
         if (manualTranscriptPendingSubmission) {
           manualTranscriptPendingSubmission = false;
@@ -921,6 +962,12 @@ public class MainActivity extends Activity {
         handleWorkerEvent(obj);
       } else if ("error".equals(type)) {
         String stage = obj.optString("stage", "");
+        if ("answer".equals(stage)) {
+          setForegroundMode(ForegroundMode.ANSWER_ERROR,
+              getString(R.string.detail_answer_failed));
+          appendDiagnostic("SWAAG response failed for " + obj.optString("turn_id", ""));
+          return;
+        }
         if ("submit".equals(stage)) {
           manualSendAwaitingAck = false;
           manualSendText = "";
@@ -1307,6 +1354,21 @@ public class MainActivity extends Activity {
       content.addView(recentAudio, fullWrap());
       loadUser.setOnClickListener(v -> requestReplay("user"));
       loadAssistant.setOnClickListener(v -> requestReplay("assistant"));
+    }
+
+    String previousDraft = historyPrefs.getString(LEGACY_DRAFT_BACKUP_PREF_KEY, "");
+    if (previousDraft != null && !previousDraft.isEmpty()) {
+      MaterialButton restore = new MaterialButton(this);
+      restore.setText(R.string.restore_previous_message);
+      restore.setMinHeight(dp(48));
+      content.addView(restore, fullWrap());
+      restore.setOnClickListener(v -> {
+        // This is an explicit user decision to reclaim legacy text.
+        draftEdit.setText(previousDraft);
+        draftEdit.setSelection(draftEdit.length());
+        historyPrefs.edit().remove(LEGACY_DRAFT_BACKUP_PREF_KEY).apply();
+        updateTranscriptPanel();
+      });
     }
 
     diagnosticsButton = new MaterialButton(this);
@@ -2006,6 +2068,36 @@ public class MainActivity extends Activity {
     }
   }
 
+  private boolean automaticSpeechToAgent() {
+    return autoTranscribe && autoSend && !manualTranscribePending;
+  }
+
+  private void showSpeechPartial(String heard) {
+    if (automaticSpeechToAgent()) {
+      // Continuous speech belongs in the conversation as a provisional user
+      // utterance, NOT in the editable manually typed composer.
+      automaticLiveAsrPartial = true;
+      conversationPinnedToLatest = true;
+      conversationTextModel.setLiveUser("", heard);
+      renderConversationText();
+    } else if (!userClaimedAsrPartial) {
+      setAsrDraftText(heard, true);
+    }
+  }
+
+  private void showSpeechFinal(String heard, String turnId) {
+    automaticLiveAsrPartial = false;
+    if (automaticSpeechToAgent()) {
+      conversationPinnedToLatest = true;
+      conversationTextModel.setLiveUser(turnId, heard);
+      renderConversationText();
+    } else if (!userClaimedAsrPartial) {
+      setAsrDraftText(heard, false);
+    } else {
+      draftContainsUnstableAsrPartial = false;
+    }
+  }
+
   private void setAsrDraftText(String text, boolean partial) {
     String value = text == null ? "" : text;
     runOnUiThread(() -> {
@@ -2026,26 +2118,39 @@ public class MainActivity extends Activity {
 
   private void discardRejectedAsrPartial() {
     runOnUiThread(() -> {
+      if (automaticLiveAsrPartial && pendingTurnId.isEmpty()) {
+        automaticLiveAsrPartial = false;
+        conversationTextModel.clearLiveUser();
+        renderConversationText();
+      }
       if (!draftContainsUnstableAsrPartial || userClaimedAsrPartial) return;
       draftContainsUnstableAsrPartial = false;
-      // Only a non-owned ASR partial may be discarded. Never touch typed text.
-      draftEdit.setText("");
-      historyPrefs.edit().remove(DRAFT_PREF_KEY).apply();
+      applyingAsrDraftText = true;
+      try {
+        draftEdit.setText("");
+      } finally {
+        applyingAsrDraftText = false;
+      }
       updateTranscriptPanel();
     });
   }
 
-  private void clearSubmittedDraft(String acknowledgedText) {
+  private void clearSubmittedDraft(String acknowledgedText, boolean manualAcknowledged) {
     runOnUiThread(() -> {
-      if (acknowledgedText == null ||
-          !acknowledgedText.equals(draftEdit.getText().toString())) {
-        updateTranscriptPanel();
-        return;
-      }
+      if (userClaimedAsrPartial && !manualAcknowledged) return;
+      if (acknowledgedText == null
+          || !acknowledgedText.equals(draftEdit.getText().toString())) return;
       draftContainsUnstableAsrPartial = false;
       userClaimedAsrPartial = false;
-      draftEdit.setText("");
-      historyPrefs.edit().remove(DRAFT_PREF_KEY).apply();
+      applyingAsrDraftText = true;
+      try {
+        draftEdit.setText("");
+      } finally {
+        applyingAsrDraftText = false;
+      }
+      if (manualAcknowledged) {
+        historyPrefs.edit().remove(USER_DRAFT_PREF_KEY).apply();
+      }
       updateTranscriptPanel();
     });
   }
@@ -2318,6 +2423,10 @@ public class MainActivity extends Activity {
         titleRes = R.string.status_transcribing; detailRes = R.string.detail_transcribing; break;
       case THINKING:
         titleRes = R.string.status_thinking; detailRes = R.string.detail_thinking; break;
+      case QUEUED:
+        titleRes = R.string.status_answer_queued; detailRes = R.string.detail_answer_queued; break;
+      case ANSWER_ERROR:
+        titleRes = R.string.status_answer_failed; detailRes = R.string.detail_answer_failed; break;
       case BUFFERING:
         titleRes = R.string.buffering_reply; detailRes = R.string.detail_buffering_reply; break;
       case SPEAKING:
@@ -2381,7 +2490,9 @@ public class MainActivity extends Activity {
           || foregroundMode == ForegroundMode.UNAVAILABLE
           || foregroundMode == ForegroundMode.PERMISSION
           || foregroundMode == ForegroundMode.MICROPHONE_ERROR
-          || foregroundMode == ForegroundMode.REVIEW;
+          || foregroundMode == ForegroundMode.REVIEW
+          || foregroundMode == ForegroundMode.ANSWER_ERROR
+          || foregroundMode == ForegroundMode.QUEUED;
       statusView.setText(title);
       statusDetailView.setText(actionableDetail ? clean : "");
       statusDetailView.setVisibility(actionableDetail && !clean.isEmpty() ? View.VISIBLE : View.GONE);
@@ -2459,6 +2570,10 @@ public class MainActivity extends Activity {
         if (!assistant.isEmpty()) {
           rendered.append("Agent\n").append(assistant).append("\n\n");
           lastAssistant = turnId;
+        } else if ("answer_error".equals(status) || turn.optBoolean("answer_failed", false)) {
+          rendered.append("System\n")
+              .append(getString(R.string.conversation_answer_failed))
+              .append("\n\n");
         }
         if (turn.optBoolean("has_user_audio", false)) {
           latestUserTurnId = turnId;
@@ -2481,21 +2596,22 @@ public class MainActivity extends Activity {
     boolean finalAssistantAudio = assistantAudio;
     runOnUiThread(() -> {
       conversationTextModel.replaceHistory(finalRendered, finalLastUser, finalLastAssistant);
-      pendingTurnId = finalDraftTurn;
+      pendingTurnId = automaticSpeechToAgent() ? "" : finalDraftTurn;
       replayUserAvailable = finalUserAudio;
       replayAssistantAvailable = finalAssistantAudio;
-      if (!finalDraftTurn.isEmpty()) {
-        draftEdit.setText(finalDraftText);
-        draftEdit.setSelection(draftEdit.length());
-        conversationTextModel.setLiveUser(finalDraftTurn, finalDraftText);
-      } else {
-        // Server history owns submitted turns, but an unsent local text draft is
-        // independent UI state and must survive reconnect/history refresh.
-        String localDraft = historyPrefs.getString(DRAFT_PREF_KEY, "");
-        if (localDraft != null && !localDraft.equals(draftEdit.getText().toString())) {
-          draftEdit.setText(localDraft);
-          draftEdit.setSelection(draftEdit.length());
+      if (!finalDraftTurn.isEmpty() && !automaticSpeechToAgent()) {
+        if (!userClaimedAsrPartial) {
+          setAsrDraftText(finalDraftText, false);
         }
+        conversationTextModel.setLiveUser(finalDraftTurn, finalDraftText);
+      }
+      // The transport's past ASR drafts are not owned user text.
+      // Never put stale recognized speech back into the composer on reconnect.
+      String localDraft = historyPrefs.getString(USER_DRAFT_PREF_KEY, "");
+      if (localDraft != null && !localDraft.isEmpty()
+          && !localDraft.equals(draftEdit.getText().toString())) {
+        draftEdit.setText(localDraft);
+        draftEdit.setSelection(draftEdit.length());
       }
       persistAndRenderConversation();
       updateTranscriptPanel();
