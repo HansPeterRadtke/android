@@ -40,9 +40,9 @@ In fully manual transcription mode Android retains the recording locally instead
 
 ## Text lifecycle
 
-Partial ASR may update the visible current-message editor, but unstable partial text is not submittable. A final transcript stabilizes the draft. If the user deliberately edits a visible partial in manual-send mode, the user-edited text takes ownership and later ASR updates do not overwrite it.
+The current speech hypothesis and the finalized transcription are displayed in the **editable Current message field**, whether automatic sending is enabled or not. The app must not move provisional speech into chat history as a replacement for the editor. The user can explicitly press Send for any nonempty visible text, including a hypothesis; doing so takes ownership of exactly that text. If the user manually edits a hypothesis, subsequent ASR updates must not overwrite it. Suppressed recognition artifacts disappear from the provisional editor.
 
-The current editable message is separate from confirmed conversation history. A submitted turn is the only user text promoted into history and into SWAAG. Typed-from-scratch messages use the same submitted-turn boundary.
+The current editable message is separate from confirmed conversation history. A user turn is promoted into history only upon the server's `turn/submitted` acknowledgement. That acknowledgement may clear the exact matching ASR draft, but never a newer or separately typed message. The automatic recognizer's provisional text must not be persisted as if it were human-authored. An offline/reconnecting client retains only explicitly user-typed/edited unsent text, and the user may recover legacy auto-ASR text from Settings.
 
 Automatic transcription and automatic sending are independently user-controllable, with the constraint that automatic sending is disabled when automatic transcription is disabled.
 

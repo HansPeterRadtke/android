@@ -413,7 +413,7 @@ public class MainActivityUiTest {
     }
   }
 
-  @Test public void liveAutomaticSpeechNeverPollutesTypedComposer() {
+  @Test public void liveAutomaticSpeechAppearsInCurrentMessageUntilServerAck() {
     android.content.SharedPreferences prefs =
         androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
         .getTargetContext().getSharedPreferences("voice_agent_history", android.content.Context.MODE_PRIVATE);
@@ -430,9 +430,8 @@ public class MainActivityUiTest {
               new Class<?>[]{String.class, long.class},
               new JSONObject().put("type","asr").put("event","partial")
                   .put("text","ghost words definitely never spoken").toString(), 0L);
-          assertEquals("partial must never enter the typed field", "", editor.getText().toString());
-          assertTrue("live provisional speech should be visible",
-              conversation.getText().toString().contains("ghost words definitely never spoken"));
+          assertEquals("ghost words definitely never spoken", editor.getText().toString());
+          assertTrue(!conversation.getText().toString().contains("ghost words definitely never spoken"));
           callPrivate(activity, "handleWsJson",
               new Class<?>[]{String.class, long.class},
               new JSONObject().put("type","asr").put("event","artifact")
@@ -445,8 +444,8 @@ public class MainActivityUiTest {
               new JSONObject().put("type","asr").put("event","final")
                   .put("text","This is what I actually said.")
                   .put("turn_id","turn-trusted").toString(), 0L);
-          assertEquals("", editor.getText().toString());
-          assertTrue(conversation.getText().toString().contains("This is what I actually said."));
+          assertEquals("This is what I actually said.", editor.getText().toString());
+          assertTrue(!conversation.getText().toString().contains("This is what I actually said."));
           callPrivate(activity, "handleWsJson",
               new Class<?>[]{String.class, long.class},
               new JSONObject().put("type","turn").put("event","submitted")

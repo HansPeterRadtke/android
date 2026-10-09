@@ -2073,25 +2073,17 @@ public class MainActivity extends Activity {
   }
 
   private void showSpeechPartial(String heard) {
-    if (automaticSpeechToAgent()) {
-      // Continuous speech belongs in the conversation as a provisional user
-      // utterance, NOT in the editable manually typed composer.
-      automaticLiveAsrPartial = true;
-      conversationPinnedToLatest = true;
-      conversationTextModel.setLiveUser("", heard);
-      renderConversationText();
-    } else if (!userClaimedAsrPartial) {
-      setAsrDraftText(heard, true);
-    }
+    // The current recognized utterance belongs in the editable Current
+    // message field, regardless of automatic/manual sending mode. It is NOT
+    // chat history until the server acknowledges a submitted turn.
+    // ASR updates do not claim human ownership or persist an unsent draft.
+    if (!userClaimedAsrPartial) setAsrDraftText(heard, true);
   }
 
   private void showSpeechFinal(String heard, String turnId) {
-    automaticLiveAsrPartial = false;
-    if (automaticSpeechToAgent()) {
-      conversationPinnedToLatest = true;
-      conversationTextModel.setLiveUser(turnId, heard);
-      renderConversationText();
-    } else if (!userClaimedAsrPartial) {
+    // Keep the final visible in Current message until it is actually sent.
+    // Existing user typing/corrections take precedence over ASR callbacks.
+    if (!userClaimedAsrPartial) {
       setAsrDraftText(heard, false);
     } else {
       draftContainsUnstableAsrPartial = false;
@@ -2118,11 +2110,6 @@ public class MainActivity extends Activity {
 
   private void discardRejectedAsrPartial() {
     runOnUiThread(() -> {
-      if (automaticLiveAsrPartial && pendingTurnId.isEmpty()) {
-        automaticLiveAsrPartial = false;
-        conversationTextModel.clearLiveUser();
-        renderConversationText();
-      }
       if (!draftContainsUnstableAsrPartial || userClaimedAsrPartial) return;
       draftContainsUnstableAsrPartial = false;
       applyingAsrDraftText = true;
