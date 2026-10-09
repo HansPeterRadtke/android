@@ -1,13 +1,10 @@
 package myapp.app;
 
-/** Submission gate for the editable current-message field. */
+/** Manual Send is never gated by ASR completion, model state or queued transport. */
 final class VoiceDraftPolicy {
   private VoiceDraftPolicy() {}
 
-  static boolean canSubmit(String text, boolean sendPending, boolean unstableAsrPartial) {
-    return !sendPending
-        && !unstableAsrPartial
-        && text != null
-        && !text.trim().isEmpty();
+  static boolean canSubmit(String text) {
+    return text != null && !text.trim().isEmpty();
   }
 }

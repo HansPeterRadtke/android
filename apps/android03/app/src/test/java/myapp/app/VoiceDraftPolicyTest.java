@@ -6,17 +6,18 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public class VoiceDraftPolicyTest {
-  @Test public void unstablePartialCannotBeSubmitted() {
-    assertFalse(VoiceDraftPolicy.canSubmit("unfinished speech", false, true));
+  @Test public void unfinishedSpeechCanAlwaysBeExplicitlySubmitted() {
+    assertTrue(VoiceDraftPolicy.canSubmit("unfinished speech"));
   }
 
-  @Test public void stableOrUserOwnedTextCanBeSubmitted() {
-    assertTrue(VoiceDraftPolicy.canSubmit("finished speech", false, false));
+  @Test public void anyNonemptyTypedTextCanBeSubmitted() {
+    assertTrue(VoiceDraftPolicy.canSubmit("finished speech"));
+    assertTrue(VoiceDraftPolicy.canSubmit("user correction"));
   }
 
-  @Test public void emptyOrAlreadyPendingTextCannotBeSubmitted() {
-    assertFalse(VoiceDraftPolicy.canSubmit("", false, false));
-    assertFalse(VoiceDraftPolicy.canSubmit("   \n  ", false, false));
-    assertFalse(VoiceDraftPolicy.canSubmit("ready", true, false));
+  @Test public void emptyTextCannotBeSubmitted() {
+    assertFalse(VoiceDraftPolicy.canSubmit(null));
+    assertFalse(VoiceDraftPolicy.canSubmit(""));
+    assertFalse(VoiceDraftPolicy.canSubmit("   \n  "));
   }
 }

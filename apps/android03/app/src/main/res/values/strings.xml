@@ -33,6 +33,10 @@
     <string name="recognized_text">Current message</string>
     <string name="transcript_hint">Type or speak a message</string>
     <string name="send">Send</string>
+    <string name="submit_queued">Your text is saved and will be sent when the connection returns.</string>
+    <string name="submit_waiting_confirmation">Waiting for server confirmation. Your text has not been cleared.</string>
+    <string name="submit_rejected_retry">Send was rejected. Your text is preserved; tap Send to retry.</string>
+    <string name="submit_unconfirmed">No server confirmation. Your text is saved; tap Send to retry.</string>
     <string name="latest">Latest</string>
 <string name="background_working">Background work is running</string>
     <string name="background_input">Background work needs your input</string>

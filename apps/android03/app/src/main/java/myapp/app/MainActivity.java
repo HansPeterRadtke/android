@@ -88,6 +88,7 @@ public class MainActivity extends Activity {
   private static final String VOCAB_PREF_KEY = "vocabulary_v1";
   private static final String VOCAB_CONFIGURED_PREF_KEY = "vocabulary_configured_v1";
   private static final String MANUAL_RECORDING_FILE = "voice_unsent_manual.pcm";
+  private static final long SEND_ACK_TIMEOUT_MS = 15000L;
   private static final int PERMISSION_REQUEST = 2;
   private static final int CHANNEL_CONFIG_IN = AudioFormat.CHANNEL_IN_MONO;
   private static final int AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
@@ -142,6 +143,12 @@ public class MainActivity extends Activity {
   private volatile boolean manualTranscribePending = false;
   private volatile boolean manualTranscriptPendingSubmission = false;
   private volatile boolean typedSendPending = false;
+  // An accepted WebSocket frame is not a server acknowledgement.
+  private volatile boolean manualSendAwaitingAck = false;
+  private volatile String manualSendText = "";
+  private volatile String manualRequestId = "";
+  private volatile String manualRequestText = "";
+  private volatile long sendAttemptSequence = 0L;
   private volatile boolean draftContainsUnstableAsrPartial = false;
   private volatile boolean userClaimedAsrPartial = false;
   private boolean applyingAsrDraftText = false;
@@ -418,11 +425,11 @@ public class MainActivity extends Activity {
       @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) {}
       @Override public void onTextChanged(CharSequence value, int start, int before, int count) {}
       @Override public void afterTextChanged(Editable editable) {
-        if (!applyingAsrDraftText && draftContainsUnstableAsrPartial) {
-          // A real user edit deliberately takes ownership of the visible partial.
-          // Later ASR partial/final updates must not overwrite that correction.
+        if (!applyingAsrDraftText) {
+          // ANY user typing takes ownership. Previously only editing a partial did
+          // so, allowing new ASR partials to overwrite a typed-from-scratch draft.
           draftContainsUnstableAsrPartial = false;
-          userClaimedAsrPartial = true;
+          userClaimedAsrPartial = editable.length() > 0;
         }
         historyPrefs.edit().putString(DRAFT_PREF_KEY, editable.toString()).apply();
         updateTranscriptPanel();
@@ -669,6 +676,7 @@ public class MainActivity extends Activity {
     webSocket = null;
     wsConnecting.set(false);
     connectionTracker.onClosed(generation);
+    manualSendAwaitingAck = false;
     appendDiagnostic("Connection replaced: " + reason);
     if (socket != null) socket.cancel();
     if (connectionWanted.get()) scheduleReconnect(generation, false);
@@ -680,6 +688,7 @@ public class MainActivity extends Activity {
     webSocket = null;
     wsConnecting.set(false);
     connectionTracker.onClosed(generation);
+    manualSendAwaitingAck = false;
     if (reconnectRunnable != null) mainHandler.removeCallbacks(reconnectRunnable);
     reconnectScheduledGeneration = -1L;
     if (socket != null) {
@@ -740,6 +749,9 @@ public class MainActivity extends Activity {
       if (!connectionTracker.onClosed(generation)) return;
       if (webSocket == socket) webSocket = null;
       wsConnecting.set(false);
+      // Transport loss cannot be treated as confirmed delivery. Retain text for
+      // deliberate retry rather than silently discarding or duplicating a turn.
+      manualSendAwaitingAck = false;
       appendDiagnostic("WebSocket closed: " + code + " " + reason);
       serverHelloReady = false;
       clearComponentHealth();
@@ -751,6 +763,7 @@ public class MainActivity extends Activity {
       if (!connectionTracker.onClosed(generation)) return;
       if (webSocket == socket) webSocket = null;
       wsConnecting.set(false);
+      manualSendAwaitingAck = false;
       appendDiagnostic("WebSocket failure: " + failure.getClass().getSimpleName());
       serverHelloReady = false;
       clearComponentHealth();
@@ -803,7 +816,8 @@ public class MainActivity extends Activity {
           sendVocabulary();
         }
         updateServiceHealth();
-        if (typedSendPending && !draftEdit.getText().toString().trim().isEmpty()) submitDraft();
+        // OkHttp callbacks are NOT the UI thread. submitDraft reads/updates Views.
+        if (typedSendPending) runOnUiThread(this::submitDraft);
         if (manualTranscribePending) transcribeManualRecording();
         if (!running.get() && foregroundMode != ForegroundMode.THINKING && !manualTranscribePending) setForegroundMode(ForegroundMode.READY, getString(R.string.detail_ready_text));
       } else if ("history".equals(type)) {
@@ -821,7 +835,9 @@ public class MainActivity extends Activity {
       } else if ("asr".equals(type)) {
         connectionTracker.onMediaAck(listenerGeneration, System.currentTimeMillis());
         String heard = obj.optString("text", "").trim();
-        if ("partial".equals(event)) {
+        if ("artifact".equals(event)) {
+          discardRejectedAsrPartial();
+        } else if ("partial".equals(event)) {
           if (!heard.isEmpty() && pendingTurnId.isEmpty() && !userClaimedAsrPartial) {
             setAsrDraftText(heard, true);
           }
@@ -847,7 +863,15 @@ public class MainActivity extends Activity {
           persistAndRenderConversation();
         }
         pendingTurnId = "";
-        clearDraft();
+        if (manualSendAwaitingAck && submitted.equals(manualSendText)) {
+          manualSendAwaitingAck = false;
+          manualSendText = "";
+          manualRequestId = "";
+          manualRequestText = "";
+        }
+        // A spoken automatic turn must never erase an unrelated typed message,
+        // nor may a late acknowledgement erase text typed after Send was tapped.
+        clearSubmittedDraft(submitted);
         manualTranscribePending = false;
         if (manualTranscriptPendingSubmission) {
           manualTranscriptPendingSubmission = false;
@@ -897,6 +921,22 @@ public class MainActivity extends Activity {
         handleWorkerEvent(obj);
       } else if ("error".equals(type)) {
         String stage = obj.optString("stage", "");
+        if ("submit".equals(stage)) {
+          manualSendAwaitingAck = false;
+          manualSendText = "";
+          typedSendPending = false;
+          if ("draft_not_found".equals(obj.optString("message", ""))) pendingTurnId = "";
+          if ("invalid_client_request_id".equals(obj.optString("message", ""))
+              || "client_request_id_conflict".equals(obj.optString("message", ""))) {
+            manualRequestId = "";
+            manualRequestText = "";
+          }
+          setForegroundMode(ForegroundMode.REVIEW,
+              getString(R.string.submit_rejected_retry));
+          appendDiagnostic("Server rejected send: " + obj.optString("message", "unknown"));
+          updateTranscriptPanel();
+          return;
+        }
         if ("stt".equals(stage)) serverSttReady = false;
         else if ("tts".equals(stage)) serverTtsReady = false;
         else if ("llm".equals(stage) || "agent".equals(stage)) serverAgentReady = false;
@@ -1579,41 +1619,80 @@ public class MainActivity extends Activity {
   }
 
   private void submitDraft() {
-    String value = draftEdit.getText().toString();
-    if (draftContainsUnstableAsrPartial) {
-      setForegroundMode(ForegroundMode.REVIEW, getString(R.string.partial_transcript_not_ready));
+    if (Looper.myLooper() != Looper.getMainLooper()) {
+      runOnUiThread(this::submitDraft);
       return;
     }
+    String value = draftEdit.getText().toString();
     if (value.trim().isEmpty()) {
       setForegroundMode(ForegroundMode.REVIEW, getString(R.string.transcript_empty));
+      return;
+    }
+    // Tapping Send is an explicit human confirmation of the visible text, even
+    // when automatic ASR has not emitted a final. Never lock Send on an ASR partial.
+    if (draftContainsUnstableAsrPartial) {
+      draftContainsUnstableAsrPartial = false;
+      userClaimedAsrPartial = true;
+    }
+    if (manualSendAwaitingAck) {
+      setForegroundMode(ForegroundMode.REVIEW,
+          getString(R.string.submit_waiting_confirmation));
       return;
     }
     WebSocket socket = webSocket;
     if (socket == null || !connectionTracker.isOpen() || !serverHelloReady) {
       typedSendPending = true;
       connectionWanted.set(true);
-      setForegroundMode(ForegroundMode.CONNECTING, getString(R.string.detail_connecting));
+      setForegroundMode(ForegroundMode.CONNECTING, getString(R.string.submit_queued));
       if (hasUsableNetwork()) connectWebSocket();
       else updateServiceHealth();
+      updateTranscriptPanel();
       return;
     }
     try {
       JSONObject obj = new JSONObject();
-      if (!pendingTurnId.isEmpty()) {
+      // A user-owned text draft is a new typed turn. Only an unedited,
+      // finalized ASR draft is eligible for the server's draft-submit route.
+      if (!pendingTurnId.isEmpty() && !userClaimedAsrPartial) {
         obj.put("type", "submit");
         obj.put("turn_id", pendingTurnId);
       } else {
         obj.put("type", "text_turn");
       }
+      if ("text_turn".equals(obj.optString("type"))) {
+        if (!value.equals(manualRequestText) || manualRequestId.isEmpty()) {
+          manualRequestId = java.util.UUID.randomUUID().toString().replace("-", "");
+          manualRequestText = value;
+        }
+        obj.put("client_request_id", manualRequestId);
+      }
       obj.put("text", value);
-      typedSendPending = false;
+      // Mark in-flight BEFORE queueing to avoid a fast ACK racing the flag.
+      manualSendText = value;
+      manualSendAwaitingAck = true;
+      long attempt = ++sendAttemptSequence;
       if (!socket.send(obj.toString())) throw new IOException("WebSocket send rejected");
-      sendDraftButton.setEnabled(false);
+      typedSendPending = false;
+      // Lost ACKs must not leave Send apparently working but permanently inert.
+      // The same request id is reused for a retry, allowing server deduplication.
+      mainHandler.postDelayed(() -> {
+        if (isDestroyed() || !manualSendAwaitingAck || sendAttemptSequence != attempt) return;
+        manualSendAwaitingAck = false;
+        setForegroundMode(ForegroundMode.REVIEW, getString(R.string.submit_unconfirmed));
+        appendDiagnostic("Send ACK timeout; retaining draft for retry");
+        updateTranscriptPanel();
+      }, SEND_ACK_TIMEOUT_MS);
+      // A WebSocket queue accepting bytes is not proof of delivery. Do not clear
+      // the text or disable Send; the server's 'turn/submitted' is the ACK.
       setPrimaryStatus(getString(R.string.sending_transcript), getString(R.string.detail_thinking));
+      updateTranscriptPanel();
     } catch (Exception failure) {
+      manualSendAwaitingAck = false;
+      manualSendText = "";
       typedSendPending = true;
       appendDiagnostic("Submit failed: " + failure.getClass().getSimpleName());
-      setForegroundMode(ForegroundMode.RECONNECTING, getString(R.string.not_connected_action));
+      setForegroundMode(ForegroundMode.RECONNECTING, getString(R.string.submit_queued));
+      updateTranscriptPanel();
     }
   }
 
@@ -1930,6 +2009,7 @@ public class MainActivity extends Activity {
   private void setAsrDraftText(String text, boolean partial) {
     String value = text == null ? "" : text;
     runOnUiThread(() -> {
+      if (userClaimedAsrPartial) return;
       applyingAsrDraftText = true;
       try {
         draftContainsUnstableAsrPartial = partial;
@@ -1944,12 +2024,27 @@ public class MainActivity extends Activity {
     });
   }
 
-  private void clearDraft() {
-    draftContainsUnstableAsrPartial = false;
-    userClaimedAsrPartial = false;
+  private void discardRejectedAsrPartial() {
     runOnUiThread(() -> {
+      if (!draftContainsUnstableAsrPartial || userClaimedAsrPartial) return;
+      draftContainsUnstableAsrPartial = false;
+      // Only a non-owned ASR partial may be discarded. Never touch typed text.
       draftEdit.setText("");
-      draftEdit.setEnabled(true);
+      historyPrefs.edit().remove(DRAFT_PREF_KEY).apply();
+      updateTranscriptPanel();
+    });
+  }
+
+  private void clearSubmittedDraft(String acknowledgedText) {
+    runOnUiThread(() -> {
+      if (acknowledgedText == null ||
+          !acknowledgedText.equals(draftEdit.getText().toString())) {
+        updateTranscriptPanel();
+        return;
+      }
+      draftContainsUnstableAsrPartial = false;
+      userClaimedAsrPartial = false;
+      draftEdit.setText("");
       historyPrefs.edit().remove(DRAFT_PREF_KEY).apply();
       updateTranscriptPanel();
     });
@@ -1962,8 +2057,7 @@ public class MainActivity extends Activity {
       transcriptPanel.setVisibility(View.VISIBLE);
       draftEdit.setEnabled(true);
       sendDraftButton.setVisibility(View.VISIBLE);
-      sendDraftButton.setEnabled(VoiceDraftPolicy.canSubmit(
-          text, typedSendPending, draftContainsUnstableAsrPartial));
+      sendDraftButton.setEnabled(VoiceDraftPolicy.canSubmit(text));
       boolean showTranscribe = !autoTranscribe && manualRecordingAvailable && !running.get();
       transcribeButton.setVisibility(showTranscribe ? View.VISIBLE : View.GONE);
       transcribeButton.setEnabled(showTranscribe && !manualTranscribePending);
@@ -2286,7 +2380,8 @@ public class MainActivity extends Activity {
           || foregroundMode == ForegroundMode.RECONNECTING
           || foregroundMode == ForegroundMode.UNAVAILABLE
           || foregroundMode == ForegroundMode.PERMISSION
-          || foregroundMode == ForegroundMode.MICROPHONE_ERROR;
+          || foregroundMode == ForegroundMode.MICROPHONE_ERROR
+          || foregroundMode == ForegroundMode.REVIEW;
       statusView.setText(title);
       statusDetailView.setText(actionableDetail ? clean : "");
       statusDetailView.setVisibility(actionableDetail && !clean.isEmpty() ? View.VISIBLE : View.GONE);
