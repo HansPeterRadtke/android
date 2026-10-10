@@ -99,9 +99,16 @@ public final class ReliableUploader {
         this.context = context.getApplicationContext();
         this.store = store;
         this.client = new ReliableUploadClient(baseUrl);
+        this.client.setRecordingServerToken(MobileAudioCredential.read(this.context));
         this.listener = listener;
         this.backgroundWorker = backgroundWorker;
         this.completedOnly = completedOnly;
+    }
+
+    public void refreshCredentials() {
+        client.setRecordingServerToken(MobileAudioCredential.read(context));
+        remoteFoldersReconciled = false;
+        signal();
     }
 
     public synchronized void start() { ensureRunning(); }
@@ -304,6 +311,7 @@ public final class ReliableUploader {
                         boolean audioPass = pass == 0;
                         for (ReliableSessionManifest manifest : sessions) {
                             if (!running.get()) break;
+                            if (isUnreadableMetadata(manifest)) continue;
                             if (!eligible(manifest) || (completedOnly && !manifest.recordingFinished)) continue;
                             boolean readablePendingAudio = hasReadablePendingAudio(manifest, true);
                             if (audioPass != readablePendingAudio) continue;
@@ -579,13 +587,19 @@ public final class ReliableUploader {
         return ordered;
     }
 
+    private static boolean isUnreadableMetadata(ReliableSessionManifest manifest) {
+        return manifest != null && "UNREADABLE_METADATA".equals(manifest.state);
+    }
+
     private static boolean needsTransferWork(ReliableSessionManifest manifest) {
+        if (isUnreadableMetadata(manifest)) return false;
         if (manifest.recordingFinished && !manifest.conversionFinished) return false;
         if (manifest.hasPendingMetadata() || hasPendingAudio(manifest)) return true;
         return manifest.isLocallyReady() && !manifest.remoteCommitted;
     }
 
     private static boolean needsWork(ReliableSessionManifest manifest) {
+        if (isUnreadableMetadata(manifest)) return false;
         // Jetson now treats final STT as the canonical transcript after commit.
         // Provisional per-chunk transcript gaps must not keep the Android
         // uploader in SYNCHRONIZING after all phone audio bytes are durable.

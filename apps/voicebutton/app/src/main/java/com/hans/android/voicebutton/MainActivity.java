@@ -51,6 +51,7 @@ import com.hans.android.audio.reliable.ReliableSessionManifest;
 import com.hans.android.audio.reliable.ReliableSessionStore;
 import com.hans.android.common_ui.AndroidUi;
 import com.hans.android.network.reliable.ReliableUploadClient;
+import com.hans.android.network.reliable.MobileAudioCredential;
 
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -62,6 +63,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 @SuppressLint("SetTextI18n")
 public final class MainActivity extends Activity {
+    static final String ACTION_REQUEST_FINISH =
+            "com.hans.android.voicebutton.CONFIRM_FINISH_FROM_NOTIFICATION";
+    private boolean finishConfirmationRequested;
     private static final int PERMISSION_REQUEST = 1001;
     private static final int DEBUG_EXPORT_REQUEST = 1002;
     private static final String PENDING_DIAGNOSTICS_EXPORT =
@@ -201,6 +205,7 @@ public final class MainActivity extends Activity {
             service.addStatusListener(statusListener);
             refreshFolders();
             render(service.getSnapshot());
+            consumeFinishConfirmationRequest();
         }
 
         @Override public void onServiceDisconnected(ComponentName name) {
@@ -214,6 +219,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        finishConfirmationRequested = ACTION_REQUEST_FINISH.equals(getIntent().getAction());
         guiPreferences = getSharedPreferences(GUI_PREFS, Context.MODE_PRIVATE);
         selectedFolderId = guiPreferences.getString(PREF_FOLDER_ID, "default");
         selectedFolderName = guiPreferences.getString(PREF_FOLDER_NAME, "Default");
@@ -227,10 +233,33 @@ public final class MainActivity extends Activity {
         transcriptionClient = new ReliableUploadClient(
                 BuildConfig.VOICE_BASE_URL,
                 "VoiceButton/" + BuildConfig.VERSION_NAME + " Android");
+        transcriptionClient.setRecordingServerToken(
+                MobileAudioCredential.read(this));
         diag(PhoneDiagnostics.INFO, "ui.main.create", null,
                 "MainActivity onCreate", PhoneDiagnostics.fields("has_saved_state", savedInstanceState != null));
         buildScreen();
         requestPermissionsIfNeeded();
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (ACTION_REQUEST_FINISH.equals(intent.getAction())) {
+            finishConfirmationRequested = true;
+            consumeFinishConfirmationRequest();
+        }
+    }
+
+    private void consumeFinishConfirmationRequest() {
+        if (!finishConfirmationRequested || !bound
+                || "STARTING".equals(snapshot.state)) return;
+        finishConfirmationRequested = false;
+        if (snapshot.recording || snapshot.openSession != null) {
+            uiHandler.post(this::finishCurrent);
+        } else {
+            Toast.makeText(this, "No open recording to finish",
+                    Toast.LENGTH_LONG).show();
+        }
     }
 
     @Override protected void onStart() {
@@ -1124,7 +1153,9 @@ public final class MainActivity extends Activity {
                 "About",
                 "Automation and privacy",
                 "Send pending recordings",
-                "Transcribe uploaded recordings"
+                "Transcribe uploaded recordings",
+                "Recording server access",
+                "Studio player access"
         };
         new MaterialAlertDialogBuilder(this).setTitle("More")
                 .setItems(actions, (dialog, which) -> {
@@ -1137,8 +1168,73 @@ public final class MainActivity extends Activity {
                     else if(which==6)showAbout();
                     else if(which==7)AppSettings.show(this,()->{if(service!=null)service.applyAutomationSettings();renderUploadOperations();});
                     else if(which==8)retrySynchronization();
-                    else requestManualTranscription();
+                    else if(which==9)requestManualTranscription();
+                    else if(which==10)showRecordingServerAccess();
+                    else showStudioPlayerAccess();
                 }).setNegativeButton("Back", null).show();
+    }
+
+    private void showRecordingServerAccess() {
+        showAccessDialog(false);
+    }
+
+    private void showStudioPlayerAccess() {
+        showAccessDialog(true);
+    }
+
+    private void showAccessDialog(boolean studio) {
+        boolean configured = studio
+                ? MobileAudioCredential.studioConfigured(this)
+                : MobileAudioCredential.isConfigured(this);
+        TextInputLayout layout = new TextInputLayout(this);
+        layout.setHint("Private access token");
+        TextInputEditText entry = new TextInputEditText(layout.getContext());
+        entry.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        entry.setSingleLine(true);
+        layout.addView(entry);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        int padding = AndroidUi.dp(this, 18);
+        content.setPadding(padding, padding, padding, 0);
+        content.addView(AndroidUi.body(this, (studio
+                ? "Thor Studio renderer" : "Jetson recording server")
+                + (configured
+                ? " access is configured. Enter a replacement token if necessary."
+                : " needs a private token. No token is embedded in this APK.")));
+        content.addView(layout);
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(studio ? "Studio player access" : "Recording server access")
+                .setView(content)
+                .setPositiveButton("Save", (dialog, which) -> {
+                    String value = String.valueOf(entry.getText()).trim();
+                    if (value.isEmpty()) return;
+                    try {
+                        boolean saved = studio
+                                ? MobileAudioCredential.saveStudioToken(this, value)
+                                : MobileAudioCredential.save(this, value);
+                        if (!saved) {
+                            Toast.makeText(this, "Could not save private access",
+                                    Toast.LENGTH_LONG).show();
+                            return;
+                        }
+                        if (!studio) {
+                            transcriptionClient.setRecordingServerToken(
+                                    MobileAudioCredential.read(this));
+                            if (service != null) {
+                                service.refreshRecordingServerAccess();
+                            }
+                            retrySynchronization();
+                            refreshTranscriptionStatusOnce();
+                        }
+                        Toast.makeText(this, "Private access configured",
+                                Toast.LENGTH_LONG).show();
+                    } catch (IllegalArgumentException invalid) {
+                        Toast.makeText(this, invalid.getMessage(),
+                                Toast.LENGTH_LONG).show();
+                    }
+                })
+                .setNegativeButton("Back", null).show();
     }
 
     private void retrySynchronization() {
@@ -1157,6 +1253,7 @@ public final class MainActivity extends Activity {
         uiWorker.execute(()->{
             try {
                 ReliableUploadClient client=new ReliableUploadClient(BuildConfig.VOICE_BASE_URL,"VoiceButton/"+BuildConfig.VERSION_NAME+" Android");
+                client.setRecordingServerToken(MobileAudioCredential.read(this));
                 ReliableSessionStore local=new ReliableSessionStore(getApplicationContext());
                 int submitted=0;
                 for(ReliableSessionManifest manifest:local.list())if(manifest.remoteCommitted){client.requestTranscription(manifest);submitted++;}
@@ -1796,7 +1893,9 @@ public final class MainActivity extends Activity {
                 PhoneDiagnostics.fields("state", snapshot.state,
                         "recording", snapshot.recording,
                         "pending_bytes", snapshot.uploadPendingBytes));
-        finishAndRemoveTask();
+        // Background the recording UI without triggering RecordingService
+        // task-removal cleanup. Capture continues until explicit Pause/Finish.
+        moveTaskToBack(true);
     }
 
     private static boolean isBusyState(String state) {

@@ -193,6 +193,7 @@ public final class ReliableUploadClient {
     private final String baseUrl;
     private final List<String> baseUrls;
     private final String userAgent;
+    private volatile String recordingServerToken = "";
     private final AdaptiveUploadPolicy uploadPolicy = new AdaptiveUploadPolicy();
     private final AtomicReference<HttpURLConnection> activeConnection = new AtomicReference<>();
 
@@ -212,6 +213,10 @@ public final class ReliableUploadClient {
         this.baseUrls = Collections.unmodifiableList(urls);
         this.baseUrl = urls.get(0);
         this.userAgent = userAgent;
+    }
+
+    public void setRecordingServerToken(String value) {
+        recordingServerToken = MobileAudioCredential.normalize(value);
     }
 
     public TranscriptionStatus transcriptionStatus() throws Exception {
@@ -625,6 +630,10 @@ public final class ReliableUploadClient {
         connection.setUseCaches(false);
         connection.setRequestMethod(method);
         connection.setRequestProperty("User-Agent", userAgent);
+        String secret = recordingServerToken;
+        if (!secret.isEmpty()) {
+            connection.setRequestProperty("X-VoiceButton-Token", secret);
+        }
         connection.setRequestProperty("Accept", "application/json, audio/mpeg");
         activeConnection.set(connection);
         return connection;

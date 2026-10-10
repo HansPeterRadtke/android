@@ -15,6 +15,15 @@ final class RecordingStateResolver {
         return live.recordingFinished ? null : live;
     }
 
+    static ReliableSessionManifest recoverMissingOpenSession(
+            String knownSessionId, ReliableSessionManifest durable) {
+        if (knownSessionId == null || knownSessionId.isEmpty()
+                || durable == null || durable.sessionId == null
+                || !knownSessionId.equals(durable.sessionId)
+                || durable.recordingFinished) return null;
+        return durable.paused || durable.isInterrupted() ? durable : null;
+    }
+
     static String normalize(String requestedState, boolean actualRecording,
                             boolean pausedOpenRecording, boolean interruptedOpenRecording) {
         String requested = requestedState == null || requestedState.isEmpty()

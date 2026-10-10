@@ -206,7 +206,7 @@ public final class JournaledMp3Recorder {
                     listener);
             writer.start();
             listener.onRecorderEvent("capture.writer_thread_started", seq,
-                    0L, 0L, "queue_unbounded=true, warn_blocks="
+                    0L, 0L, "queue_bounded=true, warn_blocks="
                             + WRITER_QUEUE_WARN_BLOCKS
                             + ", thread=reliable-audio-pcm-writer");
 
@@ -336,6 +336,8 @@ public final class JournaledMp3Recorder {
                 try {
                     stage = "drain_pcm_writer";
                     writerStats = writer.finishAndAwait(RuntimePolicy.value("writer_drain_warning_ms"));
+                    requireCompleteJournal(capturedSamples, writerStats.samplesWritten,
+                            journal == null ? -1L : journal.bytesWritten());
                     writerDrained = true;
                 } catch (Throwable writerFailure) {
                     if (!failureReported) {
@@ -356,7 +358,6 @@ public final class JournaledMp3Recorder {
                         journal.closePreservingOpenJournal();
                         journal = null;
                     } else if (writerStats.samplesWritten > 0L) {
-                        capturedSamples = writerStats.samplesWritten;
                         File closedFile = journal.publish();
                         journal = null;
                         store.fsyncSessionDirectory(sessionId);
@@ -500,6 +501,15 @@ public final class JournaledMp3Recorder {
                 throw new IOException("Invalid PCM queue block");
             }
             return new PcmBlock(Arrays.copyOf(source, count), count);
+        }
+    }
+
+    static void requireCompleteJournal(long captured, long written, long bytes)
+            throws IOException {
+        if (captured < 0 || captured > Long.MAX_VALUE / 2L
+                || written != captured || bytes != captured * 2L) {
+            throw new IOException("PCM journal incomplete: captured=" + captured
+                    + " written=" + written + " bytes=" + bytes);
         }
     }
 

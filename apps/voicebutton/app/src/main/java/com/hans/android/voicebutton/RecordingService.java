@@ -656,9 +656,12 @@ public final class RecordingService extends Service {
                 store.createFolder(name, parentFolderId);
         new Thread(() -> {
             try {
-                new ReliableUploadClient(BuildConfig.VOICE_BASE_URL,
-                        "VoiceButton/" + BuildConfig.VERSION_NAME + " Android")
-                        .createFolder(folder.id, folder.name, folder.parentId);
+                ReliableUploadClient client = new ReliableUploadClient(
+                        BuildConfig.VOICE_BASE_URL,
+                        "VoiceButton/" + BuildConfig.VERSION_NAME + " Android");
+                client.setRecordingServerToken(
+                        com.hans.android.network.reliable.MobileAudioCredential.read(this));
+                client.createFolder(folder.id, folder.name, folder.parentId);
                 store.markFolderRemote(folder.id, folder.name,
                         folder.parentId);
                 signalUploader("queued_work");
@@ -882,6 +885,12 @@ public final class RecordingService extends Service {
             }
         }
         return out.toString();
+    }
+
+    public void refreshRecordingServerAccess() {
+        ReliableUploader value = uploader;
+        if (value != null) value.refreshCredentials();
+        signalUploader("private_access_updated");
     }
 
     public void applyAutomationSettings() {
@@ -2182,6 +2191,41 @@ public final class RecordingService extends Service {
                                 "cached_recording_finished", open.recordingFinished));
             }
         }
+        String knownOpenId = previous.openSession != null
+                ? previous.openSession.sessionId : currentSessionId;
+        if (!actualRecording && open == null && knownOpenId != null
+                && !knownOpenId.isEmpty() && store != null) {
+            try {
+                ReliableSessionManifest durable = store.load(knownOpenId);
+                ReliableSessionManifest recovered = RecordingStateResolver
+                        .recoverMissingOpenSession(knownOpenId, durable);
+                if (recovered != null) {
+                    open = recovered;
+                    boolean found = false;
+                    for (ReliableSessionManifest item : sessions) {
+                        if (item != null
+                                && recovered.sessionId.equals(item.sessionId)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        sessions = new ArrayList<>(sessions);
+                        sessions.add(recovered);
+                    }
+                } else if (!durable.recordingFinished
+                        && ("PAUSING".equals(previous.state)
+                            || "PAUSING".equals(requestedState))
+                        && !"FAILED".equals(requestedState)) {
+                    requestedState = "PAUSING";
+                }
+            } catch (Exception stateFailure) {
+                diagError("service.open_session_recovery_failed", knownOpenId,
+                        "Restoring authoritative open session after incomplete scan",
+                        stateFailure, PhoneDiagnostics.fields(
+                                "requested_state", requestedState));
+            }
+        }
         boolean actualPaused = open != null && open.paused && !actualRecording;
         boolean actualInterrupted = open != null && open.isInterrupted() && !actualRecording;
         String state = RecordingStateResolver.normalize(requestedState,
@@ -2242,7 +2286,9 @@ public final class RecordingService extends Service {
         int uploadProgressPermille = RecordingFeedback.uploadPermille(
                 uploadDurableBytes, uploadTotalBytes);
         ReliableSessionManifest finalizing = latestFinalizingSession(sessions);
-        if (!actualRecording && !actualPaused && !actualInterrupted && finalizing != null) {
+        if (!actualRecording && !actualPaused && !actualInterrupted
+                && !"PAUSING".equals(state) && !"FINISHING".equals(state)
+                && finalizing != null) {
             state = "COMPRESSING";
             explanation = "Finalizing the local MP3 before server upload";
             if (liveSessionId == null || liveSessionId.isEmpty()) {
@@ -2337,7 +2383,10 @@ public final class RecordingService extends Service {
     private void applySnapshot(Snapshot built, RefreshRequest request) {
         if (exitRequested.get()) return;
         snapshot = built;
-        currentSessionId = built.currentSessionId;
+        if (built.currentSessionId != null
+                || !"PAUSING".equals(built.state)) {
+            currentSessionId = built.currentSessionId;
+        }
         backgroundWorkCached = pendingFolderSyncCached || computeBackgroundWork(built.sessions);
         boolean stateChanged = !built.state.equals(lastLoggedState)
                 || !built.explanation.equals(lastLoggedExplanation);
@@ -2619,9 +2668,12 @@ public final class RecordingService extends Service {
             Intent pause = new Intent(this, RecordingService.class).setAction(ACTION_PAUSE);
             PendingIntent pauseIntent = PendingIntent.getService(this, 1, pause,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            Intent finish = new Intent(this, RecordingService.class).setAction(ACTION_FINISH)
-                    .putExtra(EXTRA_SESSION_ID, snapshot.currentSessionId);
-            PendingIntent finishIntent = PendingIntent.getService(this, 2, finish,
+            Intent finish = new Intent(this, MainActivity.class)
+                    .setAction(MainActivity.ACTION_REQUEST_FINISH)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                            | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                            | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            PendingIntent finishIntent = PendingIntent.getActivity(this, 2, finish,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             builder.addAction(0, "Pause", pauseIntent);
             builder.addAction(0, "Finish", finishIntent);
@@ -2631,9 +2683,12 @@ public final class RecordingService extends Service {
                     .putExtra(EXTRA_DEVICE_ID, snapshot.openSession.selectedDeviceId);
             PendingIntent resumeIntent = PendingIntent.getService(this, 3, resume,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            Intent finish = new Intent(this, RecordingService.class).setAction(ACTION_FINISH)
-                    .putExtra(EXTRA_SESSION_ID, snapshot.openSession.sessionId);
-            PendingIntent finishIntent = PendingIntent.getService(this, 4, finish,
+            Intent finish = new Intent(this, MainActivity.class)
+                    .setAction(MainActivity.ACTION_REQUEST_FINISH)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                            | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                            | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            PendingIntent finishIntent = PendingIntent.getActivity(this, 4, finish,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             builder.addAction(0, "Resume", resumeIntent);
             builder.addAction(0, "Finish", finishIntent);
@@ -2743,20 +2798,18 @@ public final class RecordingService extends Service {
     }
 
     @Override public void onTaskRemoved(Intent rootIntent) {
-        diag(PhoneDiagnostics.WARN, "service.task_removed", currentSessionId,
-                "The app task was swiped away; recording is being paused and all background work is stopping",
+        diag(PhoneDiagnostics.INFO, "service.task_removed", currentSessionId,
+                "Recording UI removed; protected capture and queued uploads continue",
                 PhoneDiagnostics.fields("recording", recorder.isRecording(),
                         "background_work", hasBackgroundWork(),
                         "recovery_pending", recordingRecoveryPending,
                         "alarm_active", failureAlarm.isActive()));
-        try {
-            Thread closeThread = new Thread(
-                    () -> shutdownForUserExit("task_removed"),
-                    "voicebutton-recording-task-close");
-            closeThread.setDaemon(false);
-            closeThread.start();
-        } catch (RuntimeException failure) {
-            stopSelf();
+        if (shouldKeepServiceAlive()) {
+            ensureForeground();
+            main.removeCallbacks(continuityTicker);
+            main.post(continuityTicker);
+        } else {
+            leaveForegroundIfIdle();
         }
         super.onTaskRemoved(rootIntent);
     }

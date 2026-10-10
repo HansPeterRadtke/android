@@ -95,6 +95,9 @@ final class RecordingUi {
 
     static String humanState(ReliableSessionManifest manifest) {
         if (manifest == null) return "Unknown";
+        if ("UNREADABLE_METADATA".equals(manifest.state)) {
+            return "Recovery required: metadata unreadable; local audio preserved";
+        }
         if (!manifest.recordingFinished) {
             if (manifest.paused) return "Paused";
             if ("RECORDING".equals(manifest.state)) return "Current recording";

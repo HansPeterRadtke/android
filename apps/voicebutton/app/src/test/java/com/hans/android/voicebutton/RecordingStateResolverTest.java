@@ -83,6 +83,24 @@ public class RecordingStateResolverTest {
                 RecordingStateResolver.authoritativeOpenSession(cached, live));
     }
 
+    @Test public void aMissingStatusScanRestoresAnExistingDurablePausedRecording() {
+        ReliableSessionManifest paused = new ReliableSessionManifest();
+        paused.sessionId = "current";
+        paused.paused = true;
+        assertSame(paused, RecordingStateResolver.recoverMissingOpenSession("current", paused));
+        assertNull(RecordingStateResolver.recoverMissingOpenSession("unrelated", paused));
+        paused.recordingFinished = true;
+        assertNull(RecordingStateResolver.recoverMissingOpenSession("current", paused));
+
+        ReliableSessionManifest interrupted = new ReliableSessionManifest();
+        interrupted.sessionId = "current";
+        interrupted.state = "INTERRUPTED";
+        assertSame(interrupted, RecordingStateResolver.recoverMissingOpenSession(
+                "current", interrupted));
+        interrupted.state = "RECORDING";
+        assertNull(RecordingStateResolver.recoverMissingOpenSession("current", interrupted));
+    }
+
     @Test public void stalePausedWithoutOpenSessionBecomesReady() {
         assertEquals("READY", RecordingStateResolver.normalize(
                 "PAUSED", false, false, false));

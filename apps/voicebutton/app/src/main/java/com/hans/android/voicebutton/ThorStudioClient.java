@@ -2,6 +2,7 @@ package com.hans.android.voicebutton;
 
 import android.content.Context;
 import android.net.Uri;
+import com.hans.android.network.reliable.MobileAudioCredential;
 
 import org.json.JSONObject;
 
@@ -60,10 +61,12 @@ final class ThorStudioClient {
     ThorStudioClient(Context context) {
         this.context=context.getApplicationContext();
         base=BuildConfig.THOR_PLAYER_BASE_URL;
-        token=BuildConfig.THOR_PLAYER_TOKEN;
+        token=MobileAudioCredential.readStudioToken(this.context);
     }
 
     Result prepare(PlayerSource source,float speed,Progress progress) throws Exception {
+        if (token.isEmpty()) throw new IOException(
+                "Studio access is not configured. Open Voice Button → More → Studio player access.");
         begin();try{return prepareLocked(source,speed,progress);}finally{end();}
     }
     private Result prepareLocked(PlayerSource source,float speed,Progress progress) throws Exception {

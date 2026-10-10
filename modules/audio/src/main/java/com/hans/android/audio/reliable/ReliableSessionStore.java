@@ -398,11 +398,41 @@ public final class ReliableSessionStore {
                 File backup = new File(metadata.getAbsolutePath() + ".bak");
                 if (!metadata.isFile() && !backup.isFile()) continue;
                 try { result.add(readManifestRecoveringBackup(metadata)); }
-                catch (Exception ignored) {}
+                catch (Exception unreadable) {
+                    if (SAFE_ID.matcher(dir.getName()).matches()) {
+                        result.add(unreadableListingPlaceholder(
+                                dir, folder.getName(), unreadable));
+                    }
+                }
             }
         }
         result.sort(Comparator.comparingLong((ReliableSessionManifest value) -> value.createdAt));
         return result;
+    }
+
+    static ReliableSessionManifest unreadableListingPlaceholder(
+            File sessionDir, String folderId, Exception failure) {
+        ReliableSessionManifest value = new ReliableSessionManifest();
+        value.sessionId = sessionDir.getName();
+        value.folderId = folderId;
+        value.remoteFolderId = folderId;
+        value.folderName = folderId;
+        value.remoteFolderName = folderId;
+        value.displayName = "Recording needs recovery ("
+                + value.sessionId.substring(0, Math.min(8, value.sessionId.length()))
+                + ")";
+        value.remoteDisplayName = value.displayName;
+        value.state = "UNREADABLE_METADATA";
+        value.error = "Recording metadata unreadable ("
+                + failure.getClass().getSimpleName()
+                + "). Local audio files were not deleted.";
+        value.recordingFinished = false;
+        value.autoResumeRequested = false;
+        File metadata = new File(sessionDir, "manifest.json");
+        long created = metadata.isFile() ? metadata.lastModified()
+                : sessionDir.lastModified();
+        value.createdAt = created > 0L ? created : System.currentTimeMillis();
+        return value;
     }
 
     public synchronized ReliableSessionManifest latestInterrupted() {
@@ -416,7 +446,10 @@ public final class ReliableSessionStore {
     public synchronized ReliableSessionManifest latestUnfinished() {
         ReliableSessionManifest latest = null;
         for (ReliableSessionManifest manifest : list()) {
-            if (!manifest.recordingFinished && (latest == null || manifest.createdAt > latest.createdAt)) latest = manifest;
+            if (!"UNREADABLE_METADATA".equals(manifest.state)
+                    && !manifest.recordingFinished
+                    && (latest == null || manifest.createdAt > latest.createdAt))
+                latest = manifest;
         }
         return latest == null ? null : latest.copy();
     }
