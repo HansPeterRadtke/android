@@ -59,6 +59,23 @@ public class VoiceConnectionTrackerTest {
     assertTrue(tracker.mediaPathStale(12001, 10000));
   }
 
+  @Test public void serviceReopenSameAttachedUiGenerationHandlesRepeatedFailures() {
+    VoiceConnectionTracker tracker=new VoiceConnectionTracker();
+    long generation=tracker.beginConnect();
+    assertTrue(tracker.onOpen(generation,1000));
+    assertTrue(tracker.onClosed(generation));
+    assertFalse(tracker.isOpen());
+    // VoiceForegroundService reconnects the same Activity binding, not a
+    // second Activity-owned transport with a different generation.
+    assertTrue(tracker.onOpen(generation,2000));
+    assertTrue(tracker.isOpen());
+    assertTrue(tracker.onMediaAck(generation,2050));
+    assertTrue(tracker.onClosed(generation));
+    assertFalse(tracker.isOpen());
+    assertTrue(tracker.onOpen(generation,3000));
+    assertTrue(tracker.isOpen());
+  }
+
   @Test public void reconnectAttemptSaturates() {
     VoiceConnectionTracker tracker = new VoiceConnectionTracker();
     for (int i = 0; i < 20; i++) tracker.nextReconnectAttempt(3);

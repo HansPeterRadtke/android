@@ -27,6 +27,7 @@ import org.junit.runner.RunWith;
 
 @RunWith(AndroidJUnit4.class)
 public class MainActivityUiTest {
+  @org.junit.Before public void resetScreenFixture() { VoiceUiTestState.reset(); }
   @Rule public GrantPermissionRule permissions = GrantPermissionRule.grant(
       Manifest.permission.RECORD_AUDIO, Manifest.permission.BLUETOOTH_CONNECT);
 
@@ -341,6 +342,45 @@ public class MainActivityUiTest {
     }
   }
 
+  @Test public void automaticSendingWaitsForTheServerCommitProtocol() {
+    try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(activity->{
+        try {
+          java.lang.reflect.Field wanted=MainActivity.class.getDeclaredField("connectionWanted");
+          wanted.setAccessible(true);
+          ((java.util.concurrent.atomic.AtomicBoolean)wanted.get(activity)).set(false);
+          callPrivate(activity,"closeCurrentSocket",new Class<?>[]{String.class,boolean.class},"test fixture",true);
+          java.lang.reflect.Field field=MainActivity.class.getDeclaredField("connectionTracker");
+          field.setAccessible(true);
+          VoiceConnectionTracker tracker=(VoiceConnectionTracker)field.get(activity);
+          long generation=tracker.beginConnect();tracker.onOpen(generation,System.currentTimeMillis());
+          java.util.List<JSONObject> states=new java.util.ArrayList<>();
+          okhttp3.WebSocket socket=(okhttp3.WebSocket)java.lang.reflect.Proxy.newProxyInstance(
+              okhttp3.WebSocket.class.getClassLoader(),new Class<?>[]{okhttp3.WebSocket.class},
+              (proxy,method,args)->{
+                if(method.getName().equals("send")) {
+                  JSONObject payload=new JSONObject((String)args[0]);
+                  if(payload.optString("type").equals("client_state"))states.add(payload);
+                  return true;
+                }
+                if(method.getName().equals("queueSize"))return 0L;
+                if(method.getName().equals("close"))return true;
+                return null;
+              });
+          field=MainActivity.class.getDeclaredField("webSocket");field.setAccessible(true);field.set(activity,socket);
+          for(String name:new String[]{"autoTranscribe","autoSend"}) {
+            field=MainActivity.class.getDeclaredField(name);field.setAccessible(true);field.setBoolean(activity,true);
+          }
+          callPrivate(activity,"handleWsJson",new Class<?>[]{String.class,long.class},"{\"type\":\"hello\"}",generation);
+          assertTrue("Client did not announce manual fallback",!states.isEmpty());
+          assertTrue("Old server was allowed to execute automatic drafts",!states.get(states.size()-1).optBoolean("auto_send"));
+          callPrivate(activity,"handleWsJson",new Class<?>[]{String.class,long.class},"{\"type\":\"hello\",\"commit_protocol\":1}",generation);
+          assertTrue("Compatible server could not negotiate automatic sending",states.get(states.size()-1).optBoolean("auto_send"));
+        } catch(Exception failure) {throw new AssertionError(failure);}
+      });
+    }
+  }
+
   @Test public void manualSendActuallyEmitsExactlyOneTypedTurnAndClearsOnlyOnAck() {
     try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
       scenario.onActivity(activity -> {
@@ -363,7 +403,9 @@ public class MainActivityUiTest {
               new Class<?>[]{okhttp3.WebSocket.class},
               (proxy, method, args) -> {
                 if (method.getName().equals("send")) {
-                  payloads.add((String)args[0]);
+                  String payload=(String)args[0];
+                  String kind=new JSONObject(payload).optString("type");
+                  if("text_turn".equals(kind) || "submit".equals(kind))payloads.add(payload);
                   return true;
                 }
                 if (method.getName().equals("queueSize")) return 0L;

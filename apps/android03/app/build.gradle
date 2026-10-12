@@ -30,11 +30,12 @@ android {
             voiceAuthToken = localVoiceCredential.getText('UTF-8').trim()
         }
         buildConfigField 'String', 'VOICE_AUTH_TOKEN', '"' + voiceAuthToken.replace('\\', '\\\\').replace('\"', '\\"') + '"'
-        applicationId "myapp.app"
+        buildConfigField 'boolean', 'GUIDELINE_TEST', project.hasProperty('voiceGuidelineTest') ? 'true' : 'false'
+        applicationId (project.hasProperty("voiceGuidelineTest") ? "myapp.app.guidelinecheck" : "myapp.app")
         minSdk 24
         targetSdk 34
-        versionCode 22
-        versionName "1.7.14"
+        versionCode 23
+        versionName "1.7.15"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {

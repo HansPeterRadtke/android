@@ -3,6 +3,9 @@ package myapp.app;
 import android.Manifest;
 import android.app.Activity;
 import android.content.Context;
+import android.content.ComponentName;
+import android.content.ServiceConnection;
+import android.os.IBinder;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -21,6 +24,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Process;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
@@ -105,6 +110,59 @@ public class MainActivity extends Activity {
   private SharedPreferences historyPrefs;
   private Handler mainHandler;
   private OkHttpClient wsClient;
+  private volatile VoiceForegroundService voiceService;
+  private volatile boolean voiceServiceBound = false;
+  private volatile boolean voiceServiceBindingRequested = false;
+  private volatile boolean activityVisible = false;
+  private volatile VoiceWebSocketListener boundVoiceListener;
+  private final ServiceConnection voiceServiceConnection = new ServiceConnection() {
+    @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+      voiceService = ((VoiceForegroundService.LocalBinder)binder).service();
+      voiceServiceBound = true;
+      assistantPlayer.bindPlayback(voiceService.assistantPlayback());
+      userPlayer.bindPlayback(voiceService.userPlayback());
+      voiceServiceBindingRequested = false;
+      running.set(voiceService.isCapturing());
+      if(voiceService.hasFinishedManualCapture())adoptManualCapture();
+      currentMicrophoneLabel = voiceService.microphoneLabel();
+      if (startButton != null) startButton.setText(
+          running.get() ? R.string.stop_recording : R.string.start_recording);
+      if (connectionWanted.get()) connectWebSocket();
+      if (captureStartPending) beginCaptureNow();
+      updateServiceHealth();
+    }
+    @Override public void onServiceDisconnected(ComponentName name) {
+      voiceService = null;
+      voiceServiceBound = false;
+      voiceServiceBindingRequested = false;
+      connectionTracker.onClosed(connectionTracker.currentGeneration());
+      setForegroundMode(ForegroundMode.RECONNECTING,
+          getString(R.string.detail_reconnecting));
+    }
+  };
+
+  private final VoiceForegroundService.CaptureObserver voiceCaptureObserver =
+      (active, microphone, levelDbfs, error) -> {
+        this.running.set(active);
+        currentMicrophoneLabel = microphone;
+        currentInputDbfs = levelDbfs;
+        if (this.startButton != null) this.startButton.setText(
+            active ? R.string.stop_recording : R.string.start_recording);
+        if(!active && this.voiceService!=null && this.voiceService.hasFinishedManualCapture())adoptManualCapture();
+        if (error != null && !error.isEmpty()) {
+          setForegroundMode(active?ForegroundMode.RECORDING_LOCAL:
+              (this.autoTranscribe?ForegroundMode.MICROPHONE_ERROR:ForegroundMode.REVIEW), error);
+          appendDiagnostic("Foreground capture failed: " + error);
+        } else if (!active && this.voiceService!=null && this.voiceService.hasFinishedManualCapture()) {
+          adoptManualCapture();
+        } else if (active && this.autoTranscribe) {
+          if (this.foregroundMode == ForegroundMode.READY
+              || this.foregroundMode == ForegroundMode.CONNECTING) {
+            setForegroundMode(ForegroundMode.VERIFYING, null);
+          }
+        }
+        updateServiceHealth();
+      };
   private ConnectivityManager connectivityManager;
   private ConnectivityManager.NetworkCallback networkCallback;
 
@@ -160,8 +218,13 @@ public class MainActivity extends Activity {
   private volatile boolean stopRequested = false;
   private volatile int nextSeq = 0;
   private volatile long droppedLiveFrames = 0L;
+  private volatile boolean captureTransportFailed = false;
   private volatile long droppedPlaybackChunks = 0L;
   private Thread uplinkThread;
+  private Thread uplinkSenderThread;
+  private volatile VoicePcmFrameQueue pcmUplinkQueue;
+  private static final int MIC_NO_DATA_GRACE_MS = 3000;
+  private static final int PCM_BUFFER_SECONDS = 120;
 
   private volatile WebSocket webSocket;
   private final AtomicBoolean wsConnecting = new AtomicBoolean(false);
@@ -177,6 +240,7 @@ public class MainActivity extends Activity {
   private volatile boolean autoSend = true;
   private volatile boolean voiceActivityCues = true;
   private volatile boolean serverHelloReady = false;
+  private volatile boolean serverCanCommit;
   private volatile String serverVersion = "";
   private volatile String serverAsr = "";
   private volatile String serverTts = "";
@@ -260,6 +324,8 @@ public class MainActivity extends Activity {
     appConfig = VoiceAppConfig.from(this);
     mainHandler = new Handler(Looper.getMainLooper());
     historyPrefs = getSharedPreferences("voice_agent_history", MODE_PRIVATE);
+    manualRequestText=historyPrefs.getString("send_text_v1","");
+    typedSendPending=!historyPrefs.getString("send_payload_v1","").isEmpty();
     migrateLegacyDraft();
     selectedDeviceId = historyPrefs.getInt(MIC_DEVICE_PREF_KEY, AudioInputOption.DEFAULT_DEVICE_ID);
     autoTranscribe = historyPrefs.getBoolean(AUTO_TRANSCRIBE_PREF_KEY, true);
@@ -285,8 +351,8 @@ public class MainActivity extends Activity {
     startConnectionMonitor();
     restoreManualRecording();
     connectionWanted.set(true);
-    if (hasUsableNetwork()) connectWebSocket();
-    else updateServiceHealth();
+    bindVoiceService();
+    if (!hasUsableNetwork()) updateServiceHealth();
   }
 
   private void migrateLegacyDraft() {
@@ -412,13 +478,13 @@ public class MainActivity extends Activity {
     assistantPlayer.setId(R.id.voice_assistant_player);
     assistantPlayer.setRemoteStopListener(() -> {
       activePcmPlayer = null;
-      sendControl("cancel", "user_stopped_playback", -1, 0.0, 0.0);
+      sendControl("stop_audio", "user_stopped_playback", -1, 0.0, 0.0);
       showListeningState();
     });
     LinearLayout audioContext = new LinearLayout(this);
     audioContext.setOrientation(LinearLayout.VERTICAL);
-    audioContext.addView(userPlayer, fullWrap());
     audioContext.addView(assistantPlayer, fullWrap());
+    audioContext.addView(userPlayer, fullWrap());
     WindowFractionScrollView audioScroll = new WindowFractionScrollView(this);
     audioScroll.setFillViewport(false);
     audioScroll.addView(audioContext, fullWrap());
@@ -448,11 +514,13 @@ public class MainActivity extends Activity {
         if (!applyingAsrDraftText) {
           // Only human modifications of the current message are persisted.
           draftContainsUnstableAsrPartial = false;
-          userClaimedAsrPartial = editable.length() > 0;
-          if (userClaimedAsrPartial) {
+          userClaimedAsrPartial = editable.length()>0;
+          historyPrefs.edit().putBoolean("draft_claimed_v1",userClaimedAsrPartial).apply();
+          sendControl(userClaimedAsrPartial?"draft_claim":"draft_discard","editor_changed",-1,0.0,0.0);
+          if (editable.length()>0) {
             historyPrefs.edit().putString(USER_DRAFT_PREF_KEY, editable.toString()).apply();
           } else {
-            historyPrefs.edit().remove(USER_DRAFT_PREF_KEY).apply();
+            historyPrefs.edit().remove(USER_DRAFT_PREF_KEY).putBoolean("draft_claimed_v1",false).apply();
           }
         }
         updateTranscriptPanel();
@@ -528,7 +596,11 @@ public class MainActivity extends Activity {
     setContentView(root);
     loadConversationHistory();
     setForegroundMode(ForegroundMode.READY, null);
+    applyingAsrDraftText=true;
     draftEdit.setText(historyPrefs.getString(USER_DRAFT_PREF_KEY, ""));
+    userClaimedAsrPartial=draftEdit.length()>0;
+    historyPrefs.edit().putBoolean("draft_claimed_v1",userClaimedAsrPartial).apply();
+    applyingAsrDraftText=false;
     draftEdit.setSelection(draftEdit.length());
     updateServiceHealth();
     updateTranscriptPanel();
@@ -563,41 +635,49 @@ public class MainActivity extends Activity {
       return;
     }
     if (running.get()) return;
-    if (autoTranscribe && !connectionTracker.isOpen()) {
-      captureStartPending = true;
-      connectionWanted.set(true);
-      setForegroundMode(ForegroundMode.CONNECTING, getString(R.string.detail_connecting));
-      connectWebSocket();
-      return;
-    }
+    // Unlike the previous network-gated microphone, local PCM capture may
+    // begin during a transient connection outage. Its bounded queue is kept
+    // independently of WebSocket availability; a full queue is a real error.
+    connectionWanted.set(true);
+    if (autoTranscribe && !connectionTracker.isOpen()) connectWebSocket();
     beginCaptureNow();
   }
 
   private void beginCaptureNow() {
-    if (!running.compareAndSet(false, true)) return;
-    if (!startVoiceForegroundService()) return;
-    captureStartPending = false;
-    stopRequested = false;
-    nextSeq = 0;
-    droppedLiveFrames = 0L;
-    if (!autoTranscribe) {
-      synchronized (manualRecordingLock) { manualRecordingBuffer.reset(); }
-      manualRecordingAvailable = false;
-      deleteManualRecordingFile();
-      userPlayer.setStaticPcm(null);
-      setForegroundMode(ForegroundMode.RECORDING_LOCAL, null);
-    } else {
-      setForegroundMode(connectionTracker.isOpen() ? ForegroundMode.VERIFYING : ForegroundMode.CONNECTING, null);
+    VoiceForegroundService service=voiceService;
+    if(service==null) {captureStartPending=true;bindVoiceService();return;}
+    if(!running.compareAndSet(false,true)) {captureStartPending=false;return;}
+    if(!startVoiceForegroundService()) {running.set(false);return;}
+    captureStartPending=false;stopRequested=false;
+    if(!autoTranscribe) {
+      synchronized(manualRecordingLock) {manualRecordingBuffer.reset();}
+      manualRecordingAvailable=false;
     }
-    runOnUiThread(() -> startButton.setText(R.string.stop_recording));
-    ensureUplinkThread();
+    if(!service.startCapture(selectedDeviceId,voiceActivityCues,autoTranscribe)) {
+      running.set(false);setForegroundMode(ForegroundMode.MICROPHONE_ERROR,service.captureError());return;
+    }
+    setForegroundMode(autoTranscribe?(connectionTracker.isOpen()?ForegroundMode.VERIFYING:ForegroundMode.CONNECTING)
+        :ForegroundMode.RECORDING_LOCAL,null);
+    startButton.setText(R.string.stop_recording);updateTranscriptPanel();
+  }
+
+  private void adoptManualCapture() {
+    VoiceForegroundService service=voiceService;
+    if(service==null || service.isCapturing() || !service.hasFinishedManualCapture())return;
+    byte[] data=service.userPlayback().snapshot();
+    synchronized(manualRecordingLock) {manualRecordingBuffer.reset();manualRecordingBuffer.write(data,0,data.length);}
+    manualRecordingAvailable=data.length>0;
     updateTranscriptPanel();
+    setForegroundMode(ForegroundMode.REVIEW,getString(R.string.recording_ready));
   }
 
   private void stopSession() {
     captureStartPending = false;
     if (!running.getAndSet(false)) return;
-    stopVoiceForegroundService();
+    VoiceForegroundService service=voiceService;
+    if (service!=null) service.stopCapture();
+    // The foreground service remains active until its own network sender has
+    // transmitted queued microphone frames, independently of this Activity.
     runOnUiThread(() -> startButton.setText(R.string.start_recording));
     setForegroundMode(ForegroundMode.FINISHING, null);
   }
@@ -630,35 +710,38 @@ public class MainActivity extends Activity {
     } catch (RuntimeException ignored) {}
   }
 
+  private void bindVoiceService() {
+    if (voiceServiceBound || voiceServiceBindingRequested) return;
+    voiceServiceBindingRequested = bindService(
+        new Intent(this, VoiceForegroundService.class),
+        voiceServiceConnection, Context.BIND_AUTO_CREATE);
+    if (!voiceServiceBindingRequested) {
+      setForegroundMode(ForegroundMode.UNAVAILABLE,
+          getString(R.string.detail_unavailable));
+    }
+  }
+
   private void connectWebSocket() {
-    if (!connectionWanted.get() || wsClient == null || connectionTracker.isOpen() || wsConnecting.get()) return;
-    long generation = connectionTracker.beginConnect();
-    reconnectScheduledGeneration = -1L;
+    if (!connectionWanted.get() || connectionTracker.isOpen() || wsConnecting.get()) return;
+    VoiceForegroundService service=voiceService;
+    if (service==null) {
+      bindVoiceService();
+      return;
+    }
+    long generation=connectionTracker.beginConnect();
+    reconnectScheduledGeneration=-1L;
     wsConnecting.set(true);
-    WebSocket previous = webSocket;
-    webSocket = null;
-    if (previous != null) previous.cancel();
-    setForegroundMode(ForegroundMode.CONNECTING, null);
+    setForegroundMode(ForegroundMode.CONNECTING,null);
+    VoiceWebSocketListener listener=new VoiceWebSocketListener(generation);
+    boundVoiceListener=listener;
+    webSocket=service.facade();
     try {
-      String url = appConfig.websocketUrl
-          + "?conversation=" + enc(conversationId)
-          + "&generation=" + generation;
-      if (BuildConfig.VOICE_AUTH_TOKEN == null || BuildConfig.VOICE_AUTH_TOKEN.isEmpty()) {
-        throw new IllegalStateException("Voice WebSocket credential is not configured");
-      }
-      WebSocket candidate = wsClient.newWebSocket(
-          new Request.Builder()
-              .url(url)
-              .header("Authorization", "Bearer " + BuildConfig.VOICE_AUTH_TOKEN)
-              .build(),
-          new VoiceWebSocketListener(generation));
-      if (connectionTracker.owns(generation)) webSocket = candidate;
-      else candidate.cancel();
-    } catch (Exception failure) {
+      service.attach(listener,voiceCaptureObserver,generation,conversationId);
+    } catch(Exception failure) {
       wsConnecting.set(false);
       connectionTracker.onClosed(generation);
-      appendDiagnostic("Connect failed: " + failure.getClass().getSimpleName());
-      scheduleReconnect(generation, false);
+      appendDiagnostic("Connection binding failed: "+failure.getClass().getSimpleName());
+      scheduleReconnect(generation,false);
     }
   }
 
@@ -734,20 +817,24 @@ public class MainActivity extends Activity {
     }
 
     private boolean current(WebSocket socket) {
-      boolean owns = connectionTracker.owns(generation);
-      if (!owns) socket.cancel();
-      return owns;
+      // A stale Activity listener must never cancel the service-owned
+      // transport: another Activity may already be bound to this socket.
+      return activityVisible && connectionTracker.owns(generation);
     }
 
     @Override public void onOpen(WebSocket socket, Response response) {
       if (!current(socket) || !connectionTracker.onOpen(generation, System.currentTimeMillis())) return;
       webSocket = socket;
       wsConnecting.set(false);
+      serverCanCommit=false;
       appendDiagnostic("WebSocket connected.");
       sendClientState();
       if (running.get()) {
         setForegroundMode(ForegroundMode.VERIFYING, null);
-        ensureUplinkThread();
+        // Automatic capture belongs exclusively to VoiceForegroundService.
+        // Starting this Activity's old capture thread as well would compete
+        // for the same microphone route after reconnect/rebind.
+        // Both recording modes remain owned by the foreground service.
       } else {
         setForegroundMode(ForegroundMode.READY, getString(R.string.detail_ready_text));
       }
@@ -767,7 +854,10 @@ public class MainActivity extends Activity {
 
     @Override public void onMessage(WebSocket socket, ByteString bytes) {
       if (!current(socket)) return;
-      handleWsAudio(bytes.toByteArray());
+      runOnUiThread(() -> {
+        if(connectionTracker.owns(generation) && connectionTracker.isOpen())
+          handleWsAudio(bytes.toByteArray());
+      });
     }
 
     @Override public void onClosing(WebSocket socket, int code, String reason) {
@@ -785,7 +875,8 @@ public class MainActivity extends Activity {
       serverHelloReady = false;
       clearComponentHealth();
       updateServiceHealth();
-      if (connectionWanted.get()) scheduleReconnect(generation, false);
+      // Service reconnects its owned socket. The view remains attached to the
+      // same logical session generation; rebinding here raced its reconnect.
     }
 
     @Override public void onFailure(WebSocket socket, Throwable failure, Response response) {
@@ -797,8 +888,9 @@ public class MainActivity extends Activity {
       serverHelloReady = false;
       clearComponentHealth();
       updateServiceHealth();
-      if (connectionWanted.get()) scheduleReconnect(generation, false);
-      else setForegroundMode(ForegroundMode.READY, null);
+      // Reconnect is owned by VoiceForegroundService. Never create a second
+      // socket or consume another Activity generation from this callback.
+      if (!connectionWanted.get()) setForegroundMode(ForegroundMode.READY, null);
     }
   }
 
@@ -828,6 +920,8 @@ public class MainActivity extends Activity {
       }
       if ("hello".equals(type)) {
         serverHelloReady = true;
+        serverCanCommit=obj.optInt("commit_protocol",0)==1;
+        sendClientState();
         serverVersion = obj.optString("version", "");
         serverAsr = obj.optString("asr", "");
         serverTts = obj.optString("tts", "");
@@ -848,12 +942,15 @@ public class MainActivity extends Activity {
         // OkHttp callbacks are NOT the UI thread. submitDraft reads/updates Views.
         if (typedSendPending) runOnUiThread(this::submitDraft);
         if (manualTranscribePending) transcribeManualRecording();
-        if (!running.get() && foregroundMode != ForegroundMode.THINKING && !manualTranscribePending) setForegroundMode(ForegroundMode.READY, getString(R.string.detail_ready_text));
+        if (!running.get() && foregroundMode != ForegroundMode.THINKING && !manualTranscribePending && !manualSendAwaitingAck) setForegroundMode(ForegroundMode.READY, getString(R.string.detail_ready_text));
       } else if ("history".equals(type)) {
         replaceConversationHistory(obj.optJSONArray("turns"));
       } else if ("state".equals(type)) {
         String state = obj.optString("state", "");
-        if ("thinking".equals(state)) setForegroundMode(ForegroundMode.THINKING, null);
+        if ("transcribing".equals(state))setForegroundMode(ForegroundMode.TRANSCRIBING,null);
+        else if("checking_turn".equals(state))setForegroundMode(ForegroundMode.TRANSCRIBING,getString(R.string.checking_turn));
+        else if("generating_speech".equals(state))setForegroundMode(ForegroundMode.BUFFERING,getString(R.string.generating_speech));
+        else if ("thinking".equals(state)) setForegroundMode(ForegroundMode.THINKING, null);
         else if ("queued".equals(state)) {
           setForegroundMode(ForegroundMode.QUEUED, null);
         } else if ("awaiting_send".equals(state)) {
@@ -863,6 +960,9 @@ public class MainActivity extends Activity {
           }
           setForegroundMode(ForegroundMode.REVIEW, null);
           updateTranscriptPanel();
+        } else if ("playback_completed".equals(state)) {
+          if(foregroundMode==ForegroundMode.SPEAKING || foregroundMode==ForegroundMode.BUFFERING)
+            showListeningState();
         } else if ("listening".equals(state)) {
           if (pendingTurnId.isEmpty() && foregroundMode != ForegroundMode.ANSWER_ERROR)
             showListeningState();
@@ -902,9 +1002,16 @@ public class MainActivity extends Activity {
           persistAndRenderConversation();
         }
         if (pendingTurnId.equals(turnId)) pendingTurnId = "";
-        boolean manualAcknowledged = manualSendAwaitingAck
-            && submitted.equals(manualSendText);
+        String expectedTurn="";
+        try {
+          JSONObject sent=new JSONObject(historyPrefs.getString("send_payload_v1","{}"));
+          expectedTurn=sent.optString("turn_id", "turn-client-"+sent.optString("client_request_id"));
+        } catch(Exception ignored) {}
+        boolean manualAcknowledged = turnId.equals(expectedTurn)
+            && submitted.equals(historyPrefs.getString("send_text_v1",""));
         if (manualAcknowledged) {
+          historyPrefs.edit().remove("send_payload_v1").remove("send_text_v1").apply();
+          typedSendPending=false;
           manualSendAwaitingAck = false;
           manualSendText = "";
           manualRequestId = "";
@@ -973,11 +1080,8 @@ public class MainActivity extends Activity {
           manualSendText = "";
           typedSendPending = false;
           if ("draft_not_found".equals(obj.optString("message", ""))) pendingTurnId = "";
-          if ("invalid_client_request_id".equals(obj.optString("message", ""))
-              || "client_request_id_conflict".equals(obj.optString("message", ""))) {
-            manualRequestId = "";
-            manualRequestText = "";
-          }
+          // Retain the exact outbox identity and text even on rejection. A
+          // conflicting identity cannot be replaced with a new execution key.
           setForegroundMode(ForegroundMode.REVIEW,
               getString(R.string.submit_rejected_retry));
           appendDiagnostic("Server rejected send: " + obj.optString("message", "unknown"));
@@ -1006,11 +1110,16 @@ public class MainActivity extends Activity {
     try {
       JSONObject state = new JSONObject();
       state.put("type", "client_state");
+      state.put("media_protocol",1);
+      state.put("auto_commit_supported",true);
       state.put("build", buildLabel());
       state.put("conversation", conversationId);
       state.put("auto_transcribe", autoTranscribe);
-      state.put("auto_send", VoiceAutomationPolicy.effectiveAutoSend(autoTranscribe, autoSend));
+      state.put("auto_send", VoiceAutomationPolicy.effectiveAutoSend(autoTranscribe, autoSend)
+          && serverCanCommit
+          && (voiceService==null || voiceService.captureError().isEmpty()));
       state.put("microphone_label", currentMicrophoneLabel);
+      state.put("draft_claimed",userClaimedAsrPartial);
       socket.send(state.toString());
     } catch (Exception failure) {
       appendDiagnostic("Client state failed: " + failure.getClass().getSimpleName());
@@ -1036,24 +1145,83 @@ public class MainActivity extends Activity {
   }
 
   private boolean sendAudioFrame(byte[] pcm, int len) {
-    WebSocket socket = webSocket;
-    if (socket == null || !connectionTracker.isOpen() || len <= 0) return false;
-    if (!ConnectionPolicy.shouldSendAudio(socket.queueSize(), appConfig.maxQueuedAudioBytes)) {
-      droppedLiveFrames += 1L;
-      return false;
-    }
-    boolean sent = socket.send(ByteString.of(pcm, 0, len));
-    if (!sent) droppedLiveFrames += 1L;
-    return sent;
+    VoicePcmFrameQueue queue = pcmUplinkQueue;
+    if (queue == null || len <= 0) return false;
+    if (queue.offer(pcm, len)) return true;
+
+    // A full local PCM queue is not a healthy microphone stream. Unlike the
+    // previous silently dropped frame, explicitly stop capture and report
+    // the lost-data condition; do not pretend that the user turn was complete.
+    droppedLiveFrames++;
+    captureTransportFailed = true;
+    running.set(false);
+    queue.close();
+    setForegroundMode(ForegroundMode.MICROPHONE_ERROR,
+        getString(R.string.error_uplink_queue_full));
+    appendDiagnostic("Audio input exceeds bounded uplink queue capacity; voice stopped");
+    return false;
+  }
+
+  private void startPcmSender() {
+    VoicePcmFrameQueue queue = pcmUplinkQueue;
+    if (queue == null) return;
+    Thread sender = new Thread(() -> {
+      try {
+        while (!Thread.currentThread().isInterrupted()) {
+          byte[] next = queue.awaitHead(100L);
+          if (next == null) {
+            if (queue.isClosed()) break;
+            continue;
+          }
+          WebSocket socket = webSocket;
+          if (socket == null || !connectionTracker.isOpen()
+              || !ConnectionPolicy.shouldSendAudio(socket.queueSize(),
+                  appConfig.maxQueuedAudioBytes)) {
+            Thread.sleep(20L);
+            continue;
+          }
+          if (!socket.send(ByteString.of(next))) {
+            // Rejecting an enqueue is an exact transport failure. The frame
+            // remains at the head of the local PCM queue for a reconnection.
+            invalidateCurrentConnection("socket_rejected_audio_frame");
+            Thread.sleep(20L);
+            continue;
+          }
+          if (!queue.commitAcceptedHead(next)) {
+            throw new IllegalStateException("Audio queue changed during transport");
+          }
+        }
+        if (queue.isClosed() && queue.pendingFrames() == 0 && !captureTransportFailed) {
+          // The end-of-turn marker cannot overtake microphone frames queued by
+          // capture. Do not submit an incomplete command following a mic failure.
+          sendControl("end_utterance", "capture_stopped", nextSeq, 0.0, 0.0);
+        }
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+      } catch (Exception failure) {
+        captureTransportFailed = true;
+        running.set(false);
+        setForegroundMode(ForegroundMode.MICROPHONE_ERROR,
+            getString(R.string.error_uplink_queue_failed));
+        appendDiagnostic("Audio uplink worker failure: " + failure.getClass().getSimpleName());
+      } finally {
+        stopVoiceForegroundService();
+      }
+    }, "voice-pcm-network-sender");
+    sender.setDaemon(false);
+    uplinkSenderThread = sender;
+    sender.start();
   }
 
   private void ensureUplinkThread() {
     if (uplinkThread != null && uplinkThread.isAlive()) return;
-    uplinkThread = new Thread(this::uplinkLoop, "voice-uplink");
+    uplinkThread = new Thread(this::uplinkLoop, "voice-microphone-capture");
+    uplinkThread.setPriority(Thread.MAX_PRIORITY);
     uplinkThread.start();
   }
 
   private void uplinkLoop() {
+    Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
     AudioRecord recorder = null;
     AudioRouteController route = null;
     try {
@@ -1089,7 +1257,7 @@ public class MainActivity extends Activity {
       LocalVadGate localVad = new LocalVadGate(appConfig.frameMs);
       while (running.get()) {
         int got = readFully(recorder, capture, samplesPerChunk);
-        if (got <= 0) continue;
+        if (got <= 0) break;
         byte[] pcm = resampleToConfiguredPcm(capture, got, captureRate);
         currentInputDbfs = pcmDbfs(pcm, pcm.length);
         long now = System.currentTimeMillis();
@@ -1124,10 +1292,12 @@ public class MainActivity extends Activity {
         }
         nextSeq += 1;
       }
-      if (autoTranscribe) sendControl("end_utterance", "capture_stopped", nextSeq, 0.0, 0.0);
+      // The dedicated sender emits end_utterance after queued PCM drains.
     } catch (Exception failure) {
+      captureTransportFailed = true;
       running.set(false);
-      setForegroundMode(ForegroundMode.MICROPHONE_ERROR, null);
+      setForegroundMode(ForegroundMode.MICROPHONE_ERROR,
+          getString(R.string.error_microphone_capture_failed));
       appendDiagnostic("Microphone failed: " + failure.getClass().getSimpleName() + " " + failure.getMessage());
       runOnUiThread(() -> startButton.setText(R.string.start_conversation));
     } finally {
@@ -1135,8 +1305,13 @@ public class MainActivity extends Activity {
       try { if (recorder != null) recorder.stop(); } catch (Exception ignored) {}
       try { if (recorder != null) recorder.release(); } catch (Exception ignored) {}
       try { if (route != null) route.release(); } catch (Exception ignored) {}
-      if (!autoTranscribe) mainHandler.post(this::finishManualRecordingCapture);
-      if (!running.get()) stopVoiceForegroundService();
+      if (!autoTranscribe) {
+        mainHandler.post(this::finishManualRecordingCapture);
+        stopVoiceForegroundService();
+      } else {
+        VoicePcmFrameQueue queue = pcmUplinkQueue;
+        if (queue != null) queue.close();
+      }
       updateServiceHealth();
     }
   }
@@ -1304,8 +1479,13 @@ public class MainActivity extends Activity {
     automatic.setMinHeight(dp(48));
     content.addView(automatic, fullWrap());
 
+    MaterialButton recordings=new MaterialButton(this);
+    recordings.setText(R.string.saved_recordings);recordings.setMinHeight(dp(48));
+    recordings.setEnabled(!running.get());recordings.setOnClickListener(v->showSavedRecordings());
+    content.addView(recordings,fullWrap());
+
     MaterialCheckBox cues = new MaterialCheckBox(this);
-    cues.setText("Voice activity start/end sounds");
+    cues.setText(R.string.voice_activity_sounds);
     cues.setChecked(voiceActivityCues);
     cues.setMinHeight(dp(48));
     content.addView(cues, fullWrap());
@@ -1685,7 +1865,8 @@ public class MainActivity extends Activity {
       runOnUiThread(this::submitDraft);
       return;
     }
-    String value = draftEdit.getText().toString();
+    String queued=historyPrefs.getString("send_payload_v1","");
+    String value = queued.isEmpty()?draftEdit.getText().toString():manualRequestText;
     if (value.trim().isEmpty()) {
       setForegroundMode(ForegroundMode.REVIEW, getString(R.string.transcript_empty));
       return;
@@ -1701,34 +1882,31 @@ public class MainActivity extends Activity {
           getString(R.string.submit_waiting_confirmation));
       return;
     }
-    WebSocket socket = webSocket;
-    if (socket == null || !connectionTracker.isOpen() || !serverHelloReady) {
-      typedSendPending = true;
-      connectionWanted.set(true);
-      setForegroundMode(ForegroundMode.CONNECTING, getString(R.string.submit_queued));
-      if (hasUsableNetwork()) connectWebSocket();
-      else updateServiceHealth();
-      updateTranscriptPanel();
-      return;
-    }
     try {
-      JSONObject obj = new JSONObject();
-      // A user-owned text draft is a new typed turn. Only an unedited,
-      // finalized ASR draft is eligible for the server's draft-submit route.
-      if (!pendingTurnId.isEmpty() && !userClaimedAsrPartial) {
-        obj.put("type", "submit");
-        obj.put("turn_id", pendingTurnId);
+      JSONObject obj;
+      if(!queued.isEmpty()) {
+        obj=new JSONObject(queued);
+        value=obj.getString("text");
       } else {
-        obj.put("type", "text_turn");
-      }
-      if ("text_turn".equals(obj.optString("type"))) {
-        if (!value.equals(manualRequestText) || manualRequestId.isEmpty()) {
-          manualRequestId = java.util.UUID.randomUUID().toString().replace("-", "");
-          manualRequestText = value;
+        obj=new JSONObject();
+        if(!pendingTurnId.isEmpty()) {
+          obj.put("type","submit"); obj.put("turn_id",pendingTurnId);
+        } else {
+          obj.put("type","text_turn");
+          manualRequestId=java.util.UUID.randomUUID().toString().replace("-","");
+          obj.put("client_request_id",manualRequestId);
         }
-        obj.put("client_request_id", manualRequestId);
+        manualRequestText=value; obj.put("text",value);
+        if(!historyPrefs.edit().putString("send_payload_v1",obj.toString())
+            .putString("send_text_v1",value).commit())throw new IOException("Cannot retain outgoing message");
       }
-      obj.put("text", value);
+      WebSocket socket=webSocket;
+      if(socket==null || !connectionTracker.isOpen() || !serverHelloReady) {
+        typedSendPending=true; connectionWanted.set(true);
+        setForegroundMode(ForegroundMode.CONNECTING,getString(R.string.submit_queued));
+        if(hasUsableNetwork())connectWebSocket(); else updateServiceHealth();
+        updateTranscriptPanel(); return;
+      }
       // Mark in-flight BEFORE queueing to avoid a fast ACK racing the flag.
       manualSendText = value;
       manualSendAwaitingAck = true;
@@ -1812,6 +1990,40 @@ public class MainActivity extends Activity {
     }
   }
 
+  private void showSavedRecordings() {
+    File directory=new File(getFilesDir(),"voice_recordings");
+    File[] files=directory.listFiles((dir,name)->name.endsWith(".pcm"));
+    if(files==null || files.length==0) {
+      new MaterialAlertDialogBuilder(this).setTitle(R.string.saved_recordings)
+          .setMessage(R.string.no_saved_recordings).setPositiveButton(android.R.string.ok,null).show();return;
+    }
+    java.util.Arrays.sort(files,(a,b)->Long.compare(b.lastModified(),a.lastModified()));
+    String[] labels=new String[files.length];
+    for(int i=0;i<files.length;i++)labels[i]=android.text.format.DateFormat.format("MMM d, HH:mm",files[i].lastModified())
+        +" · "+VoicePlayerMath.formatMs((int)(files[i].length()*1000/(appConfig.sampleRate*2L)));
+    new MaterialAlertDialogBuilder(this).setTitle(R.string.saved_recordings).setItems(labels,(dialog,index)-> {
+      File selected=files[index];
+      new MaterialAlertDialogBuilder(this).setTitle(labels[index]).setMessage(R.string.saved_recording_actions)
+          .setPositiveButton(R.string.open_recording,(d,w)->new Thread(()-> {
+            try {
+              if(selected.length()>appConfig.manualRecordingMaxBytes)throw new IOException("Recording exceeds playback limit");
+              byte[] pcm=new byte[(int)selected.length()];
+              try(java.io.DataInputStream in=new java.io.DataInputStream(new FileInputStream(selected))) {in.readFully(pcm);}
+              runOnUiThread(()-> {
+                autoTranscribe=false;historyPrefs.edit().putBoolean(AUTO_TRANSCRIBE_PREF_KEY,false).apply();
+                synchronized(manualRecordingLock) {manualRecordingBuffer.reset();manualRecordingBuffer.write(pcm,0,pcm.length);}
+                manualRecordingAvailable=true;userPlayer.setStaticPcm(pcm);persistManualRecording();
+                sendClientState();updateTranscriptPanel();setForegroundMode(ForegroundMode.REVIEW,getString(R.string.recording_ready));
+              });
+            }catch(Exception problem) {runOnUiThread(()->setForegroundMode(ForegroundMode.REVIEW,getString(R.string.saved_recording_unavailable)));}
+          },"voice-recording-recovery").start())
+          .setNegativeButton(android.R.string.cancel,null)
+          .setNeutralButton(R.string.delete_recording,(d,w)-> {
+            if(!selected.delete())setForegroundMode(ForegroundMode.REVIEW,getString(R.string.saved_recording_unavailable));
+          }).show();
+    }).show();
+  }
+
   private File manualRecordingFile() {
     return new File(getFilesDir(), MANUAL_RECORDING_FILE);
   }
@@ -1828,8 +2040,7 @@ public class MainActivity extends Activity {
     try (FileOutputStream out = new FileOutputStream(temp)) {
       out.write(pcm);
       out.getFD().sync();
-      if (target.exists() && !target.delete()) throw new IOException("Could not replace saved recording");
-      if (!temp.renameTo(target)) throw new IOException("Could not publish saved recording");
+      android.system.Os.rename(temp.getAbsolutePath(),target.getAbsolutePath());
     } catch (Exception failure) {
       appendDiagnostic("Recording save failed: " + failure.getClass().getSimpleName());
       temp.delete();
@@ -1839,7 +2050,8 @@ public class MainActivity extends Activity {
   private void restoreManualRecording() {
     File file = manualRecordingFile();
     if (!file.isFile() || file.length() <= 0 || file.length() > appConfig.manualRecordingMaxBytes) {
-      if (file.exists() && file.length() > appConfig.manualRecordingMaxBytes) file.delete();
+      if (file.exists() && file.length() > appConfig.manualRecordingMaxBytes)
+        appendDiagnostic("Saved recording exceeds the playback limit; original retained");
       return;
     }
     try (FileInputStream in = new FileInputStream(file)) {
@@ -1860,7 +2072,7 @@ public class MainActivity extends Activity {
       updateTranscriptPanel();
     } catch (Exception failure) {
       appendDiagnostic("Recording restore failed: " + failure.getClass().getSimpleName());
-      file.delete();
+      // Keep failed recovery evidence; never delete the only recording on read failure.
     }
   }
 
@@ -1948,8 +2160,10 @@ public class MainActivity extends Activity {
 
   private void applyComponentHealth(JSONObject components) {
     if (components == null) return;
-    serverReady = components.optBoolean("server", connectionTracker.isOpen());
-    serverSttReady = components.optBoolean("stt", false);
+    serverReady = components.optBoolean("server", connectionTracker.isOpen())
+        && components.optBoolean("storage",true);
+    serverSttReady = components.optBoolean("stt", false)
+        && components.optBoolean("stt_quality",true);
     serverAgentReady = components.optBoolean("agent", false);
     serverTtsReady = components.optBoolean("tts", false);
     serverTtsPrimaryReady = components.has("tts_primary")
@@ -2002,6 +2216,8 @@ public class MainActivity extends Activity {
     } else if (!serverTtsReady) {
       value = getString(R.string.health_strip_tts_unavailable);
       visible = true;
+    } else if(autoTranscribe && autoSend && !serverCanCommit) {
+      value=getString(R.string.automatic_send_server_update);visible=true;
     } else if (VoiceOverviewPolicy.showTtsFallback(
         serverTtsReady, serverTtsPrimaryReady, serverTtsFallbackReady)) {
       value = getString(R.string.health_strip_tts_fallback);
@@ -2136,7 +2352,7 @@ public class MainActivity extends Activity {
         applyingAsrDraftText = false;
       }
       if (manualAcknowledged) {
-        historyPrefs.edit().remove(USER_DRAFT_PREF_KEY).apply();
+        historyPrefs.edit().remove(USER_DRAFT_PREF_KEY).putBoolean("draft_claimed_v1",false).apply();
       }
       updateTranscriptPanel();
     });
@@ -2173,7 +2389,7 @@ public class MainActivity extends Activity {
     VoicePcmPlayerView player = user ? userPlayer : assistantPlayer;
     activePcmPlayer = player;
     boolean liveAssistant = !user && "audio".equals(type);
-    player.startStream(true, liveAssistant, liveAssistant);
+    if(!voiceServiceBound)player.startStream(true, liveAssistant, liveAssistant);
     if (liveAssistant) setForegroundMode(ForegroundMode.BUFFERING, null);
     else {
       setStatusProgressVisible(false);
@@ -2184,6 +2400,10 @@ public class MainActivity extends Activity {
   private void handleWsAudio(byte[] pcm) {
     VoicePcmPlayerView player = activePcmPlayer;
     if (player == null || pcm == null || pcm.length == 0) return;
+    if (voiceServiceBound) {
+      if(player==assistantPlayer)setForegroundMode(ForegroundMode.SPEAKING,null);
+      return;
+    }
     if (!player.append(pcm)) {
       droppedPlaybackChunks += 1L;
       appendDiagnostic("Audio player safety buffer is full; additional audio was rejected.");
@@ -2195,9 +2415,9 @@ public class MainActivity extends Activity {
 
   private void markPlaybackRemoteEnded(int generation) {
     VoicePcmPlayerView player = activePcmPlayer;
-    if (player != null) player.endStream();
+    if (player != null && !voiceServiceBound) player.endStream();
     activePcmPlayer = null;
-    showListeningState();
+    // Rendering can outlast network transmission; the service owns completion.
   }
 
   private void stopPlaybackLocal(String reason, boolean notifyServer) {
@@ -2251,10 +2471,12 @@ public class MainActivity extends Activity {
 
   private int readFully(AudioRecord recorder, short[] target, int wanted) {
     int filled = 0;
+    VoiceCaptureReadPolicy health = new VoiceCaptureReadPolicy(MIC_NO_DATA_GRACE_MS);
     while (running.get() && filled < wanted) {
       int read = recorder.read(target, filled, wanted - filled, AudioRecord.READ_BLOCKING);
+      health.observe(read, SystemClock.elapsedRealtime());
       if (read > 0) filled += read;
-      else if (read < 0) return read;
+      else if (read == 0) SystemClock.sleep(20L);
     }
     return filled;
   }
@@ -2326,17 +2548,23 @@ public class MainActivity extends Activity {
     networkCallback = new ConnectivityManager.NetworkCallback() {
       @Override public void onAvailable(Network network) {
         mainHandler.post(() -> {
-          if (connectionWanted.get() && !connectionTracker.isOpen() && !wsConnecting.get()) {
-            scheduleReconnect(connectionTracker.currentGeneration(), true);
+          if (activityVisible && connectionWanted.get()
+              && !connectionTracker.isOpen() && !wsConnecting.get()) {
+            VoiceForegroundService service=voiceService;
+            if (service!=null) service.requestReconnect("network_available");
+            else bindVoiceService();
           }
         });
       }
 
       @Override public void onLost(Network network) {
         mainHandler.post(() -> {
-          if (connectionWanted.get() && !hasUsableNetwork()) {
+          if (activityVisible && connectionWanted.get() && !hasUsableNetwork()) {
             setForegroundMode(ForegroundMode.RECONNECTING, getString(R.string.detail_unavailable));
-            invalidateCurrentConnection("network_lost");
+            // The service observes its own WebSocket and retries. Do not
+            // destroy an Activity generation or start a second connection.
+            VoiceForegroundService service=voiceService;
+            if (service!=null) service.requestReconnect("network_lost");
           }
         });
       }
@@ -2447,7 +2675,9 @@ public class MainActivity extends Activity {
   }
 
   private void showListeningState() {
-    if (!running.get()) {
+    if(assistantPlayer!=null && assistantPlayer.isPlaying()) {
+      setForegroundMode(ForegroundMode.SPEAKING,null);
+    } else if (!running.get()) {
       setForegroundMode(ForegroundMode.READY, getString(R.string.detail_ready_text));
     } else if (!autoTranscribe) {
       setForegroundMode(ForegroundMode.RECORDING_LOCAL, null);
@@ -2590,7 +2820,7 @@ public class MainActivity extends Activity {
         if (!userClaimedAsrPartial) {
           setAsrDraftText(finalDraftText, false);
         }
-        conversationTextModel.setLiveUser(finalDraftTurn, finalDraftText);
+        // Drafts belong only in the composer until the server acknowledges Send.
       }
       // The transport's past ASR drafts are not owned user text.
       // Never put stale recognized speech back into the composer on reconnect.
@@ -2691,23 +2921,41 @@ public class MainActivity extends Activity {
 
   @Override protected void onStart() {
     super.onStart();
+    activityVisible=true;
     connectionWanted.set(true);
-    if (hasUsableNetwork() && !connectionTracker.isOpen()) connectWebSocket();
+    bindVoiceService();
+    if (voiceServiceBound && !connectionTracker.isOpen()) connectWebSocket();
   }
 
   @Override protected void onStop() {
-    // Voice sessions are user-owned, not Activity-visibility-owned. Do not stop
-    // recording or deliberately tear down the WebSocket merely because the
-    // screen is covered or the Activity is temporarily backgrounded.
+    // The working Voice Button pattern: detach only the UI. Foreground audio
+    // capture, queued network frames and server replies belong to the Service.
+    VoiceForegroundService service=voiceService;
+    VoiceWebSocketListener listener=boundVoiceListener;
+    if (service!=null && listener!=null) service.detach(listener);
+    boundVoiceListener=null;
+    connectionTracker.onClosed(connectionTracker.currentGeneration());
+    wsConnecting.set(false);
+    if (reconnectRunnable != null) mainHandler.removeCallbacks(reconnectRunnable);
+    reconnectScheduledGeneration = -1L;
+    webSocket=null;
+    serverHelloReady=false;
+    activityVisible=false;
+    if (voiceServiceBound || voiceServiceBindingRequested) {
+      try { unbindService(voiceServiceConnection); }
+      catch(IllegalArgumentException ignored) {}
+      voiceServiceBound=false;
+      voiceService=null;
+      voiceServiceBindingRequested=false;
+    }
     super.onStop();
   }
 
   @Override protected void onDestroy() {
-    running.set(false);
-    stopVoiceForegroundService();
+    // Never stop a service-owned live voice session as an Activity destructor
+    // side effect. Manual local recording remains the legacy Activity mode.
     if (mainHandler != null) mainHandler.removeCallbacksAndMessages(null);
-    stopPlaybackLocal("activity_destroyed", false);
-    closeCurrentSocket("activity_destroyed", true);
+    // Service-owned playback continues across Activity destruction.
     if (connectivityManager != null && networkCallback != null) {
       try { connectivityManager.unregisterNetworkCallback(networkCallback); } catch (Exception ignored) {}
     }

@@ -63,7 +63,7 @@ public class LifecycleUiTest {
     });
     first.close();
     try (ParcelFileDescriptor ignored = InstrumentationRegistry.getInstrumentation()
-        .getUiAutomation().executeShellCommand("am kill myapp.app")) {
+        .getUiAutomation().executeShellCommand("am kill " + androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().getTargetContext().getPackageName())) {
       // Closing the descriptor only releases the shell command pipe.
     }
     Thread.sleep(300L);

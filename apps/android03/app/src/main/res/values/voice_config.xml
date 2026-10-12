@@ -22,4 +22,5 @@
     <integer name="voice_level_update_ms">100</integer>
     <integer name="voice_player_max_bytes">33554432</integer>
     <integer name="voice_manual_recording_max_bytes">19200000</integer>
+    <integer name="voice_capture_archive_max_bytes">268435456</integer>
 </resources>

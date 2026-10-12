@@ -19,6 +19,7 @@ import org.junit.runner.RunWith;
 
 @RunWith(AndroidJUnit4.class)
 public class StreamingPlaybackUiTest {
+  @org.junit.Before public void resetScreenFixture() { VoiceUiTestState.reset(); }
   @Rule public GrantPermissionRule permissions = GrantPermissionRule.grant(
       Manifest.permission.RECORD_AUDIO, Manifest.permission.BLUETOOTH_CONNECT);
 

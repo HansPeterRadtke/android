@@ -76,8 +76,8 @@ final class VoiceAppConfig {
 
   static VoiceAppConfig from(Context context) {
     return new VoiceAppConfig(
-        context.getString(R.string.voice_ws_url),
-        context.getString(R.string.voice_health_url),
+        BuildConfig.GUIDELINE_TEST ? "wss://127.0.0.1:9/ws" : context.getString(R.string.voice_ws_url),
+        BuildConfig.GUIDELINE_TEST ? "https://127.0.0.1:9/health" : context.getString(R.string.voice_health_url),
         context.getResources().getInteger(R.integer.voice_sample_rate),
         context.getResources().getInteger(R.integer.voice_frame_ms),
         context.getResources().getInteger(R.integer.voice_max_queued_audio_bytes),

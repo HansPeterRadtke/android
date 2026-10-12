@@ -27,6 +27,7 @@ final class VoiceConnectionTracker {
   synchronized boolean onOpen(long candidateGeneration, long nowMs) {
     if (!owns(candidateGeneration)) return false;
     open = true;
+    activeAttempt = true;
     mediaConfirmed = false;
     openedAtMs = nowMs;
     lastHeartbeatMs = nowMs;
