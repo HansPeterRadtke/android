@@ -117,6 +117,79 @@ public class ReminderDetailsInstrumentedTest {
         }
     }
 
+    @Test public void dismissClearsNotificationButDoesNotAcknowledge() throws Exception {
+        if(Build.VERSION.SDK_INT>=33) {
+            InstrumentationRegistry.getInstrumentation().getUiAutomation()
+                .grantRuntimePermission(target.getPackageName(),
+                    Manifest.permission.POST_NOTIFICATIONS);
+        }
+        long now=System.currentTimeMillis();
+        JSONObject eventJson=makeEvent("dismiss-regression",now-1000,now+20*60_000L);
+        store.replaceSnapshot(snapshot(new JSONArray().put(eventJson)));
+        CalendarEvent event=CalendarEvent.fromJson(eventJson);
+        new ReminderReceiver().onReceive(target,
+            new Intent(target,ReminderReceiver.class)
+                .setAction(ReminderScheduler.ACTION_ALARM)
+                .putExtra(ReminderScheduler.EXTRA_KEY,event.key)
+                .putExtra(ReminderScheduler.EXTRA_AT,event.notifyAt(store.leadMinutes())));
+        NotificationManager manager=target.getSystemService(NotificationManager.class);
+        int id=event.key.hashCode() & 0x7fffffff;
+        assertTrue("Reminder posted before dismiss",isActive(manager,id));
+        assertFalse(store.acknowledged(event));
+        new ReminderReceiver().onReceive(target,
+            new Intent(target,ReminderReceiver.class)
+                .setAction(ReminderScheduler.ACTION_DISMISS)
+                .putExtra(ReminderScheduler.EXTRA_KEY,event.key));
+        assertTrue("Dismiss clears the active notification",notificationRemovedWithin(manager,id));
+        assertFalse("Dismiss must not mark event acknowledged",store.acknowledged(event));
+        assertNotNull("Event details remain accessible after dismiss",
+            store.findEvent(event.key,event.startMs));
+    }
+
+    @Test public void acknowledgePersistsSeparatelyFromDismiss() throws Exception {
+        if(Build.VERSION.SDK_INT>=33) {
+            InstrumentationRegistry.getInstrumentation().getUiAutomation()
+                .grantRuntimePermission(target.getPackageName(),
+                    Manifest.permission.POST_NOTIFICATIONS);
+        }
+        long now=System.currentTimeMillis();
+        JSONObject eventJson=makeEvent("acknowledge-regression",now-1000,now+20*60_000L);
+        store.replaceSnapshot(snapshot(new JSONArray().put(eventJson)));
+        CalendarEvent event=CalendarEvent.fromJson(eventJson);
+        new ReminderReceiver().onReceive(target,
+            new Intent(target,ReminderReceiver.class)
+                .setAction(ReminderScheduler.ACTION_ALARM)
+                .putExtra(ReminderScheduler.EXTRA_KEY,event.key)
+                .putExtra(ReminderScheduler.EXTRA_AT,event.notifyAt(store.leadMinutes())));
+        NotificationManager manager=target.getSystemService(NotificationManager.class);
+        int id=event.key.hashCode() & 0x7fffffff;
+        assertTrue("Reminder posted before acknowledgement",isActive(manager,id));
+        new ReminderReceiver().onReceive(target,
+            new Intent(target,ReminderReceiver.class)
+                .setAction(ReminderScheduler.ACTION_ACKNOWLEDGE)
+                .putExtra(ReminderScheduler.EXTRA_KEY,event.key));
+        assertTrue("Acknowledgement must be recorded",store.acknowledged(event));
+        assertTrue("Acknowledged notification clears",notificationRemovedWithin(manager,id));
+        assertNotNull("Acknowledged event still in history",store.findEvent(event.key,event.startMs));
+    }
+
+    private static boolean isActive(NotificationManager manager,int id) {
+        for(StatusBarNotification item:manager.getActiveNotifications())
+            if(item.getId()==id) return true;
+        return false;
+    }
+
+    private static boolean notificationRemovedWithin(NotificationManager manager,int id) {
+        // Cancellation propagates asynchronously through Android's notification
+        // manager; don't incorrectly require it to disappear in the same frame.
+        long deadline=android.os.SystemClock.uptimeMillis()+4000L;
+        while(android.os.SystemClock.uptimeMillis()<deadline) {
+            if(!isActive(manager,id)) return true;
+            android.os.SystemClock.sleep(80L);
+        }
+        return !isActive(manager,id);
+    }
+
     @Test public void tappingReminderDoesNotAutoDismissAndItsSnapshotSurvivesSync() throws Exception {
         if(Build.VERSION.SDK_INT>=33) {
             InstrumentationRegistry.getInstrumentation().getUiAutomation()
@@ -142,6 +215,11 @@ public class ReminderDetailsInstrumentedTest {
         assertEquals("Notification tap must not auto-dismiss",
             0,posted.flags & Notification.FLAG_AUTO_CANCEL);
         assertNotNull("Notification must open unique event content intent",posted.contentIntent);
+        assertNotNull("Calendar event actions are required",posted.actions);
+        assertEquals("Three explicit actions should be visible",3,posted.actions.length);
+        assertEquals("Acknowledge",posted.actions[0].title.toString());
+        assertEquals("Snooze 10 min",posted.actions[1].title.toString());
+        assertEquals("Dismiss",posted.actions[2].title.toString());
         CharSequence title=posted.extras.getCharSequence(Notification.EXTRA_TITLE);
         assertEquals("Past appointment remains accessible",title.toString());
         String body=posted.extras.getCharSequence(Notification.EXTRA_BIG_TEXT,"").toString();
@@ -158,7 +236,8 @@ public class ReminderDetailsInstrumentedTest {
             .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(details)) {
             assertRenderedText(scenario,"Past appointment remains accessible",
-                "Full description retained after the event ended.");
+                "Full description retained after the event ended.",
+                "Acknowledge event","Dismiss notification");
         }
     }
 }
