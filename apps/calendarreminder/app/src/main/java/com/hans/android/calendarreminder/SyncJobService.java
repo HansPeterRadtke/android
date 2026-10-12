@@ -13,12 +13,17 @@ public final class SyncJobService extends JobService {
     private volatile boolean stopped=false;
 
     public static void ensurePeriodic(Context c) {
+        if(!new CalendarStore(c).liveEnabled()) return;
         JobScheduler js=(JobScheduler)c.getSystemService(Context.JOB_SCHEDULER_SERVICE);
         if(js.getPendingJob(PERIODIC_ID)!=null) return;
         JobInfo job=new JobInfo.Builder(PERIODIC_ID,new ComponentName(c,SyncJobService.class))
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
             .setPeriodic(15*60_000L).setPersisted(true).build();
         js.schedule(job);
+    }
+    public static void stopPeriodic(Context c) {
+        JobScheduler js=(JobScheduler)c.getSystemService(Context.JOB_SCHEDULER_SERVICE);
+        js.cancel(PERIODIC_ID);
     }
     public static void requestSync(Context c) {
         ensurePeriodic(c);

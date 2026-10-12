@@ -76,14 +76,9 @@ public final class MainActivity extends Activity {
         } else {
             registerReceiver(liveUpdate,updates);
         }
-        if(store.configured() && store.liveEnabled()) {
-            try {
-                LiveSyncService.ensureRunning(this);
-            } catch(RuntimeException exception) {
-                store.setLiveStatus("Live connection restricted by Android; fallback sync enabled");
-                SyncJobService.requestSync(this);
-            }
-        }
+        // Scheduled network jobs keep the cache fresh without a permanent tray item.
+        LiveSyncService.stop(this);
+        if(store.configured()) SyncJobService.requestSync(this);
     }
 
     @Override protected void onStop() {
@@ -466,12 +461,16 @@ public final class MainActivity extends Activity {
             box.addView(button("View original in browser",()->openWebLink(event.url),false));
         }
         gap(box,17);
-        box.addView(button("Dismiss notification",()->{
+        box.addView(text(store.acknowledged(event)?"Acknowledged":"Awaiting acknowledgement",
+            15,store.acknowledged(event)?GREEN:ACCENT,true));
+        gap(box,10);
+        box.addView(button(store.acknowledged(event)?"Acknowledged":"Acknowledge event",()->{
+            store.acknowledge(event);
             NotificationManager manager=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);
             manager.cancel(event.key.hashCode() & 0x7fffffff);
-            feedback="Reminder dismissed. The event remains in your calendar history.";
-            Toast.makeText(this,"Reminder dismissed",Toast.LENGTH_SHORT).show();
-        },false));
+            feedback="Event acknowledged.";
+            draw();
+        },true));
         page.addView(box);
         gap(page,13);
         page.addView(button("Back to appointments",this::showOverview,true));
@@ -543,7 +542,7 @@ public final class MainActivity extends Activity {
         box.addView(lead,new LinearLayout.LayoutParams(-1,dp(50)));
         gap(box,12);
         CheckBox automatic=new CheckBox(this);
-        automatic.setText("Always-on automatic calendar updates");
+        automatic.setText("Automatic background calendar updates");
         automatic.setTextColor(INK);
         automatic.setTextSize(15);
         automatic.setMinHeight(dp(55));
@@ -551,12 +550,10 @@ public final class MainActivity extends Activity {
         automatic.setOnCheckedChangeListener((buttonView,enabled)-> {
             store.setLiveEnabled(enabled);
             if(enabled) {
-                try { LiveSyncService.ensureRunning(this); }
-                catch(RuntimeException error) {
-                    store.setLiveStatus("Android blocked starting automatic updates");
-                    SyncJobService.requestSync(this);
-                }
+                SyncJobService.ensurePeriodic(this);
+                SyncJobService.requestSync(this);
             } else {
+                SyncJobService.stopPeriodic(this);
                 LiveSyncService.stop(this);
                 store.setLiveStatus("Paused in Settings");
             }
@@ -619,7 +616,7 @@ public final class MainActivity extends Activity {
             Toast.makeText(this,"Test reminder scheduled",Toast.LENGTH_SHORT).show();
         },false));
         gap(page,11);
-        page.addView(text("New and changed appointments reach your phone through a continuous Raspi connection. Reminders already received continue working offline. The ongoing notification keeps the connection alive.",13,MUTED,false));
+        page.addView(text("The phone checks Raspi periodically without a permanent status notification. Already cached reminders work offline. Android may delay background synchronization to save power.",13,MUTED,false));
     }
 
     private void finishConnection(String server,String token,int minutes) {
@@ -633,10 +630,10 @@ public final class MainActivity extends Activity {
         syncing=false;
         feedback="Connected. Events synchronize automatically.";
         try {
-            LiveSyncService.ensureRunning(this);
-        } catch(RuntimeException failure) {
-            store.setLiveStatus("Android restricted live updates; scheduled fallback active");
+            SyncJobService.ensurePeriodic(this);
             SyncJobService.requestSync(this);
+        } catch(RuntimeException failure) {
+            store.setLiveStatus("Scheduled synchronization unavailable");
         }
         draw();
     }

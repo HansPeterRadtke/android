@@ -37,6 +37,11 @@ public final class ReminderReceiver extends BroadcastReceiver {
         if(event==null) return;
         NotificationManager manager=(NotificationManager)context.getSystemService(Context.NOTIFICATION_SERVICE);
         int notificationId=event.key.hashCode() & 0x7fffffff;
+        if(ReminderScheduler.ACTION_ACKNOWLEDGE.equals(action)) {
+            store.acknowledge(event);
+            manager.cancel(notificationId);
+            return;
+        }
         if(ReminderScheduler.ACTION_DISMISS.equals(action)) {
             manager.cancel(notificationId);
             return;
@@ -50,6 +55,10 @@ public final class ReminderReceiver extends BroadcastReceiver {
         if(!snoozed && !ReminderScheduler.ACTION_ALARM.equals(action)) return;
         if(!notificationsAllowed(context)) {
             store.markError("Android blocked notifications. Enable notification permission.");
+            return;
+        }
+        if(store.acknowledged(event)) {
+            manager.cancel(notificationId);
             return;
         }
         if(!snoozed) {
@@ -68,6 +77,12 @@ public final class ReminderReceiver extends BroadcastReceiver {
             .setData(Uri.parse("raspi-calendar://snooze-action/"+Uri.encode(key)))
             .putExtra(ReminderScheduler.EXTRA_KEY,key);
         PendingIntent snoozePi=PendingIntent.getBroadcast(context,0,snooze,
+            PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);
+        Intent acknowledge=new Intent(context,ReminderReceiver.class)
+            .setAction(ReminderScheduler.ACTION_ACKNOWLEDGE)
+            .setData(Uri.parse("raspi-calendar://acknowledge-action/"+Uri.encode(key)))
+            .putExtra(ReminderScheduler.EXTRA_KEY,key);
+        PendingIntent acknowledgePi=PendingIntent.getBroadcast(context,0,acknowledge,
             PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);
         Intent dismiss=new Intent(context,ReminderReceiver.class)
             .setAction(ReminderScheduler.ACTION_DISMISS)
@@ -103,12 +118,12 @@ public final class ReminderReceiver extends BroadcastReceiver {
             .setAutoCancel(false)
             .setOngoing(false)
             .setContentIntent(detailsIntent)
-            .addAction(new Notification.Action.Builder(android.R.drawable.ic_menu_view,
-                "View event",detailsIntent).build())
+            .addAction(new Notification.Action.Builder(android.R.drawable.checkbox_on_background,
+                "Acknowledge",acknowledgePi).build())
             .addAction(new Notification.Action.Builder(android.R.drawable.ic_popup_reminder,
                 "Snooze 10 min",snoozePi).build())
-            .addAction(new Notification.Action.Builder(android.R.drawable.ic_menu_close_clear_cancel,
-                "Dismiss",dismissPi).build());
+            .addAction(new Notification.Action.Builder(android.R.drawable.ic_menu_view,
+                "View event",detailsIntent).build());
         try {
             manager.notify(notificationId,notification.build());
             if(!snoozed) store.markDelivered(event);

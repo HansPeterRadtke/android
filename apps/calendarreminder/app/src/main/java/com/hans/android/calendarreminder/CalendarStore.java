@@ -226,6 +226,15 @@ public final class CalendarStore {
         prefs.edit().putStringSet("delivered",delivered).commit();
         saveNotifiedEvent(event);
     }
+    synchronized boolean acknowledged(CalendarEvent event) {
+        return prefs.getStringSet("acknowledged",Collections.emptySet())
+            .contains(event.key+"|"+event.startMs);
+    }
+    synchronized void acknowledge(CalendarEvent event) {
+        HashSet<String> set=new HashSet<>(prefs.getStringSet("acknowledged",Collections.emptySet()));
+        set.add(event.key+"|"+event.startMs);
+        prefs.edit().putStringSet("acknowledged",set).commit();
+    }
     private void pruneDelivered(List<CalendarEvent> events) {
         Set<String> old=prefs.getStringSet("delivered",Collections.emptySet());
         if (old.size()<1000) return;
