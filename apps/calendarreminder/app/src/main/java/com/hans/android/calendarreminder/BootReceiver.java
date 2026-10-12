@@ -9,5 +9,12 @@ public final class BootReceiver extends BroadcastReceiver {
         ReminderScheduler.ensureChannel(context);
         ReminderScheduler.scheduleAll(context);
         SyncJobService.ensurePeriodic(context);
+        try {
+            LiveSyncService.ensureRunning(context);
+        } catch(RuntimeException ex) {
+            // Background-start restrictions vary; the persisted network job
+            // is the recovery path until the user opens the application.
+            SyncJobService.requestSync(context);
+        }
     }
 }

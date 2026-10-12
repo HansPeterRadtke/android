@@ -32,6 +32,14 @@ public final class MainActivity extends Activity {
     private String feedback="";
     private String pendingServer="", pendingToken="";
     private int lastShownSuccess=0;
+    private final BroadcastReceiver liveUpdate=new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if(!settingsVisible && !syncing) {
+                feedback="Appointments updated automatically";
+                draw();
+            }
+        }
+    };
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -44,7 +52,30 @@ public final class MainActivity extends Activity {
         SyncJobService.ensurePeriodic(this);
         handleProvisioningIntent(getIntent());
         draw();
-        if(store.configured() && store.lastSuccessMs()==0) syncNow();
+        // Continuous sync is started by onStart; manual interaction is not required.
+    }
+
+    @Override protected void onStart() {
+        super.onStart();
+        IntentFilter updates=new IntentFilter(LiveSyncService.ACTION_SYNC_COMPLETE);
+        if(Build.VERSION.SDK_INT>=33) {
+            registerReceiver(liveUpdate,updates,Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(liveUpdate,updates);
+        }
+        if(store.configured() && store.liveEnabled()) {
+            try {
+                LiveSyncService.ensureRunning(this);
+            } catch(RuntimeException exception) {
+                store.setLiveStatus("Live connection restricted by Android; fallback sync enabled");
+                SyncJobService.requestSync(this);
+            }
+        }
+    }
+
+    @Override protected void onStop() {
+        try { unregisterReceiver(liveUpdate); } catch(IllegalArgumentException ignored) {}
+        super.onStop();
     }
 
     @Override protected void onResume() {
@@ -161,12 +192,19 @@ public final class MainActivity extends Activity {
             LinearLayout line=card();
             line.addView(text(status,14,
                 (age>60*60_000L || store.lastSuccessMs()==0)?RED:GREEN,false));
+            String liveState=store.liveEnabled()?store.liveStatus():"Paused in Settings";
+            boolean connected=store.liveEnabled() &&
+                liveState.startsWith("Connected;") &&
+                System.currentTimeMillis()-store.lastLiveContactMs()<90000;
+            gap(line,7);
+            line.addView(text(connected ? "Automatic updates connected"
+                : "Automatic updates: "+liveState,14,connected?GREEN:RED,false));
             if(store.invalidCount()>0) {
                 gap(line,8);
                 line.addView(text("Some server events could not be processed.",13,RED,true));
             }
             gap(line,12);
-            Button sync=button(syncing?"Synchronizing…":"Sync now",this::syncNow,true);
+            Button sync=button(syncing?"Checking…":"Check connection",this::syncNow,false);
             sync.setEnabled(!syncing);
             line.addView(sync);
             page.addView(line);
@@ -310,6 +348,27 @@ public final class MainActivity extends Activity {
         for(int i=0;i<minutes.length;i++) if(minutes[i]==current) lead.setSelection(i);
         box.addView(lead,new LinearLayout.LayoutParams(-1,dp(50)));
         gap(box,12);
+        CheckBox automatic=new CheckBox(this);
+        automatic.setText("Always-on automatic calendar updates");
+        automatic.setTextColor(INK);
+        automatic.setTextSize(15);
+        automatic.setMinHeight(dp(55));
+        automatic.setChecked(store.liveEnabled());
+        automatic.setOnCheckedChangeListener((buttonView,enabled)-> {
+            store.setLiveEnabled(enabled);
+            if(enabled) {
+                try { LiveSyncService.ensureRunning(this); }
+                catch(RuntimeException error) {
+                    store.setLiveStatus("Android blocked starting automatic updates");
+                    SyncJobService.requestSync(this);
+                }
+            } else {
+                LiveSyncService.stop(this);
+                store.setLiveStatus("Paused in Settings");
+            }
+        });
+        box.addView(automatic);
+        gap(box,12);
         Button save=button("Save and synchronize",()->{
             try {
                 String server=CalendarStore.validatedServer(serverField.getText().toString());
@@ -366,7 +425,7 @@ public final class MainActivity extends Activity {
             Toast.makeText(this,"Test reminder scheduled",Toast.LENGTH_SHORT).show();
         },false));
         gap(page,11);
-        page.addView(text("Reminders already synchronized are scheduled on this phone, even without Internet. New or changed appointments require a successful background sync.",13,MUTED,false));
+        page.addView(text("New and changed appointments reach your phone through a continuous Raspi connection. Reminders already received continue working offline. The ongoing notification keeps the connection alive.",13,MUTED,false));
     }
 
     private void finishConnection(String server,String token,int minutes) {
@@ -378,7 +437,14 @@ public final class MainActivity extends Activity {
         pendingServer="";
         settingsVisible=false;
         syncing=false;
-        syncNow();
+        feedback="Connected. Events synchronize automatically.";
+        try {
+            LiveSyncService.ensureRunning(this);
+        } catch(RuntimeException failure) {
+            store.setLiveStatus("Android restricted live updates; scheduled fallback active");
+            SyncJobService.requestSync(this);
+        }
+        draw();
     }
 
     private void requestNotificationPermission() {

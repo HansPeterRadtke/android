@@ -30,6 +30,18 @@ public final class CalendarStore {
     long lastSuccessMs() { return prefs.getLong("lastSuccessMs",0); }
     String lastError() { return prefs.getString("lastError",""); }
     String remoteSync() { return prefs.getString("remoteSync",""); }
+    String lastRevision() { return prefs.getString("lastRevision",""); }
+    boolean liveEnabled() { return prefs.getBoolean("liveEnabled",true); }
+    void setLiveEnabled(boolean enabled) {
+        prefs.edit().putBoolean("liveEnabled",enabled).apply();
+    }
+    String liveStatus() { return prefs.getString("liveStatus","Connecting to Raspi"); }
+    long lastLiveContactMs() { return prefs.getLong("lastLiveContactMs",0); }
+    void setLiveStatus(String status) {
+        SharedPreferences.Editor edit=prefs.edit().putString("liveStatus",status);
+        if(status.startsWith("Connected;")) edit.putLong("lastLiveContactMs",System.currentTimeMillis());
+        edit.apply();
+    }
     int invalidCount() { return prefs.getInt("invalidCount",0); }
 
     static String validatedServer(String value) {
@@ -56,7 +68,8 @@ public final class CalendarStore {
         boolean changed=!target.equals(server()) || !cleaned.equals(token());
         if(changed) {
             data.delete();
-            prefs.edit().remove("delivered").commit();
+            prefs.edit().remove("delivered").remove("lastRevision")
+                .remove("liveStatus").remove("lastLiveContactMs").commit();
         }
         prefs.edit().putString("server",target)
             .putString("token",cleaned).remove("lastError")
@@ -112,6 +125,7 @@ public final class CalendarStore {
         }
         prefs.edit().putLong("lastSuccessMs",System.currentTimeMillis())
              .putString("remoteSync",snapshot.optString("lastSync",""))
+             .putString("lastRevision",snapshot.optString("revision",""))
              .putInt("invalidCount",snapshot.optInt("invalidEventCount",0))
              .remove("lastError").commit();
         pruneDelivered(events);
