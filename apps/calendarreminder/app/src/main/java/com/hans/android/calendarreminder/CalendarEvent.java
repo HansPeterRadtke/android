@@ -91,6 +91,6 @@ public final class CalendarEvent {
     }
 
     public boolean isUpcoming(long now) {
-        return startMs>=now || (allDay && endMs>now);
+        return startMs>=now || endMs>now;
     }
 }

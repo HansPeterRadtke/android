@@ -103,8 +103,10 @@ public final class ReminderScheduler {
             if(!event.isUpcoming(now) || store.isDelivered(event)) continue;
             long at=event.notifyAt(store.leadMinutes());
             if(at<=now) {
-                // Notify promptly if a newly synced appointment starts soon.
-                if(event.startMs<now || event.startMs-now>30*60_000L) continue;
+                // An Android background job may run after the start time.
+                // Deliver a missed but still-relevant reminder rather than silently dropping it.
+                // Never replay stale past appointments that ended long ago.
+                if(event.endMs<now || now-at>3*60*60_000L) continue;
                 at=now+1500;
             }
             scheduleAt(c,event.key,at,false);

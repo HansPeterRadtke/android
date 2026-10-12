@@ -88,7 +88,11 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
-        if(store!=null && page!=null) draw();
+        if(store!=null && page!=null) {
+            ReminderScheduler.scheduleAll(this);
+            if(store.configured() && store.liveEnabled()) SyncJobService.requestSync(this);
+            draw();
+        }
     }
 
     @Override protected void onNewIntent(Intent intent) {

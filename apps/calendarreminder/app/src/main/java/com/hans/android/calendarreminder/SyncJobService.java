@@ -35,6 +35,7 @@ public final class SyncJobService extends JobService {
     }
 
     @Override public boolean onStartJob(JobParameters params) {
+        if(!new CalendarStore(this).liveEnabled()) return false;
         stopped=false;
         new Thread(() -> {
             SyncEngine.run(getApplicationContext());
