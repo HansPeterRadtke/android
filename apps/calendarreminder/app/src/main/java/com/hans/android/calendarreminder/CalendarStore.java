@@ -49,10 +49,17 @@ public final class CalendarStore {
         }
     }
 
-    void saveConnection(String server,String secret) {
+    synchronized void saveConnection(String server,String secret) {
         if (secret==null || secret.trim().length()<32) throw new IllegalArgumentException("Invalid connection token.");
-        prefs.edit().putString("server",validatedServer(server))
-            .putString("token",secret.trim()).remove("lastError")
+        String target=validatedServer(server);
+        String cleaned=secret.trim();
+        boolean changed=!target.equals(server()) || !cleaned.equals(token());
+        if(changed) {
+            data.delete();
+            prefs.edit().remove("delivered").commit();
+        }
+        prefs.edit().putString("server",target)
+            .putString("token",cleaned).remove("lastError")
             .remove("remoteSync").remove("lastSuccessMs").commit();
     }
     void setLeadMinutes(int minutes) {

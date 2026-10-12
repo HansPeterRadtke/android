@@ -271,6 +271,7 @@ public final class MainActivity extends Activity {
     }
 
     private void renderSettings() {
+        if(!feedback.isEmpty()) notice(feedback,feedback.startsWith("Pairing failed")?RED:ACCENT);
         page.addView(text("Connection",21,INK,true));
         gap(page,6);
         page.addView(text("Only your Raspi-hosted Google Calendar. This app never reads Etar or Android calendars.",14,MUTED,false));
@@ -286,15 +287,15 @@ public final class MainActivity extends Activity {
         serverField.setContentDescription("Raspi server HTTPS address");
         box.addView(serverField,new LinearLayout.LayoutParams(-1,dp(55)));
         gap(box,10);
-        box.addView(text("Private connection token",14,INK,true));
+        box.addView(text("Pairing code",14,INK,true));
         EditText secretField=new EditText(this);
         secretField.setSingleLine(true);
         secretField.setText(pendingToken);
         secretField.setTextSize(15);
-        secretField.setHint(store.configured()?"Leave empty to keep saved token":"Paste your Raspi pairing token");
+        secretField.setHint(store.configured()?"Leave empty to keep saved token":"Enter pairing code from ChatGPT");
         secretField.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD);
         secretField.setTransformationMethod(PasswordTransformationMethod.getInstance());
-        secretField.setContentDescription("Private connection token");
+        secretField.setContentDescription("One-time pairing code or existing private token");
         box.addView(secretField,new LinearLayout.LayoutParams(-1,dp(55)));
         gap(box,10);
         box.addView(text("Default reminder time",14,INK,true));
@@ -309,22 +310,47 @@ public final class MainActivity extends Activity {
         for(int i=0;i<minutes.length;i++) if(minutes[i]==current) lead.setSelection(i);
         box.addView(lead,new LinearLayout.LayoutParams(-1,dp(50)));
         gap(box,12);
-        box.addView(button("Save and synchronize",()->{
+        Button save=button("Save and synchronize",()->{
             try {
-                String token=secretField.getText().toString().trim();
-                if(token.isEmpty()) token=store.token();
-                List<CalendarEvent> previous=store.events();
-                store.saveConnection(serverField.getText().toString(),token);
-                store.setLeadMinutes(minutes[lead.getSelectedItemPosition()]);
-                ReminderScheduler.reschedule(this,previous,store.events());
-                pendingToken="";pendingServer="";
-                settingsVisible=false;
-                syncNow();
-            } catch(IllegalArgumentException e) {
-                feedback=e.getMessage();
+                String server=CalendarStore.validatedServer(serverField.getText().toString());
+                String entered=secretField.getText().toString().trim();
+                int chosenMinutes=minutes[lead.getSelectedItemPosition()];
+                if(PairingClient.looksLikeCode(entered)) {
+                    syncing=true;
+                    feedback="Pairing with Raspi…";
+                    pendingToken=entered;
+                    pendingServer=server;
+                    draw();
+                    new Thread(()->{
+                        try {
+                            String deviceToken=PairingClient.redeem(server,entered);
+                            runOnUiThread(()->{
+                                if(isFinishing()||isDestroyed()) return;
+                                try {
+                                    finishConnection(server,deviceToken,chosenMinutes);
+                                } catch(IllegalArgumentException ex) {
+                                    syncing=false; feedback="Pairing failed: "+ex.getMessage(); draw();
+                                }
+                            });
+                        } catch(Exception ex) {
+                            String message=ex.getMessage()==null?ex.getClass().getSimpleName():ex.getMessage();
+                            runOnUiThread(()->{
+                                if(isFinishing()||isDestroyed()) return;
+                                syncing=false;feedback="Pairing failed: "+message;draw();
+                            });
+                        }
+                    },"raspi-calendar-pairing").start();
+                    return;
+                }
+                String token=entered.isEmpty()?store.token():entered;
+                finishConnection(server,token,chosenMinutes);
+            } catch(IllegalArgumentException ex) {
+                feedback=ex.getMessage();
                 Toast.makeText(this,feedback,Toast.LENGTH_LONG).show();
             }
-        },true));
+        },true);
+        save.setEnabled(!syncing);
+        box.addView(save);
         page.addView(box);
         gap(page,16);
         page.addView(text("Notification access",19,INK,true));
@@ -341,6 +367,18 @@ public final class MainActivity extends Activity {
         },false));
         gap(page,11);
         page.addView(text("Reminders already synchronized are scheduled on this phone, even without Internet. New or changed appointments require a successful background sync.",13,MUTED,false));
+    }
+
+    private void finishConnection(String server,String token,int minutes) {
+        List<CalendarEvent> previous=store.events();
+        store.saveConnection(server,token);
+        store.setLeadMinutes(minutes);
+        ReminderScheduler.reschedule(this,previous,store.events());
+        pendingToken="";
+        pendingServer="";
+        settingsVisible=false;
+        syncing=false;
+        syncNow();
     }
 
     private void requestNotificationPermission() {
