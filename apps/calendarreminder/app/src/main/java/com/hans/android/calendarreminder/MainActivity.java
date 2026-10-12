@@ -475,6 +475,14 @@ public final class MainActivity extends Activity {
             feedback="Event acknowledged.";
             draw();
         },true));
+        gap(box,10);
+        box.addView(button("Dismiss notification",()->{
+            NotificationManager manager=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);
+            manager.cancel(event.key.hashCode() & 0x7fffffff);
+            feedback="Notification dismissed without acknowledging the event.";
+            Toast.makeText(this,"Notification dismissed (not acknowledged)",Toast.LENGTH_SHORT).show();
+            draw();
+        },false));
         page.addView(box);
         gap(page,13);
         page.addView(button("Back to appointments",this::showOverview,true));

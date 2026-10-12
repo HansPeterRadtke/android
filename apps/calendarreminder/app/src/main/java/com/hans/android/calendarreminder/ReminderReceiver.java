@@ -122,8 +122,11 @@ public final class ReminderReceiver extends BroadcastReceiver {
                 "Acknowledge",acknowledgePi).build())
             .addAction(new Notification.Action.Builder(android.R.drawable.ic_popup_reminder,
                 "Snooze 10 min",snoozePi).build())
-            .addAction(new Notification.Action.Builder(android.R.drawable.ic_menu_view,
-                "View event",detailsIntent).build());
+            // Android notification surfaces expose at most three ordinary action buttons.
+            // Tapping the notification body already opens the full event details.
+            // Keep Acknowledge, Snooze and Dismiss available as direct actions.
+            .addAction(new Notification.Action.Builder(android.R.drawable.ic_menu_close_clear_cancel,
+                "Dismiss",dismissPi).build());
         try {
             manager.notify(notificationId,notification.build());
             if(!snoozed) store.markDelivered(event);
