@@ -10,6 +10,7 @@ public final class ReminderScheduler {
     public static final String CHANNEL="raspi_calendar_reminders";
     public static final String ACTION_ALARM="com.hans.android.calendarreminder.ALARM";
     public static final String ACTION_SNOOZE="com.hans.android.calendarreminder.SNOOZE";
+    public static final String ACTION_DISMISS="com.hans.android.calendarreminder.DISMISS";
     public static final String ACTION_SNOOZED="com.hans.android.calendarreminder.SNOOZED";
     public static final String ACTION_TEST="com.hans.android.calendarreminder.TEST";
     public static final String EXTRA_KEY="key";

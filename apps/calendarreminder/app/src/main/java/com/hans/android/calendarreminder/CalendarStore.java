@@ -16,11 +16,15 @@ public final class CalendarStore {
     private final Context app;
     private final SharedPreferences prefs;
     private final AtomicFile data;
+    private final AtomicFile notifiedData;
+    private static final long HISTORY_RETENTION_MS=30L*24*60*60*1000;
+    private static final int HISTORY_MAX_EVENTS=80;
 
     CalendarStore(Context context) {
         app=context.getApplicationContext();
         prefs=app.getSharedPreferences(PREFS,Context.MODE_PRIVATE);
         data=new AtomicFile(new File(app.getFilesDir(),"raspi_calendar_cache.json"));
+        notifiedData=new AtomicFile(new File(app.getFilesDir(),"raspi_notified_history.json"));
     }
 
     String server() { return prefs.getString("server",DEFAULT_SERVER); }
@@ -68,6 +72,7 @@ public final class CalendarStore {
         boolean changed=!target.equals(server()) || !cleaned.equals(token());
         if(changed) {
             data.delete();
+            notifiedData.delete();
             prefs.edit().remove("delivered").remove("lastRevision")
                 .remove("liveStatus").remove("lastLiveContactMs").commit();
         }
@@ -91,6 +96,77 @@ public final class CalendarStore {
             return parseEvents(j);
         } catch (IOException|JSONException e) {
             return new ArrayList<>();
+        }
+    }
+
+    synchronized List<CalendarEvent> notifiedEvents() {
+        ArrayList<CalendarEvent> saved=new ArrayList<>();
+        try (FileInputStream in=notifiedData.openRead()) {
+            JSONArray history=new JSONArray(new String(readAll(in,2*1024*1024),StandardCharsets.UTF_8));
+            long cutoff=System.currentTimeMillis()-HISTORY_RETENTION_MS;
+            for(int i=0;i<Math.min(history.length(),HISTORY_MAX_EVENTS);i++) {
+                CalendarEvent event=CalendarEvent.fromJson(history.getJSONObject(i));
+                if(event.endMs>=cutoff) saved.add(event);
+            }
+        } catch(IOException|JSONException ignored) {
+            // A missing or damaged optional archive must never hide the live calendar.
+        }
+        saved.sort(Comparator.comparingLong((CalendarEvent x)->x.startMs).reversed());
+        return saved;
+    }
+
+    synchronized List<CalendarEvent> eventsIncludingHistory() {
+        LinkedHashMap<String,CalendarEvent> all=new LinkedHashMap<>();
+        for(CalendarEvent event:events()) all.put(event.key+"|"+event.startMs,event);
+        for(CalendarEvent event:notifiedEvents()) {
+            String key=event.key+"|"+event.startMs;
+            all.putIfAbsent(key,event);
+        }
+        ArrayList<CalendarEvent> result=new ArrayList<>(all.values());
+        result.sort(Comparator.comparingLong((CalendarEvent x)->x.startMs).reversed());
+        return result;
+    }
+
+    synchronized CalendarEvent findEvent(String key,long startedAt) {
+        // A reminder opens the version the user was actually notified about,
+        // even if the remote event was subsequently rescheduled or removed.
+        if(startedAt>0) {
+            for(CalendarEvent event:notifiedEvents()) {
+                if(event.key.equals(key) && event.startMs==startedAt) return event;
+            }
+        }
+        for(CalendarEvent event:events()) {
+            if(event.key.equals(key) && (startedAt<=0 || event.startMs==startedAt))
+                return event;
+        }
+        for(CalendarEvent event:notifiedEvents()) {
+            if(event.key.equals(key)) return event;
+        }
+        return null;
+    }
+
+    private synchronized void saveNotifiedEvent(CalendarEvent event) {
+        ArrayList<CalendarEvent> existing=new ArrayList<>(notifiedEvents());
+        existing.removeIf(old->old.key.equals(event.key) && old.startMs==event.startMs);
+        existing.add(0,event);
+        existing.sort(Comparator.comparingLong((CalendarEvent x)->x.startMs).reversed());
+        long cutoff=System.currentTimeMillis()-HISTORY_RETENTION_MS;
+        JSONArray history=new JSONArray();
+        for(CalendarEvent item:existing) {
+            if(history.length()>=HISTORY_MAX_EVENTS) break;
+            if(item.endMs<cutoff) continue;
+            try { history.put(item.toJson()); }
+            catch(JSONException ignored) {}
+        }
+        byte[] bytes=history.toString().getBytes(StandardCharsets.UTF_8);
+        if(bytes.length>2*1024*1024) return;
+        FileOutputStream output=null;
+        try {
+            output=notifiedData.startWrite();
+            output.write(bytes);
+            notifiedData.finishWrite(output);
+        } catch(IOException failure) {
+            if(output!=null) notifiedData.failWrite(output);
         }
     }
 
@@ -148,6 +224,7 @@ public final class CalendarStore {
         HashSet<String> delivered=new HashSet<>(prefs.getStringSet("delivered",Collections.emptySet()));
         delivered.add(event.deliveryKey(leadMinutes()));
         prefs.edit().putStringSet("delivered",delivered).commit();
+        saveNotifiedEvent(event);
     }
     private void pruneDelivered(List<CalendarEvent> events) {
         Set<String> old=prefs.getStringSet("delivered",Collections.emptySet());
