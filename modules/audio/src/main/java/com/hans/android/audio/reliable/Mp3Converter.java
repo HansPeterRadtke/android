@@ -25,9 +25,22 @@ public final class Mp3Converter {
 
     public File encodeWavs(List<File> wavs, File target) throws IOException {
         if (wavs == null || wavs.isEmpty()) throw new IOException("No WAV segments to convert");
+        java.util.ArrayList<WavDurations.Info> formats = new java.util.ArrayList<>();
+        int sourceRate = 0;
+        for (File source : wavs) {
+            WavDurations.Info wavInfo = WavDurations.read(source);
+            if (wavInfo.channels != 1 || wavInfo.bitsPerSample != 16) {
+                throw new IOException("This WAV-to-MP3 encoder requires mono 16-bit PCM");
+            }
+            if (sourceRate != 0 && sourceRate != wavInfo.sampleRateHz) {
+                throw new IOException("Source WAV sample rates differ; resample explicitly");
+            }
+            sourceRate = wavInfo.sampleRateHz;
+            formats.add(wavInfo);
+        }
         File temp = new File(target.getAbsolutePath() + ".tmp-" + UUID.randomUUID());
         AndroidLame lame = new LameBuilder()
-                .setInSampleRate(16000)
+                .setInSampleRate(sourceRate)
                 .setOutSampleRate(ReliableSessionManifest.OUTPUT_SAMPLE_RATE)
                 .setOutChannels(1)
                 .setOutBitrate(BITRATE_KBPS)
@@ -38,15 +51,19 @@ public final class Mp3Converter {
         byte[] mp3 = new byte[7200 + SAMPLES * 3];
         try (FileOutputStream fileOut = new FileOutputStream(temp);
              BufferedOutputStream out = new BufferedOutputStream(fileOut)) {
-            for (File wav : wavs) {
+            for (int wavIndex = 0; wavIndex < wavs.size(); wavIndex++) {
                 checkInterrupted();
+                File wav = wavs.get(wavIndex);
+                WavDurations.Info info = formats.get(wavIndex);
                 try (BufferedInputStream in = new BufferedInputStream(new FileInputStream(wav))) {
-                    skipFully(in, 44L);
-                    while (true) {
+                    skipFully(in, info.dataOffsetBytes);
+                    long remaining = info.dataBytes;
+                    while (remaining > 0L) {
                         checkInterrupted();
-                        int count = readSome(in, bytes);
-                        if (count <= 0) break;
-                        int samples = count / 2;
+                        int requested = (int) Math.min(bytes.length, remaining);
+                        int count = readPcmBlock(in, bytes, requested);
+                        remaining -= count;
+                        int samples = count / info.blockAlignBytes;
                         for (int i = 0; i < samples; i++) {
                             int lo = bytes[i * 2] & 0xff;
                             int hi = bytes[i * 2 + 1];
@@ -76,7 +93,10 @@ public final class Mp3Converter {
         if (pcmFile == null || !pcmFile.isFile() || pcmFile.length() < 2L) {
             throw new IOException("PCM recovery journal is empty");
         }
-        int rate = inputSampleRate <= 0 ? 16000 : inputSampleRate;
+        if (inputSampleRate <= 0 || inputSampleRate > 384000) {
+            throw new IOException("Captured PCM sample rate missing or invalid");
+        }
+        int rate = inputSampleRate;
         File temp = new File(target.getAbsolutePath() + ".tmp-" + UUID.randomUUID());
         AndroidLame lame = new LameBuilder().setInSampleRate(rate).setOutSampleRate(ReliableSessionManifest.OUTPUT_SAMPLE_RATE)
                 .setOutChannels(1).setOutBitrate(BITRATE_KBPS).setQuality(2).build();
@@ -172,6 +192,21 @@ public final class Mp3Converter {
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedIOException("MP3 operation cancelled because Voice Button was closed");
         }
+    }
+
+    private static int readPcmBlock(BufferedInputStream in, byte[] bytes,
+                                    int requested) throws IOException {
+        if (requested <= 0 || requested > bytes.length || (requested & 1) != 0) {
+            throw new IOException("Invalid PCM block size");
+        }
+        int offset = 0;
+        while (offset < requested) {
+            int got = in.read(bytes, offset, requested - offset);
+            if (got < 0) throw new IOException("Truncated WAV PCM data");
+            if (got == 0) continue;
+            offset += got;
+        }
+        return offset;
     }
 
     private static int readSome(BufferedInputStream in, byte[] buffer) throws IOException {

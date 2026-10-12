@@ -26,8 +26,10 @@ public final class JournaledAudioRecorder {
 
     private static final int SAMPLE_RATE = 16000;
     private static final int READ_BYTES = 3200;
-    private static final long SEGMENT_BYTES = SAMPLE_RATE * 2L * 5L;
-    private static final long SYNC_BYTES = SAMPLE_RATE * 2L / 2L;
+    private static final int CHANNELS = 1;
+    private static final int BITS_PER_SAMPLE = 16;
+    private static final int PCM_FRAME_BYTES = CHANNELS * (BITS_PER_SAMPLE / 8);
+    private static final int SEGMENT_SECONDS = 5;
 
     private final AtomicBoolean recording = new AtomicBoolean(false);
     private volatile AudioRecord activeRecord;
@@ -62,6 +64,7 @@ public final class JournaledAudioRecorder {
         int seq = 0;
         long pcmBytes = 0L;
         long bytesSinceSync = 0L;
+        int actualSampleRate = SAMPLE_RATE;
         try {
             ReliableSessionManifest manifest = store.load(sessionId);
             seq = manifest.nextSeq;
@@ -77,6 +80,10 @@ public final class JournaledAudioRecorder {
                     Math.max(minimum, READ_BYTES * 4));
             activeRecord = recorder;
             if (recorder.getState() != AudioRecord.STATE_INITIALIZED) throw new IllegalStateException("Android could not initialize the microphone");
+            actualSampleRate = recorder.getSampleRate();
+            if (actualSampleRate <= 0) throw new IllegalStateException("Android provided no microphone sampling rate");
+            long segmentBytes = (long) actualSampleRate * PCM_FRAME_BYTES * SEGMENT_SECONDS;
+            long syncBytes = (long) actualSampleRate * PCM_FRAME_BYTES / 2L;
             if (!route.applyPreferredDevice(recorder, requested, input)) throw new IllegalStateException("Android refused the selected microphone route");
             recorder.startRecording();
             AudioDeviceInfo routed = route.waitForRoutedInput(recorder, requested, input);
@@ -84,21 +91,24 @@ public final class JournaledAudioRecorder {
             byte[] buffer = new byte[READ_BYTES];
             while (recording.get()) {
                 if (journal == null) {
-                    store.ensureWritable(SEGMENT_BYTES + 1024L);
+                    store.ensureWritable(segmentBytes + 1024L);
                     openFile = new File(store.sessionDirectory(sessionId), String.format(Locale.US, "segment_%06d.open.wav", seq));
                     journal = new RandomAccessFile(openFile, "rw");
-                    journal.setLength(0L); ReliableSessionStore.writeWavHeader(journal, 0L); journal.seek(44L);
+                    journal.setLength(0L); ReliableSessionStore.writeWavHeader(
+                            journal, 0L, actualSampleRate, CHANNELS, BITS_PER_SAMPLE);
+                    journal.seek(44L);
                     pcmBytes = 0L; bytesSinceSync = 0L;
                 }
                 int read = recorder.read(buffer, 0, buffer.length, AudioRecord.READ_BLOCKING);
                 if (read > 0) {
                     int even = read & ~1;
                     journal.write(buffer, 0, even); pcmBytes += even; bytesSinceSync += even;
-                    if (bytesSinceSync >= SYNC_BYTES) {
-                        ReliableSessionStore.writeWavHeader(journal, pcmBytes); journal.seek(44L + pcmBytes); journal.getFD().sync(); bytesSinceSync = 0L;
+                    if (bytesSinceSync >= syncBytes) {
+                        ReliableSessionStore.writeWavHeader(journal, pcmBytes, actualSampleRate,
+                                CHANNELS, BITS_PER_SAMPLE); journal.seek(44L + pcmBytes); journal.getFD().sync(); bytesSinceSync = 0L;
                     }
-                    if (pcmBytes >= SEGMENT_BYTES) {
-                        File closed = closeSegment(journal, openFile, seq, pcmBytes);
+                    if (pcmBytes >= segmentBytes) {
+                        File closed = closeSegment(journal, openFile, seq, pcmBytes, actualSampleRate);
                         journal = null; openFile = null;
                         store.commitWavSegment(sessionId, seq, closed, pcmBytes);
                         listener.onSegmentCommitted(seq, closed, pcmBytes);
@@ -108,7 +118,7 @@ public final class JournaledAudioRecorder {
                 else throw new IllegalStateException("Android stopped delivering microphone data");
             }
             if (journal != null && pcmBytes > 0L) {
-                File closed = closeSegment(journal, openFile, seq, pcmBytes); journal = null; openFile = null;
+                File closed = closeSegment(journal, openFile, seq, pcmBytes, actualSampleRate); journal = null; openFile = null;
                 store.commitWavSegment(sessionId, seq, closed, pcmBytes);
                 listener.onSegmentCommitted(seq, closed, pcmBytes);
             } else if (journal != null) {
@@ -117,7 +127,7 @@ public final class JournaledAudioRecorder {
         } catch (Exception failure) {
             try {
                 if (journal != null && pcmBytes > 0L) {
-                    File closed = closeSegment(journal, openFile, seq, pcmBytes); journal = null;
+                    File closed = closeSegment(journal, openFile, seq, pcmBytes, actualSampleRate); journal = null;
                     store.commitWavSegment(sessionId, seq, closed, pcmBytes);
                     listener.onSegmentCommitted(seq, closed, pcmBytes);
                 }
@@ -134,8 +144,11 @@ public final class JournaledAudioRecorder {
         }
     }
 
-    private static File closeSegment(RandomAccessFile journal, File openFile, int seq, long pcmBytes) throws Exception {
-        ReliableSessionStore.writeWavHeader(journal, pcmBytes); journal.getFD().sync(); journal.close();
+    private static File closeSegment(RandomAccessFile journal, File openFile, int seq,
+                                     long pcmBytes, int sampleRateHz) throws Exception {
+        ReliableSessionStore.writeWavHeader(journal, pcmBytes, sampleRateHz,
+                CHANNELS, BITS_PER_SAMPLE);
+        journal.getFD().sync(); journal.close();
         File closed = new File(openFile.getParentFile(), String.format(Locale.US, "segment_%06d.wav", seq));
         if (closed.exists() && !closed.delete()) throw new IllegalStateException("Could not replace WAV segment");
         if (!openFile.renameTo(closed)) throw new IllegalStateException("Could not publish WAV segment");

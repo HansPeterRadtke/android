@@ -523,11 +523,17 @@ public final class ReliableSessionStore {
             segment.seq = seq;
             manifest.segments.add(segment);
         }
-        int rate = inputSampleRate <= 0 ? 16000 : inputSampleRate;
+        int rate = inputSampleRate;
+        if (rate <= 0 || rate > 384000) {
+            throw new IOException("Captured PCM sample rate is missing or invalid");
+        }
         long bytes = Math.max(0L, Math.min(pcmBytes, pcmFile.length()));
+        if ((bytes & 1L) != 0L) {
+            throw new IOException("Captured 16-bit PCM contains a partial sample");
+        }
         long inputSamples = bytes / 2L;
-        long outputSamples = inputSamples
-                * ReliableSessionManifest.OUTPUT_SAMPLE_RATE / rate;
+        long outputSamples = WavDurations.convertSampleCount(inputSamples, rate,
+                ReliableSessionManifest.OUTPUT_SAMPLE_RATE);
         long startSample = 0L;
         for (ReliableSessionManifest.Segment existing : manifest.segments) {
             if (existing.seq < seq) {
@@ -537,9 +543,9 @@ public final class ReliableSessionStore {
         segment.pcmJournalName = pcmFile.getName();
         segment.pcmInputSampleRate = rate;
         segment.pcmBytes = bytes;
-        segment.durationMs = durationMs > 0L ? durationMs
-                : outputSamples * 1000L
-                / ReliableSessionManifest.OUTPUT_SAMPLE_RATE;
+        // Committed bytes and capture sample rate are the authoritative clock.
+        // A supplied duration is advisory, not a safe basis for persistence.
+        segment.durationMs = WavDurations.pcmDurationMs(bytes, rate, 2);
         segment.startSample = startSample;
         segment.endSample = startSample + outputSamples;
         segment.sampleRate = ReliableSessionManifest.OUTPUT_SAMPLE_RATE;
@@ -564,9 +570,24 @@ public final class ReliableSessionStore {
             segment.seq = seq;
             manifest.segments.add(segment);
         }
+        WavDurations.Info wav = WavDurations.read(wavFile);
+        if (pcmBytes > 0L && pcmBytes != wav.dataBytes) {
+            throw new IOException("WAV payload byte length differs from captured bytes");
+        }
         segment.wavName = wavFile.getName();
-        segment.pcmBytes = Math.max(0L, pcmBytes);
-        segment.durationMs = pcmBytes * 1000L / (16000L * 2L);
+        segment.pcmBytes = wav.dataBytes;
+        segment.pcmInputSampleRate = wav.sampleRateHz;
+        segment.durationMs = wav.durationMs;
+        long start = 0L;
+        for (ReliableSessionManifest.Segment existing : manifest.segments) {
+            if (existing.seq < seq) start = Math.max(start, existing.endSample);
+        }
+        long frames = wav.dataBytes / wav.blockAlignBytes;
+        long outputFrames = WavDurations.convertSampleCount(frames,
+                wav.sampleRateHz, ReliableSessionManifest.OUTPUT_SAMPLE_RATE);
+        segment.startSample = start;
+        segment.endSample = Math.addExact(start, outputFrames);
+        segment.sampleRate = ReliableSessionManifest.OUTPUT_SAMPLE_RATE;
         manifest.nextSeq = Math.max(manifest.nextSeq, seq + 1);
         recalculate(manifest);
         manifest.state = manifest.recordingFinished ? "FINALIZING" : "RECORDING";
@@ -1331,8 +1352,18 @@ public final class ReliableSessionStore {
             segment.pcmInputSampleRate = inputRate;
             segment.pcmBytes = file.length();
             long inputSamples = file.length() / 2L;
-            long outputSamples = inputSamples * ReliableSessionManifest.OUTPUT_SAMPLE_RATE / Math.max(1, inputRate);
-            segment.durationMs = outputSamples * 1000L / ReliableSessionManifest.OUTPUT_SAMPLE_RATE;
+            long outputSamples = WavDurations.convertSampleCount(inputSamples,
+                    inputRate, ReliableSessionManifest.OUTPUT_SAMPLE_RATE);
+            segment.durationMs = WavDurations.pcmDurationMs(
+                    inputSamples * 2L, inputRate, 2);
+            segment.sampleRate = ReliableSessionManifest.OUTPUT_SAMPLE_RATE;
+            // Preserve meaningful timing across recovered segments.
+            long begin = 0L;
+            for (ReliableSessionManifest.Segment earlier : manifest.segments) {
+                if (earlier.seq < seq) begin = Math.max(begin, earlier.endSample);
+            }
+            segment.startSample = begin;
+            segment.endSample = Math.addExact(begin, outputSamples);
             manifest.nextSeq = Math.max(manifest.nextSeq, seq + 1);
         }
         if (files != null) for (File file : files) {
@@ -1341,19 +1372,37 @@ public final class ReliableSessionStore {
             Matcher wav = WAV_PATTERN.matcher(name);
             if (wav.matches()) {
                 int seq = Integer.parseInt(wav.group(1));
+                // Only this legacy writer creates segment_N.wav. Valid WAV
+                // headers retain their own sample rate; if the header is
+                // unrecoverable, use the historical writer's known format,
+                // not Segment's unrelated default output sample rate.
+                int wavRate = LEGACY_WAV_SAMPLE_RATE_HZ;
                 if (name.contains(".open.")) {
                     recoveredOpenSegment = true;
-                    repairWav(file);
+                    repairWav(file, wavRate);
                     File closed = new File(dir, String.format(Locale.US, "segment_%06d.wav", seq));
                     if (closed.exists()) closed.delete();
                     if (!file.renameTo(closed)) throw new IOException("Could not recover interrupted WAV segment");
                     file = closed;
-                } else repairWav(file);
+                } else repairWav(file, wavRate);
                 ReliableSessionManifest.Segment segment = manifest.findSegment(seq);
                 if (segment == null) { segment = new ReliableSessionManifest.Segment(); segment.seq = seq; manifest.segments.add(segment); }
+                WavDurations.Info wavInfo = WavDurations.read(file);
                 segment.wavName = file.getName();
-                segment.pcmBytes = Math.max(0L, file.length() - 44L);
-                segment.durationMs = segment.pcmBytes * 1000L / 32000L;
+                segment.pcmBytes = wavInfo.dataBytes;
+                segment.pcmInputSampleRate = wavInfo.sampleRateHz;
+                segment.durationMs = wavInfo.durationMs;
+                segment.sampleRate = ReliableSessionManifest.OUTPUT_SAMPLE_RATE;
+                long preceding = 0L;
+                for (ReliableSessionManifest.Segment earlier : manifest.segments) {
+                    if (earlier.seq < seq) preceding = Math.max(preceding, earlier.endSample);
+                }
+                segment.startSample = preceding;
+                segment.endSample = Math.addExact(preceding,
+                        WavDurations.convertSampleCount(
+                                wavInfo.dataBytes / wavInfo.blockAlignBytes,
+                                wavInfo.sampleRateHz,
+                                ReliableSessionManifest.OUTPUT_SAMPLE_RATE));
                 manifest.nextSeq = Math.max(manifest.nextSeq, seq + 1);
                 continue;
             }
@@ -1395,6 +1444,11 @@ public final class ReliableSessionStore {
                     segment.mp3Bytes = file.length();
                     segment.sha256 = sha256File(file);
                     segment.durationMs = stats.durationMs;
+                } else {
+                    // Pre-0.96 builds could report three times the real MP3
+                    // duration. Reconcile with preserved sample counts (and
+                    // inspect media only when the metadata is implausible).
+                    SegmentDurationReconciliation.repairIfInflated(segment, file);
                 }
                 manifest.nextSeq = Math.max(manifest.nextSeq, seq + 1);
             }
@@ -1985,18 +2039,111 @@ public final class ReliableSessionStore {
         }
     }
 
-    public static void writeWavHeader(RandomAccessFile out, long pcmBytes) throws IOException {
-        out.seek(0L); out.writeBytes("RIFF"); writeLe32(out, 36L + pcmBytes); out.writeBytes("WAVE");
-        out.writeBytes("fmt "); writeLe32(out, 16L); writeLe16(out, 1); writeLe16(out, 1);
-        writeLe32(out, 16000L); writeLe32(out, 32000L); writeLe16(out, 2); writeLe16(out, 16);
-        out.writeBytes("data"); writeLe32(out, pcmBytes);
+    // The old WAV capture writer explicitly used 16-kHz, mono, signed 16-bit PCM.
+    // That legacy on-disk format is an invariant of the old writer, NOT an
+    // assumed sample rate when calculating duration of any arbitrary WAV.
+    public static final int LEGACY_WAV_SAMPLE_RATE_HZ = 16000;
+
+    public static void writeWavHeader(RandomAccessFile out, long pcmBytes)
+            throws IOException {
+        writeWavHeader(out, pcmBytes, LEGACY_WAV_SAMPLE_RATE_HZ, 1, 16);
     }
 
+    public static void writeWavHeader(RandomAccessFile out, long pcmBytes,
+                                      int sampleRateHz, int channels,
+                                      int bitsPerSample) throws IOException {
+        if (sampleRateHz <= 0 || sampleRateHz > 384000
+                || channels <= 0 || channels > 8 || bitsPerSample <= 0
+                || bitsPerSample > 32 || bitsPerSample % 8 != 0
+                || pcmBytes < 0 || pcmBytes > 0xffffffffL - 36L) {
+            throw new IOException("Invalid PCM WAV header variables");
+        }
+        int bytesPerFrame = channels * (bitsPerSample / 8);
+        if (pcmBytes % bytesPerFrame != 0) {
+            throw new IOException("WAV data ends in a partial PCM frame");
+        }
+        out.seek(0L);
+        out.writeBytes("RIFF");writeLe32(out,36L+pcmBytes);out.writeBytes("WAVE");
+        out.writeBytes("fmt ");writeLe32(out,16L);writeLe16(out,1);
+        writeLe16(out,channels);writeLe32(out,sampleRateHz);
+        writeLe32(out,(long)sampleRateHz*bytesPerFrame);
+        writeLe16(out,bytesPerFrame);writeLe16(out,bitsPerSample);
+        out.writeBytes("data");writeLe32(out,pcmBytes);
+    }
+
+    /**
+     * Preserve any valid WAV format. Reconstruct a *known legacy writer*
+     * header only if incomplete. Never silently relabel a valid 48k WAV 16k.
+     */
     public static void repairWav(File file) throws IOException {
+        repairWav(file, LEGACY_WAV_SAMPLE_RATE_HZ);
+    }
+
+    public static void repairWav(File file, int knownLegacySampleRateHz)
+            throws IOException {
+        int rate = knownLegacySampleRateHz, channels = 1, bits = 16;
+        boolean standardHeader = false;
+        try {
+            WavDurations.Info existing = WavDurations.read(file);
+            if (existing.dataOffsetBytes != 44L) {
+                return; // An extended WAV's valid chunk boundaries are authoritative.
+            }
+            if (existing.dataBytes == file.length() - 44L) return;
+            // The payload may have grown after the last synced legacy header.
+            rate = existing.sampleRateHz;
+            channels = existing.channels;
+            bits = existing.bitsPerSample;
+            standardHeader = true;
+        } catch (IOException needsRepair) {
+            // Recover any intact fmt fields even when the data length is stale.
+            try (RandomAccessFile in = new RandomAccessFile(file, "r")) {
+                if (in.length() >= 44L) {
+                    byte[] header = new byte[44];
+                    in.readFully(header);
+                    String riff = new String(header, 0, 4, StandardCharsets.US_ASCII);
+                    String wave = new String(header, 8, 4, StandardCharsets.US_ASCII);
+                    String fmt = new String(header, 12, 4, StandardCharsets.US_ASCII);
+                    String data = new String(header, 36, 4, StandardCharsets.US_ASCII);
+                    if ("RIFF".equals(riff) && "WAVE".equals(wave)
+                            && "fmt ".equals(fmt) && "data".equals(data)) {
+                        java.nio.ByteBuffer decoded = java.nio.ByteBuffer.wrap(header)
+                                .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                        int encoding = decoded.getShort(20) & 0xffff;
+                        int storedChannels = decoded.getShort(22) & 0xffff;
+                        int storedRate = decoded.getInt(24);
+                        int storedAlignment = decoded.getShort(32) & 0xffff;
+                        int storedBits = decoded.getShort(34) & 0xffff;
+                        if (encoding == 1 && storedRate > 0
+                                && storedRate <= 384000
+                                && storedChannels >= 1 && storedChannels <= 8
+                                && storedBits > 0 && storedBits <= 32
+                                && storedBits % 8 == 0
+                                && storedAlignment == storedChannels * (storedBits / 8)) {
+                            rate = storedRate;
+                            channels = storedChannels;
+                            bits = storedBits;
+                            standardHeader = true;
+                        }
+                    }
+                }
+            }
+        }
+        if (!standardHeader && (rate <= 0 || rate > 384000)) {
+            throw new IOException("Cannot restore WAV without its input sample rate");
+        }
+        int blockAlign = channels * (bits / 8);
         try (RandomAccessFile out = new RandomAccessFile(file, "rw")) {
-            long pcm = Math.max(0L, out.length() - 44L);
-            if ((pcm & 1L) != 0L) { out.setLength(out.length() - 1L); pcm--; }
-            writeWavHeader(out, pcm); out.getFD().sync();
+            if (out.length() < 44L) {
+                throw new IOException("WAV recovery file shorter than PCM header");
+            }
+            long pcm = out.length() - 44L;
+            long incomplete = pcm % blockAlign;
+            if (incomplete != 0L) {
+                out.setLength(out.length() - incomplete);
+                pcm -= incomplete;
+            }
+            writeWavHeader(out,pcm,rate,channels,bits);
+            out.getFD().sync();
         }
     }
 

@@ -59,6 +59,85 @@ public class Mp3FramesTest {
             Mp3Frames.Stats stats=Mp3Frames.copyFrames(file,new ByteArrayOutputStream());assertEquals(11,stats.frames);assertEquals(276,stats.durationMs);
         }finally{file.delete();}
     }
+    @Test public void allNineMpegRatesDeriveExactDurationsFromFrameHeaders()
+            throws Exception {
+        int[][] choices = {
+                {3,0,44100,1152},{3,1,48000,1152},{3,2,32000,1152},
+                {2,0,22050,576},{2,1,24000,576},{2,2,16000,576},
+                {0,0,11025,576},{0,1,12000,576},{0,2,8000,576}};
+        for (int[] selected : choices) {
+            File input = File.createTempFile("mpeg-rate-", ".mp3");
+            try {
+                byte[] frame = syntheticMpegFrame(selected[0], selected[1], 9, 0);
+                try (FileOutputStream output = new FileOutputStream(input)) {
+                    for (int i = 0; i < 100; i++) output.write(frame);
+                }
+                Mp3Frames.Stats inspected = Mp3Frames.inspect(input);
+                long expectedMs = 100L * selected[3] * 1000L / selected[2];
+                assertEquals("rate " + selected[2], expectedMs, inspected.durationMs);
+                assertEquals(100L, inspected.frames);
+                assertEquals(frame.length * 100L, inspected.bytes);
+            } finally {
+                input.delete();
+            }
+        }
+    }
+
+    @Test public void mixedRatesPaddingAndBitrateChangeBytesButNotTimeUnits()
+            throws Exception {
+        File input = File.createTempFile("mpeg-variable-", ".mp3");
+        try {
+            byte[] f44100 = syntheticMpegFrame(3,0,9,0);
+            byte[] f48000 = syntheticMpegFrame(3,1,10,1);
+            byte[] f24000 = syntheticMpegFrame(2,1,9,0);
+            byte[] f8000 = syntheticMpegFrame(0,2,9,1);
+            try (FileOutputStream output = new FileOutputStream(input)) {
+                output.write(f44100);
+                output.write(f48000);
+                output.write(f24000);
+                output.write(f8000);
+                output.write(f44100,0,9); // truncated tail never counts
+            }
+            byte[] before = java.nio.file.Files.readAllBytes(input.toPath());
+            Mp3Frames.Stats scanned = Mp3Frames.inspect(input);
+            assertEquals(4, scanned.frames);
+            long expectedMs = (long)Math.floor(
+                    (1152.0/44100 + 1152.0/48000
+                            + 576.0/24000 + 576.0/8000)*1000);
+            assertEquals(expectedMs, scanned.durationMs);
+            assertEquals(f44100.length + f48000.length
+                    + f24000.length + f8000.length, scanned.bytes);
+            assertTrue(java.util.Arrays.equals(before,
+                    java.nio.file.Files.readAllBytes(input.toPath())));
+        } finally {
+            input.delete();
+        }
+    }
+
+    private static byte[] syntheticMpegFrame(int versionBits,
+                                              int sampleRateIndex,
+                                              int bitrateIndex,
+                                              int padding) {
+        int[] rates = versionBits == 3 ? new int[]{44100,48000,32000}
+                : versionBits == 2 ? new int[]{22050,24000,16000}
+                : new int[]{11025,12000,8000};
+        int[] ratesKbps = versionBits == 3
+                ? new int[]{0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0}
+                : new int[]{0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0};
+        int length = ((versionBits == 3 ? 144000 : 72000)
+                * ratesKbps[bitrateIndex] / rates[sampleRateIndex]) + padding;
+        byte[] frame = new byte[length];
+        int header = 0xffe00000 | (versionBits << 19)
+                | (1 << 17) | (1 << 16)
+                | (bitrateIndex << 12) | (sampleRateIndex << 10)
+                | (padding << 9) | (3 << 6);
+        frame[0] = (byte)(header >>> 24);
+        frame[1] = (byte)(header >>> 16);
+        frame[2] = (byte)(header >>> 8);
+        frame[3] = (byte)header;
+        return frame;
+    }
+
     @Test public void failedReplacementRetainsOriginalAndRecoveryCandidate()throws Exception{
         File dir=java.nio.file.Files.createTempDirectory("mp3-publish-").toFile(),original=new File(dir,"original.mp3"),candidate=new File(dir,"candidate.mp3");
         try{java.nio.file.Files.write(original.toPath(),"original captured audio".getBytes(java.nio.charset.StandardCharsets.UTF_8));java.nio.file.Files.write(candidate.toPath(),"synced candidate".getBytes(java.nio.charset.StandardCharsets.UTF_8));
