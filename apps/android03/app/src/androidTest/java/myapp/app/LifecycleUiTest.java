@@ -15,6 +15,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.rule.GrantPermissionRule;
 
+import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -23,6 +24,8 @@ import org.junit.runner.RunWith;
 public class LifecycleUiTest {
   @Rule public GrantPermissionRule permissions = GrantPermissionRule.grant(
       Manifest.permission.RECORD_AUDIO, Manifest.permission.BLUETOOTH_CONNECT);
+
+  @Before public void resetState() { VoiceUiTestState.reset(); }
 
   @Test public void unsentDraftSurvivesActivityRecreation() {
     try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
@@ -68,6 +71,7 @@ public class LifecycleUiTest {
     }
     Thread.sleep(300L);
     try (ActivityScenario<MainActivity> second = ActivityScenario.launch(MainActivity.class)) {
+      awaitRecording(second, 32000);
       second.onActivity(activity -> {
         com.google.android.material.textfield.TextInputEditText editor = activity.findViewById(R.id.voice_draft);
         VoicePcmPlayerView player = activity.findViewById(R.id.voice_user_player);
@@ -119,7 +123,7 @@ public class LifecycleUiTest {
     }
   }
 
-  @Test public void unsentManualRecordingSurvivesActivityRecreation() {
+  @Test public void unsentManualRecordingSurvivesActivityRecreation() throws Exception {
     try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
       scenario.onActivity(activity -> {
         activity.getSharedPreferences("voice_agent_history", Context.MODE_PRIVATE).edit()
@@ -139,6 +143,7 @@ public class LifecycleUiTest {
       });
       scenario.recreate();
       try {
+        awaitRecording(scenario, 32000);
         scenario.onActivity(activity -> {
           VoicePcmPlayerView player = activity.findViewById(R.id.voice_user_player);
           assertNotNull(player);
@@ -160,4 +165,69 @@ public class LifecycleUiTest {
       }
     }
   }
+
+  private static void awaitRecording(ActivityScenario<MainActivity> scenario, int expectedBytes)
+      throws Exception {
+    long deadline = android.os.SystemClock.elapsedRealtime() + 20000L;
+    java.util.concurrent.atomic.AtomicBoolean ready = new java.util.concurrent.atomic.AtomicBoolean();
+    while (android.os.SystemClock.elapsedRealtime() < deadline) {
+      scenario.onActivity(activity -> {
+        try {
+          java.lang.reflect.Field field = MainActivity.class.getDeclaredField("manualRecordingBuffer");
+          field.setAccessible(true);
+          ready.set(((java.io.ByteArrayOutputStream) field.get(activity)).size() == expectedBytes);
+        } catch (Exception failure) { throw new AssertionError(failure); }
+      });
+      if (ready.get()) return;
+      Thread.sleep(50L);
+    }
+    throw new AssertionError("Saved recording did not finish recovering");
+  }
+
+  @Test public void slowSavedRecordingCannotBlockUiOrReplaceNewerAudio() throws Exception {
+    Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+    java.io.File older = new java.io.File(context.getCacheDir(), "recovery-older.pcm");
+    java.io.File newer = new java.io.File(context.getCacheDir(), "recovery-newer.pcm");
+    try (java.io.FileOutputStream out = new java.io.FileOutputStream(older)) { out.write(new byte[32000]); }
+    try (java.io.FileOutputStream out = new java.io.FileOutputStream(newer)) { out.write(new byte[64000]); }
+    java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.atomic.AtomicReference<Thread> reader = new java.util.concurrent.atomic.AtomicReference<>();
+    java.io.File delayed = new java.io.File(older.getAbsolutePath()) {
+      @Override public long length() {
+        reader.set(Thread.currentThread());
+        entered.countDown();
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
+          throw new AssertionError("Recording recovery performed file I/O on the UI thread");
+        try {
+          if (!release.await(120, java.util.concurrent.TimeUnit.SECONDS))
+            throw new AssertionError("Test did not release recording reader");
+        } catch (InterruptedException failure) { throw new AssertionError(failure); }
+        return super.length();
+      }
+    };
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(activity -> activity.restoreManualRecording(delayed));
+      assertTrue(entered.await(20, java.util.concurrent.TimeUnit.SECONDS));
+      // This main-thread round trip must succeed while the old read is blocked.
+      scenario.onActivity(activity -> {
+        ((com.google.android.material.textfield.TextInputEditText) activity.findViewById(R.id.voice_draft))
+            .setText("editing continues during recovery");
+        activity.restoreManualRecording(newer);
+      });
+      awaitRecording(scenario, 64000);
+      release.countDown();
+      reader.get().join(20000L);
+      assertTrue("Old read did not finish", !reader.get().isAlive());
+      InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+      awaitRecording(scenario, 64000);
+      scenario.onActivity(activity -> assertEquals("editing continues during recovery",
+          ((com.google.android.material.textfield.TextInputEditText) activity.findViewById(R.id.voice_draft))
+              .getText().toString()));
+    } finally {
+      release.countDown();
+      older.delete(); newer.delete();
+    }
+  }
+
 }

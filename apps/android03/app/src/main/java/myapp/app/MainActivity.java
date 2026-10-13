@@ -255,6 +255,10 @@ public class MainActivity extends Activity {
   private final Object manualRecordingLock = new Object();
   private final ByteArrayOutputStream manualRecordingBuffer = new ByteArrayOutputStream();
   private volatile boolean manualRecordingAvailable = false;
+  // Recovery may outlive this screen or a newer capture. Only its owner may
+  // publish the bytes; file access itself must never delay the main looper.
+  private int recordingRecoveryGeneration;
+
   private volatile long lastLevelUiMs = 0L;
   private volatile String pendingTurnId = "";
   private volatile String latestUserTurnId = "";
@@ -649,6 +653,7 @@ public class MainActivity extends Activity {
     if(!running.compareAndSet(false,true)) {captureStartPending=false;return;}
     if(!startVoiceForegroundService()) {running.set(false);return;}
     captureStartPending=false;stopRequested=false;
+    recordingRecoveryGeneration++;
     if(!autoTranscribe) {
       synchronized(manualRecordingLock) {manualRecordingBuffer.reset();}
       manualRecordingAvailable=false;
@@ -664,6 +669,7 @@ public class MainActivity extends Activity {
   private void adoptManualCapture() {
     VoiceForegroundService service=voiceService;
     if(service==null || service.isCapturing() || !service.hasFinishedManualCapture())return;
+    recordingRecoveryGeneration++;
     byte[] data=service.userPlayback().snapshot();
     synchronized(manualRecordingLock) {manualRecordingBuffer.reset();manualRecordingBuffer.write(data,0,data.length);}
     manualRecordingAvailable=data.length>0;
@@ -2010,6 +2016,7 @@ public class MainActivity extends Activity {
               byte[] pcm=new byte[(int)selected.length()];
               try(java.io.DataInputStream in=new java.io.DataInputStream(new FileInputStream(selected))) {in.readFully(pcm);}
               runOnUiThread(()-> {
+                recordingRecoveryGeneration++;
                 autoTranscribe=false;historyPrefs.edit().putBoolean(AUTO_TRANSCRIBE_PREF_KEY,false).apply();
                 synchronized(manualRecordingLock) {manualRecordingBuffer.reset();manualRecordingBuffer.write(pcm,0,pcm.length);}
                 manualRecordingAvailable=true;userPlayer.setStaticPcm(pcm);persistManualRecording();
@@ -2048,32 +2055,45 @@ public class MainActivity extends Activity {
   }
 
   private void restoreManualRecording() {
-    File file = manualRecordingFile();
-    if (!file.isFile() || file.length() <= 0 || file.length() > appConfig.manualRecordingMaxBytes) {
-      if (file.exists() && file.length() > appConfig.manualRecordingMaxBytes)
-        appendDiagnostic("Saved recording exceeds the playback limit; original retained");
-      return;
-    }
-    try (FileInputStream in = new FileInputStream(file)) {
-      byte[] data = new byte[(int) file.length()];
-      int offset = 0;
-      while (offset < data.length) {
-        int got = in.read(data, offset, data.length - offset);
-        if (got < 0) break;
-        offset += got;
+    restoreManualRecording(manualRecordingFile());
+  }
+
+  void restoreManualRecording(File file) {
+    final int generation = ++recordingRecoveryGeneration;
+    final int maxBytes = appConfig.manualRecordingMaxBytes;
+    new Thread(() -> {
+      try {
+        long length = file.length();
+        if (!file.isFile() || length <= 0) return;
+        if (length > maxBytes || (length & 1L) != 0)
+          throw new IOException("Saved recording is outside the PCM playback limits");
+        byte[] data = new byte[(int) length];
+        try (java.io.DataInputStream in = new java.io.DataInputStream(new FileInputStream(file))) {
+          in.readFully(data);
+          if (in.read() != -1) throw new IOException("Recording changed during recovery");
+        }
+        mainHandler.post(() -> {
+          if (isDestroyed() || isFinishing() || generation != recordingRecoveryGeneration
+              || running.get()) return;
+          VoiceForegroundService service = voiceService;
+          if (service != null && (service.isCapturing() || service.hasFinishedManualCapture()
+              || service.userPlayback().hasAudio())) return;
+          synchronized (manualRecordingLock) {
+            manualRecordingBuffer.reset();
+            manualRecordingBuffer.write(data, 0, data.length);
+          }
+          manualRecordingAvailable = true;
+          if (userPlayer != null) userPlayer.setStaticPcm(data);
+          updateTranscriptPanel();
+        });
+      } catch (Exception failure) {
+        mainHandler.post(() -> {
+          if (!isDestroyed() && generation == recordingRecoveryGeneration)
+            appendDiagnostic("Recording restore failed: " + failure.getClass().getSimpleName());
+        });
+        // Keep the only recording intact after an incomplete or failed read.
       }
-      if (offset != data.length) throw new IOException("Short recording read");
-      synchronized (manualRecordingLock) {
-        manualRecordingBuffer.reset();
-        manualRecordingBuffer.write(data, 0, data.length);
-      }
-      manualRecordingAvailable = true;
-      if (userPlayer != null) userPlayer.setStaticPcm(data);
-      updateTranscriptPanel();
-    } catch (Exception failure) {
-      appendDiagnostic("Recording restore failed: " + failure.getClass().getSimpleName());
-      // Keep failed recovery evidence; never delete the only recording on read failure.
-    }
+    }, "voice-recording-restore").start();
   }
 
   private void deleteManualRecordingFile() {
@@ -2082,6 +2102,7 @@ public class MainActivity extends Activity {
   }
 
   private void clearManualRecording() {
+    recordingRecoveryGeneration++;
     synchronized (manualRecordingLock) { manualRecordingBuffer.reset(); }
     manualRecordingAvailable = false;
     manualTranscribePending = false;
@@ -2952,6 +2973,7 @@ public class MainActivity extends Activity {
   }
 
   @Override protected void onDestroy() {
+    recordingRecoveryGeneration++;
     // Never stop a service-owned live voice session as an Activity destructor
     // side effect. Manual local recording remains the legacy Activity mode.
     if (mainHandler != null) mainHandler.removeCallbacksAndMessages(null);
