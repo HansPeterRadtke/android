@@ -46,6 +46,7 @@ public class ConnectedVoiceWorkflowTest {
         && "1".equals(InstrumentationRegistry.getArguments().getString("voiceChain")));
     VoiceUiTestState.reset();
     Context app = InstrumentationRegistry.getInstrumentation().getTargetContext();
+    boolean background = "1".equals(InstrumentationRegistry.getArguments().getString("voiceChainBackground"));
     File fixture = new File(app.getFilesDir(), "voice-chain");
     File recording = new File(fixture, "input.pcm");
     assertTrue("Missing synthetic speech fixture", recording.isFile() && recording.length() > 3200);
@@ -98,10 +99,28 @@ public class ConnectedVoiceWorkflowTest {
         assertTrue(recognized.get(), recognized.get().toLowerCase(java.util.Locale.ROOT).contains("hello"));
         assertTrue(activity.findViewById(R.id.voice_send).performClick());
       });
+      if (background) {
+        screen.moveToState(androidx.lifecycle.Lifecycle.State.CREATED);
+        // Remove the test's binding too: only the app's started foreground
+        // service may protect this pending request and play the eventual reply.
+        services.unbindService();
+      }
       VoicePcmPlayback playback = service.assistantPlayback();
       await(() -> playback.hasAudio() && !playback.isStreamOpen() && !playback.isPlaying()
           && playback.currentMs() == playback.availableMs() && playback.currentMs() > 0,
           150000, "The real TTS reply never finished rendering through AudioTrack");
+      if (background) {
+        assertFalse("Background delivery activated the microphone", service.isCapturing());
+        assertFalse("The voice service died with the screen", (Boolean) get(service, "terminating"));
+        screen.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED);
+        awaitScreen(screen, activity -> get(activity, "voiceService") == service
+            && !(Boolean) get(activity, "manualSendAwaitingAck")
+            && app.getSharedPreferences("voice_agent_history", Context.MODE_PRIVATE)
+                .getString("send_payload_v1", "").isEmpty()
+            && ((TextView) activity.findViewById(R.id.voice_conversation)).getText()
+                .toString().contains("\nAgent\n"), 60000,
+            "Returning screen did not reconcile the background reply and acknowledgement");
+      }
       AtomicReference<String> dialogue = new AtomicReference<>();
       screen.onActivity(activity -> {
         dialogue.set(((TextView) activity.findViewById(R.id.voice_conversation)).getText().toString());
@@ -115,6 +134,7 @@ public class ConnectedVoiceWorkflowTest {
           .put("recognized", recognized.get()).put("dialogue", dialogue.get())
           .put("rendered_ms", playback.currentMs()).put("available_ms", playback.availableMs())
           .put("elapsed_ms", SystemClock.elapsedRealtime() - started)
+          .put("background_without_test_binding", background)
           .put("scope", "Synthetic speech, actual Android UI/service, live ASR/SWAAG/TTS, emulator AudioTrack");
       try (FileOutputStream output = new FileOutputStream(new File(fixture, "result.json"))) {
         output.write(result.toString(2).getBytes(StandardCharsets.UTF_8));

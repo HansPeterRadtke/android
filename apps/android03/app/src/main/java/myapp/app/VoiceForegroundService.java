@@ -110,6 +110,10 @@ public final class VoiceForegroundService extends Service {
   private volatile String lastHello = "";
   private volatile String lastHistory = "";
   private volatile String lastState = "";
+  private volatile String lastSubmissionAck = "";
+  private String lastSentSubmission = "";
+  private long lastSentSubmissionGeneration = -1;
+  private VoiceSubmissionPersistence.Attempt watchedSubmission;
   private volatile String lastAudioStart = "";
   private volatile String microphoneLabel = "";
   private volatile double inputLevelDbfs = -120.0;
@@ -209,6 +213,7 @@ public final class VoiceForegroundService extends Service {
       return START_NOT_STICKY;
     }
     ensureForeground();
+    resumeDetachedSubmission();
     // Until restart-safe capture journaling is implemented, Android must not
     // restart this service into a false "recording" state after process death.
     return START_NOT_STICKY;
@@ -283,13 +288,14 @@ public final class VoiceForegroundService extends Service {
     if (activityListener == listener) {
       activityListener = null;
       captureObserver = null;
-
+      resumeDetachedSubmission();
     }
   }
 
   private void forwardCachedState(WebSocketListener listener) {
-    if (!lastHello.isEmpty()) listener.onMessage(facade,lastHello);
     if (!lastHistory.isEmpty()) listener.onMessage(facade,lastHistory);
+    forwardPendingSubmissionAck(listener);
+    if (!lastHello.isEmpty()) listener.onMessage(facade,lastHello);
     if (!lastState.isEmpty()) listener.onMessage(facade,lastState);
     if (!lastAudioStart.isEmpty()) listener.onMessage(facade,lastAudioStart);
     synchronized(workerSnapshots) {
@@ -299,8 +305,65 @@ public final class VoiceForegroundService extends Service {
   }
 
   public boolean sendText(String payload) {
-    WebSocket socket=networkSocket;
-    return socket != null && networkConnected && socket.send(payload);
+    synchronized (sessionLock) {
+      WebSocket socket=networkSocket;
+      boolean sent=socket != null && networkConnected && socket.send(payload);
+      if (sent && payload.equals(getSharedPreferences("voice_agent_history", MODE_PRIVATE)
+          .getString("send_payload_v1", ""))) {
+        lastSentSubmission=payload;
+        lastSentSubmissionGeneration=networkGeneration;
+      }
+      return sent;
+    }
+  }
+
+  private boolean isPendingSubmissionAck(JSONObject ack) {
+    if (!"turn".equals(ack.optString("type")) || !"submitted".equals(ack.optString("event"))) return false;
+    try {
+      SharedPreferences prefs=getSharedPreferences("voice_agent_history", MODE_PRIVATE);
+      String payload=prefs.getString("send_payload_v1", "");
+      if (!VoiceSubmissionPersistence.SHARED.isDurable(payload)) return false;
+      JSONObject sent=new JSONObject(payload);
+      String expected=sent.optString("turn_id", "turn-client-"+sent.optString("client_request_id"));
+      return expected.equals(ack.optString("turn_id"))
+          && sent.getString("text").equals(ack.optString("text"));
+    } catch (Exception invalid) { return false; }
+  }
+
+  private void forwardPendingSubmissionAck(WebSocketListener listener) {
+    try {
+      if (!lastSubmissionAck.isEmpty() && isPendingSubmissionAck(new JSONObject(lastSubmissionAck)))
+        listener.onMessage(facade,lastSubmissionAck);
+    } catch (Exception invalid) { /* The durable outbox remains available for retry. */ }
+  }
+
+  private void resumeDetachedSubmission() {
+    main.post(() -> {
+      if (terminating || activityListener != null) return;
+      VoiceSubmissionPersistence.Attempt attempt=VoiceSubmissionPersistence.SHARED.current();
+      if (attempt != null && !attempt.result.isDone()) {
+        if (watchedSubmission != attempt) {
+          watchedSubmission=attempt;
+          attempt.result.whenComplete((saved, failure) -> resumeDetachedSubmission());
+        }
+        return;
+      }
+      String payload=attempt == null ? getSharedPreferences("voice_agent_history", MODE_PRIVATE)
+          .getString("send_payload_v1", "") : attempt.payload;
+      if (!VoiceSubmissionPersistence.SHARED.isDurable(payload)) return;
+      try {
+        if (!lastSubmissionAck.isEmpty() && isPendingSubmissionAck(new JSONObject(lastSubmissionAck))) return;
+      } catch (Exception invalid) { /* A malformed cached ACK cannot discard a submission. */ }
+      if (!networkConnected || lastHello.isEmpty()) {
+        connectionDesired=true;
+        connect();
+        return;
+      }
+      synchronized (sessionLock) {
+        if (payload.equals(lastSentSubmission) && lastSentSubmissionGeneration == networkGeneration) return;
+        if (!sendText(payload)) requestReconnect("detached_submission_rejected");
+      }
+    });
   }
 
   private void emitClientState() {
@@ -382,6 +445,9 @@ public final class VoiceForegroundService extends Service {
                   if ("hello".equals(type)) {
                     lastHello=text;serverCanCommit=value.optInt("commit_protocol",0)==1;
                     emitClientState();
+                    WebSocketListener listener=activityListener;
+                    if (listener != null) forwardPendingSubmissionAck(listener);
+                    else resumeDetachedSubmission();
                   }
                   else if ("history".equals(type)) lastHistory=text;
                   else if ("state".equals(type)) lastState=text;
@@ -408,6 +474,7 @@ public final class VoiceForegroundService extends Service {
                     } else sendControl("draft_claim","client_retained_draft",-1);
                   }
                   if("audio".equals(type) || "replay".equals(type))handleMediaControl(value,text);
+                  if(isPendingSubmissionAck(value)) lastSubmissionAck=text;
 
                 } catch(Exception ignored) {}
                 WebSocketListener listener=activityListener;

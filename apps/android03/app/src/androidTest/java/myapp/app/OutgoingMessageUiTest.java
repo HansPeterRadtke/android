@@ -25,6 +25,7 @@ import org.junit.runner.RunWith;
 
 @RunWith(AndroidJUnit4.class)
 public class OutgoingMessageUiTest {
+  @org.junit.Rule public androidx.test.rule.ServiceTestRule retainedService = new androidx.test.rule.ServiceTestRule();
   @Before public void reset() { VoiceUiTestState.reset(); }
 
   static void verifyTwoAcknowledgedMessages() {
@@ -134,6 +135,85 @@ public class OutgoingMessageUiTest {
     }
   }
 
+  @Test public void savedSendContinuesAfterTheScreenClosesAndAckReplaysBeforeRetry() throws Exception {
+    android.content.Context app = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().getTargetContext();
+    VoiceForegroundService service = ((VoiceForegroundService.LocalBinder) retainedService.bindService(
+        new android.content.Intent(app, VoiceForegroundService.class))).service();
+    CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+    List<JSONObject> submitted = new CopyOnWriteArrayList<>();
+    List<JSONObject> attempts = new CopyOnWriteArrayList<>();
+    WebSocket socket = (WebSocket) Proxy.newProxyInstance(WebSocket.class.getClassLoader(),
+        new Class<?>[]{WebSocket.class}, (proxy, method, args) -> {
+          if ("send".equals(method.getName())) {
+            JSONObject value = new JSONObject((String) args[0]);
+            if ("text_turn".equals(value.optString("type"))) {
+              attempts.add(value);
+              if (attempts.size() == 1) return false;
+              submitted.add(value);
+            }
+            return true;
+          }
+          if ("queueSize".equals(method.getName())) return 0L;
+          if ("close".equals(method.getName())) return true;
+          return null;
+        });
+    ActivityScenario<MainActivity> screen = ActivityScenario.launch(MainActivity.class);
+    try {
+      await(() -> {
+        AtomicBoolean ready = new AtomicBoolean();
+        screen.onActivity(activity -> ready.set(get(activity, "boundVoiceListener") != null));
+        return ready.get();
+      }, "Screen never attached to the service");
+      screen.onActivity(activity -> {
+        WebSocket previous = (WebSocket) get(service, "networkSocket");
+        set(service, "networkGeneration", ((Long) get(service, "networkGeneration")) + 1L);
+        set(service, "connectionDesired", false);
+        set(service, "networkConnecting", false);
+        set(service, "networkSocket", socket);
+        set(service, "networkConnected", true);
+        set(service, "lastHello", "{\"type\":\"hello\",\"commit_protocol\":1}");
+        if (previous != null) previous.cancel();
+        VoiceConnectionTracker tracker = (VoiceConnectionTracker) get(activity, "connectionTracker");
+        tracker.onOpen(tracker.currentGeneration(), System.currentTimeMillis());
+        set(activity, "serverHelloReady", true);
+        set(activity, "webSocket", service.facade());
+        interceptCommit(activity, () -> {
+          assertNotEquals(Looper.getMainLooper(), Looper.myLooper());
+          entered.countDown();
+          try { return release.await(120, TimeUnit.SECONDS); }
+          catch (InterruptedException failure) { throw new AssertionError(failure); }
+        });
+        editor(activity).setText("  Send this after I leave the screen.  ");
+        activity.findViewById(R.id.voice_send).performClick();
+        editor(activity).setText("Preserve my newer unsent draft");
+      });
+      assertTrue(entered.await(30, TimeUnit.SECONDS));
+      screen.moveToState(androidx.lifecycle.Lifecycle.State.CREATED);
+      assertTrue(submitted.isEmpty());
+      release.countDown();
+      await(() -> attempts.size() == 1 && !service.isConnected(), "Rejected background send did not request reconnection");
+      assertTrue("Rejected enqueue counted as delivery", submitted.isEmpty());
+      androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+        set(service, "networkSocket", socket);
+        set(service, "networkConnected", true);
+        invoke(service, "resumeDetachedSubmission", new Class<?>[]{});
+      });
+      await(() -> submitted.size() == 1, "Service did not send after the screen closed");
+      assertEquals("Reconnect changed the original request identity", attempts.get(0).toString(), attempts.get(1).toString());
+      assertEquals("  Send this after I leave the screen.  ", submitted.get(0).getString("text"));
+      assertFalse("Typed Send must not activate the microphone", service.isCapturing());
+      JSONObject ack = new JSONObject().put("type", "turn").put("event", "submitted")
+          .put("turn_id", "turn-client-" + submitted.get(0).getString("client_request_id"))
+          .put("text", submitted.get(0).getString("text"));
+      set(service, "lastSubmissionAck", ack.toString());
+      screen.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED);
+      await(() -> app.getSharedPreferences("voice_agent_history", android.content.Context.MODE_PRIVATE)
+          .getString("send_payload_v1", "").isEmpty(), "Detached ACK did not reconcile on return");
+      assertEquals("Returning screen resent an already acknowledged message", 1, submitted.size());
+      screen.onActivity(activity -> assertEquals("Preserve my newer unsent draft", editor(activity).getText().toString()));
+    } finally { release.countDown(); screen.close(); }
+  }
+
   private static void interceptCommit(MainActivity activity, BooleanSupplier allowCommit) {
     SharedPreferences original = (SharedPreferences) get(activity, "historyPrefs");
     SharedPreferences wrapped = (SharedPreferences) Proxy.newProxyInstance(
@@ -158,6 +238,9 @@ public class OutgoingMessageUiTest {
       VoiceForegroundService service = (VoiceForegroundService) get(activity, "voiceService");
       WebSocketListener listener = (WebSocketListener) get(activity, "boundVoiceListener");
       if (service != null && listener != null) service.detach(listener);
+      // Activity-only transport fixtures must never flush their synthetic
+      // requests through the service's real socket while detached.
+      if (service != null) set(service, "activityListener", new WebSocketListener() {});
       invoke(activity, "closeCurrentSocket", new Class<?>[]{String.class, boolean.class}, "fixture", true);
       VoiceConnectionTracker tracker = (VoiceConnectionTracker) get(activity, "connectionTracker");
       generation = tracker.beginConnect();
@@ -194,9 +277,9 @@ public class OutgoingMessageUiTest {
     try { Field field = target.getClass().getDeclaredField(name); field.setAccessible(true); field.set(target, value); }
     catch (Exception failure) { throw new AssertionError(failure); }
   }
-  private static void invoke(MainActivity activity, String name, Class<?>[] types, Object... values) {
-    try { java.lang.reflect.Method method = MainActivity.class.getDeclaredMethod(name, types);
-      method.setAccessible(true); method.invoke(activity, values); }
+  private static void invoke(Object target, String name, Class<?>[] types, Object... values) {
+    try { java.lang.reflect.Method method = target.getClass().getDeclaredMethod(name, types);
+      method.setAccessible(true); method.invoke(target, values); }
     catch (Exception failure) { throw new AssertionError(failure); }
   }
   private static void await(BooleanSupplier ready, String message) {

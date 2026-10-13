@@ -1923,6 +1923,9 @@ public class MainActivity extends Activity {
         }
         manualRequestText=value; obj.put("text",value);
       }
+      // Protect the user-requested send/reply across Activity unbinding. This
+      // starts media-playback ownership without requesting microphone capture.
+      if (!startVoiceForegroundService()) return;
       if (queued.isEmpty() || (pendingWrite != null && !pendingWrite.durable())) {
         final SharedPreferences preferences = historyPrefs;
         VoiceSubmissionPersistence.Attempt attempt = VoiceSubmissionPersistence.SHARED.retain(
