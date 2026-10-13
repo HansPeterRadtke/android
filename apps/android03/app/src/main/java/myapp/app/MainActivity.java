@@ -108,6 +108,7 @@ public class MainActivity extends Activity {
 
   private VoiceAppConfig appConfig;
   private SharedPreferences historyPrefs;
+  private VoiceSubmissionPersistence.Attempt observedSubmissionWrite;
   private Handler mainHandler;
   private OkHttpClient wsClient;
   private volatile VoiceForegroundService voiceService;
@@ -330,6 +331,11 @@ public class MainActivity extends Activity {
     historyPrefs = getSharedPreferences("voice_agent_history", MODE_PRIVATE);
     manualRequestText=historyPrefs.getString("send_text_v1","");
     typedSendPending=!historyPrefs.getString("send_payload_v1","").isEmpty();
+    VoiceSubmissionPersistence.Attempt restoringSubmission = VoiceSubmissionPersistence.SHARED.current();
+    if (restoringSubmission != null) {
+      manualRequestText = restoringSubmission.text;
+      typedSendPending = true;
+    }
     migrateLegacyDraft();
     selectedDeviceId = historyPrefs.getInt(MIC_DEVICE_PREF_KEY, AudioInputOption.DEFAULT_DEVICE_ID);
     autoTranscribe = historyPrefs.getBoolean(AUTO_TRANSCRIBE_PREF_KEY, true);
@@ -1013,10 +1019,13 @@ public class MainActivity extends Activity {
           JSONObject sent=new JSONObject(historyPrefs.getString("send_payload_v1","{}"));
           expectedTurn=sent.optString("turn_id", "turn-client-"+sent.optString("client_request_id"));
         } catch(Exception ignored) {}
+        String acknowledgedPayload = historyPrefs.getString("send_payload_v1", "");
         boolean manualAcknowledged = turnId.equals(expectedTurn)
-            && submitted.equals(historyPrefs.getString("send_text_v1",""));
+            && submitted.equals(historyPrefs.getString("send_text_v1",""))
+            && VoiceSubmissionPersistence.SHARED.isDurable(acknowledgedPayload);
         if (manualAcknowledged) {
           historyPrefs.edit().remove("send_payload_v1").remove("send_text_v1").apply();
+          VoiceSubmissionPersistence.SHARED.acknowledge(acknowledgedPayload);
           typedSendPending=false;
           manualSendAwaitingAck = false;
           manualSendText = "";
@@ -1871,8 +1880,10 @@ public class MainActivity extends Activity {
       runOnUiThread(this::submitDraft);
       return;
     }
-    String queued=historyPrefs.getString("send_payload_v1","");
-    String value = queued.isEmpty()?draftEdit.getText().toString():manualRequestText;
+    VoiceSubmissionPersistence.Attempt pendingWrite = VoiceSubmissionPersistence.SHARED.current();
+    String queued = pendingWrite == null ? historyPrefs.getString("send_payload_v1", "") : pendingWrite.payload;
+    String value = pendingWrite == null ? (queued.isEmpty() ? draftEdit.getText().toString()
+        : historyPrefs.getString("send_text_v1", "")) : pendingWrite.text;
     if (value.trim().isEmpty()) {
       setForegroundMode(ForegroundMode.REVIEW, getString(R.string.transcript_empty));
       return;
@@ -1903,8 +1914,16 @@ public class MainActivity extends Activity {
           obj.put("client_request_id",manualRequestId);
         }
         manualRequestText=value; obj.put("text",value);
-        if(!historyPrefs.edit().putString("send_payload_v1",obj.toString())
-            .putString("send_text_v1",value).commit())throw new IOException("Cannot retain outgoing message");
+      }
+      if (queued.isEmpty() || (pendingWrite != null && !pendingWrite.durable())) {
+        final SharedPreferences preferences = historyPrefs;
+        VoiceSubmissionPersistence.Attempt attempt = VoiceSubmissionPersistence.SHARED.retain(
+            queued.isEmpty() ? obj.toString() : queued, value,
+            (payload, text) -> preferences.edit().putString("send_payload_v1", payload)
+                .putString("send_text_v1", text).commit());
+        typedSendPending = true;
+        observeSubmissionWrite(attempt);
+        return;
       }
       WebSocket socket=webSocket;
       if(socket==null || !connectionTracker.isOpen() || !serverHelloReady) {
@@ -1940,6 +1959,26 @@ public class MainActivity extends Activity {
       setForegroundMode(ForegroundMode.RECONNECTING, getString(R.string.submit_queued));
       updateTranscriptPanel();
     }
+  }
+
+  private void observeSubmissionWrite(VoiceSubmissionPersistence.Attempt attempt) {
+    if (observedSubmissionWrite == attempt) return;
+    observedSubmissionWrite = attempt;
+    setForegroundMode(ForegroundMode.QUEUED, getString(R.string.submit_saving));
+    updateTranscriptPanel();
+    attempt.result.whenComplete((saved, failure) -> mainHandler.post(() -> {
+      if (isDestroyed() || isFinishing() || observedSubmissionWrite != attempt) return;
+      observedSubmissionWrite = null;
+      if (!activityVisible || VoiceSubmissionPersistence.SHARED.current() != attempt) return;
+      if (failure == null && Boolean.TRUE.equals(saved)) {
+        submitDraft();
+      } else {
+        typedSendPending = true;
+        setForegroundMode(ForegroundMode.REVIEW, getString(R.string.submit_storage_failed));
+        appendDiagnostic("Outgoing message persistence failed; retaining exact text for retry");
+        updateTranscriptPanel();
+      }
+    }));
   }
 
   private void loadLocalVocabulary() {

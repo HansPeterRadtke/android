@@ -382,77 +382,7 @@ public class MainActivityUiTest {
   }
 
   @Test public void manualSendActuallyEmitsExactlyOneTypedTurnAndClearsOnlyOnAck() {
-    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
-      scenario.onActivity(activity -> {
-        try {
-          java.lang.reflect.Field wanted =
-              MainActivity.class.getDeclaredField("connectionWanted");
-          wanted.setAccessible(true);
-          ((java.util.concurrent.atomic.AtomicBoolean) wanted.get(activity)).set(false);
-          callPrivate(activity, "closeCurrentSocket",
-              new Class<?>[] {String.class, boolean.class}, "test fixture", true);
-          java.lang.reflect.Field trackerField =
-              MainActivity.class.getDeclaredField("connectionTracker");
-          trackerField.setAccessible(true);
-          VoiceConnectionTracker tracker = (VoiceConnectionTracker) trackerField.get(activity);
-          long generation = tracker.beginConnect();
-          assertTrue(tracker.onOpen(generation, System.currentTimeMillis()));
-          java.util.List<String> payloads = new java.util.ArrayList<>();
-          okhttp3.WebSocket ws = (okhttp3.WebSocket) java.lang.reflect.Proxy.newProxyInstance(
-              okhttp3.WebSocket.class.getClassLoader(),
-              new Class<?>[]{okhttp3.WebSocket.class},
-              (proxy, method, args) -> {
-                if (method.getName().equals("send")) {
-                  String payload=(String)args[0];
-                  String kind=new JSONObject(payload).optString("type");
-                  if("text_turn".equals(kind) || "submit".equals(kind))payloads.add(payload);
-                  return true;
-                }
-                if (method.getName().equals("queueSize")) return 0L;
-                if (method.getName().equals("close")) return true;
-                return null;
-              });
-          java.lang.reflect.Field socket =
-              MainActivity.class.getDeclaredField("webSocket");
-          socket.setAccessible(true);
-          socket.set(activity, ws);
-          java.lang.reflect.Field hello =
-              MainActivity.class.getDeclaredField("serverHelloReady");
-          hello.setAccessible(true);
-          hello.setBoolean(activity, true);
-
-          TextInputEditText editor = activity.findViewById(R.id.voice_draft);
-          MaterialButton send = activity.findViewById(R.id.voice_send);
-          String original = "Exact typed message /data/example.txt";
-          editor.setText(original);
-          assertTrue(send.isEnabled());
-          assertTrue(send.performClick());
-          assertEquals(1, payloads.size());
-          JSONObject first = new JSONObject(payloads.get(0));
-          assertEquals("text_turn", first.getString("type"));
-          assertEquals(original, first.getString("text"));
-          String requestId = first.getString("client_request_id");
-          assertEquals(32, requestId.length());
-          assertEquals(original, editor.getText().toString());
-          assertTrue("Send must remain visibly enabled", send.isEnabled());
-          send.performClick();
-          assertEquals("no duplicate during pending ACK", 1, payloads.size());
-
-          callPrivate(activity, "handleWsJson",
-              new Class<?>[]{String.class, long.class},
-              new JSONObject().put("type","turn").put("event","submitted")
-                  .put("turn_id","turn-client-"+requestId).put("text",original).toString(),
-              generation);
-          assertEquals("ACK clears only delivered text", "", editor.getText().toString());
-          editor.setText("Second separate typed message");
-          assertTrue(send.performClick());
-          assertEquals(2, payloads.size());
-          JSONObject second = new JSONObject(payloads.get(1));
-          assertEquals("Second separate typed message", second.getString("text"));
-          assertTrue(!requestId.equals(second.getString("client_request_id")));
-        } catch (Exception e) { throw new AssertionError(e); }
-      });
-    }
+    OutgoingMessageUiTest.verifyTwoAcknowledgedMessages();
   }
 
   @Test public void liveAutomaticSpeechAppearsInCurrentMessageUntilServerAck() {

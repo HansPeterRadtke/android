@@ -385,6 +385,7 @@ public final class VoiceForegroundService extends Service {
                         && prefs.getBoolean("send_automatically_v3",true)
                         && !prefs.getBoolean("draft_claimed_v1",false)
                         && prefs.getString("send_payload_v1","").isEmpty()
+                        && VoiceSubmissionPersistence.SHARED.current() == null
                         && !captureTransportFailed;
                     if(eligible) {
                       JSONObject commit=new JSONObject();commit.put("type","commit_turn");

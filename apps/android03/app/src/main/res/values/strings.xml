@@ -48,6 +48,8 @@
     <string name="submit_waiting_confirmation">Waiting for server confirmation. Your text has not been cleared.</string>
     <string name="submit_rejected_retry">Send was rejected. Your text is preserved; tap Send to retry.</string>
     <string name="submit_unconfirmed">No server confirmation. Your text is saved; tap Send to retry.</string>
+    <string name="submit_saving">Saving your exact message before sending.</string>
+    <string name="submit_storage_failed">Could not save this message. Your text is preserved; tap Send to retry.</string>
     <string name="latest">Latest</string>
 <string name="background_working">Background work is running</string>
     <string name="background_input">Background work needs your input</string>
