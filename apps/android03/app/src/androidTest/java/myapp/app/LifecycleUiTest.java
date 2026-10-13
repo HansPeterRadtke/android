@@ -22,6 +22,7 @@ import org.junit.runner.RunWith;
 
 @RunWith(AndroidJUnit4.class)
 public class LifecycleUiTest {
+  @Rule public androidx.test.rule.ServiceTestRule retainedService = new androidx.test.rule.ServiceTestRule();
   @Rule public GrantPermissionRule permissions = GrantPermissionRule.grant(
       Manifest.permission.RECORD_AUDIO, Manifest.permission.BLUETOOTH_CONNECT);
 
@@ -227,6 +228,84 @@ public class LifecycleUiTest {
     } finally {
       release.countDown();
       older.delete(); newer.delete();
+    }
+  }
+
+  @Test public void recoveredRecordingRemainsTranscribableAfterScreenRecreation() throws Exception {
+    Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+    VoiceForegroundService service = ((VoiceForegroundService.LocalBinder) retainedService.bindService(
+        new android.content.Intent(context, VoiceForegroundService.class))).service();
+    java.io.File recording = new java.io.File(context.getFilesDir(), "voice_unsent_manual.pcm");
+    try (java.io.FileOutputStream output = new java.io.FileOutputStream(recording)) {
+      output.write(new byte[32000]);
+    }
+    context.getSharedPreferences("voice_agent_history", Context.MODE_PRIVATE).edit()
+        .putBoolean("transcribe_automatically_v1", false).commit();
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      awaitRecording(scenario, 32000);
+      assertTrue("Recovery never reached the service-owned player", service.userPlayback().hasAudio());
+      scenario.recreate();
+      awaitRecording(scenario, 32000);
+      scenario.onActivity(activity -> {
+        assertEquals(View.VISIBLE, activity.findViewById(R.id.voice_transcribe).getVisibility());
+        assertTrue(activity.findViewById(R.id.voice_transcribe).isEnabled());
+        assertTrue(((VoicePcmPlayerView) activity.findViewById(R.id.voice_user_player)).hasAudio());
+      });
+    } finally { recording.delete(); }
+  }
+
+  @Test public void slowArchiveSelectionCannotReplaceNewerAudioOrOverwriteUnsentRecording() throws Exception {
+    Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+    VoiceForegroundService service = ((VoiceForegroundService.LocalBinder) retainedService.bindService(
+        new android.content.Intent(context, VoiceForegroundService.class))).service();
+    java.io.File directory = new java.io.File(context.getFilesDir(), "voice_recordings");
+    assertTrue(directory.isDirectory() || directory.mkdirs());
+    java.io.File old = new java.io.File(directory, "test-delayed-selection.pcm");
+    java.io.File newer = new java.io.File(directory, "test-newer-selection.pcm");
+    java.io.File unsent = new java.io.File(context.getFilesDir(), "voice_unsent_manual.pcm");
+    try (java.io.FileOutputStream out = new java.io.FileOutputStream(old)) { out.write(new byte[32000]); }
+    try (java.io.FileOutputStream out = new java.io.FileOutputStream(newer)) { out.write(new byte[64000]); }
+    try (java.io.FileOutputStream out = new java.io.FileOutputStream(unsent)) { out.write(new byte[16000]); }
+    java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.atomic.AtomicReference<Thread> reader = new java.util.concurrent.atomic.AtomicReference<>();
+    java.io.File delayed = new java.io.File(old.getAbsolutePath()) {
+      @Override public long length() {
+        assertTrue("Archive read ran on the UI thread", android.os.Looper.myLooper() != android.os.Looper.getMainLooper());
+        reader.set(Thread.currentThread()); entered.countDown();
+        try { assertTrue(release.await(120, java.util.concurrent.TimeUnit.SECONDS)); }
+        catch (InterruptedException error) { throw new AssertionError(error); }
+        return super.length();
+      }
+    };
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      awaitRecording(scenario, 16000);
+      scenario.onActivity(activity -> activity.openSavedRecording(delayed));
+      assertTrue(entered.await(20, java.util.concurrent.TimeUnit.SECONDS));
+      scenario.onActivity(activity -> {
+        ((com.google.android.material.textfield.TextInputEditText) activity.findViewById(R.id.voice_draft))
+            .setText("keep editing during archive loading");
+        activity.openSavedRecording(newer);
+      });
+      awaitRecording(scenario, 64000);
+      release.countDown(); reader.get().join(20000);
+      assertTrue(!reader.get().isAlive());
+      InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+      awaitRecording(scenario, 64000);
+      assertEquals("The other unsent recording was overwritten", 16000L, unsent.length());
+      assertTrue(service.hasFinishedManualCapture());
+      assertEquals(64000, service.userPlayback().snapshot().length);
+      scenario.recreate();
+      awaitRecording(scenario, 64000);
+      scenario.onActivity(activity -> {
+        assertEquals(newer.getName(), activity.getSharedPreferences("voice_agent_history", Context.MODE_PRIVATE)
+            .getString("manual_archive_selection_v1", ""));
+        assertEquals("keep editing during archive loading",
+            ((com.google.android.material.textfield.TextInputEditText) activity.findViewById(R.id.voice_draft))
+                .getText().toString());
+      });
+    } finally {
+      release.countDown(); old.delete(); newer.delete(); unsent.delete();
     }
   }
 

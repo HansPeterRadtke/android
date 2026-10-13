@@ -1,5 +1,13 @@
 # Voice Agent infra-guideline compliance audit — 2026-10-06
 
+## October 13 recording ownership and archive selection
+
+A new emulator regression reproduced loss of the recovered manual-recording state after Activity recreation while the service-owned player still held the audio. The failure is preserved in `recording-retention-repro.log`. Recovered recordings are now explicitly retained as unsent media by the foreground service, transferred correctly across service binding, and adopted by replacement screens. Clearing an acknowledged recording also clears the service's unsent-media flag.
+
+Saved archive selection now uses the same bounded asynchronous PCM reader, validates the archive boundary and complete sample data, and reserves its generation before reading. A late selection cannot overwrite a newer selection, new capture, or a destroyed screen. Selecting existing durable archive audio retains its identity instead of copying and syncing the entire file on the UI thread or overwriting another unsent recording. The original archive remains available after selection and submission.
+
+After these repairs all 60 JVM tests, lint and isolated APK builds passed. The complete seven-case lifecycle suite and the opt-in real Android speech-chain case passed together: eight tests in 278.944 seconds. This includes the initially failing recreation case, a deliberately blocked archive read with continued editing and a newer selection, preservation of another unsent recording, background capture, cold-launch recovery, and the full ASR/agent/TTS/rendering path. Evidence on Nitro: `/data/var/voice-guideline-repair-20261012/recording-retention-build.log`, `recording-retention-instrumentation.log`, and `android-chain-20261013/result-retention.json`. The hardware, resize responsiveness and latency gates remain open.
+
 ## October 13 asynchronous outbox and routing follow-up
 
 Explicit Android Send no longer performs a blocking SharedPreferences commit on the UI thread. A process-owned barrier freezes the exact text and request identity before a background writer starts. Network submission waits for successful durable storage; a failed write exposes a retry without replacing the original message. Activity recreation sees the same pending attempt, newer editor text remains independent, repeated sends reuse the attempt, and automatic speech submission cannot race the pending explicit message.

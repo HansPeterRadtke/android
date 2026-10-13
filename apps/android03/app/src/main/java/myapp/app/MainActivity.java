@@ -95,6 +95,7 @@ public class MainActivity extends Activity {
   private static final String VOCAB_PREF_KEY = "vocabulary_v1";
   private static final String VOCAB_CONFIGURED_PREF_KEY = "vocabulary_configured_v1";
   private static final String MANUAL_RECORDING_FILE = "voice_unsent_manual.pcm";
+  private static final String MANUAL_ARCHIVE_PREF_KEY = "manual_archive_selection_v1";
   private static final long SEND_ACK_TIMEOUT_MS = 15000L;
   private static final int PERMISSION_REQUEST = 2;
   private static final int CHANNEL_CONFIG_IN = AudioFormat.CHANNEL_IN_MONO;
@@ -120,6 +121,12 @@ public class MainActivity extends Activity {
     @Override public void onServiceConnected(ComponentName name, IBinder binder) {
       voiceService = ((VoiceForegroundService.LocalBinder)binder).service();
       voiceServiceBound = true;
+      if (manualRecordingAvailable && !voiceService.isCapturing()
+          && !voiceService.hasFinishedManualCapture() && !voiceService.userPlayback().hasAudio()) {
+        byte[] recovered;
+        synchronized (manualRecordingLock) { recovered = manualRecordingBuffer.toByteArray(); }
+        voiceService.retainRecoveredManualRecording(recovered);
+      }
       assistantPlayer.bindPlayback(voiceService.assistantPlayback());
       userPlayer.bindPlayback(voiceService.userPlayback());
       voiceServiceBindingRequested = false;
@@ -667,6 +674,7 @@ public class MainActivity extends Activity {
     if(!service.startCapture(selectedDeviceId,voiceActivityCues,autoTranscribe)) {
       running.set(false);setForegroundMode(ForegroundMode.MICROPHONE_ERROR,service.captureError());return;
     }
+    historyPrefs.edit().remove(MANUAL_ARCHIVE_PREF_KEY).apply();
     setForegroundMode(autoTranscribe?(connectionTracker.isOpen()?ForegroundMode.VERIFYING:ForegroundMode.CONNECTING)
         :ForegroundMode.RECORDING_LOCAL,null);
     startButton.setText(R.string.stop_recording);updateTranscriptPanel();
@@ -2049,23 +2057,12 @@ public class MainActivity extends Activity {
     new MaterialAlertDialogBuilder(this).setTitle(R.string.saved_recordings).setItems(labels,(dialog,index)-> {
       File selected=files[index];
       new MaterialAlertDialogBuilder(this).setTitle(labels[index]).setMessage(R.string.saved_recording_actions)
-          .setPositiveButton(R.string.open_recording,(d,w)->new Thread(()-> {
-            try {
-              if(selected.length()>appConfig.manualRecordingMaxBytes)throw new IOException("Recording exceeds playback limit");
-              byte[] pcm=new byte[(int)selected.length()];
-              try(java.io.DataInputStream in=new java.io.DataInputStream(new FileInputStream(selected))) {in.readFully(pcm);}
-              runOnUiThread(()-> {
-                recordingRecoveryGeneration++;
-                autoTranscribe=false;historyPrefs.edit().putBoolean(AUTO_TRANSCRIBE_PREF_KEY,false).apply();
-                synchronized(manualRecordingLock) {manualRecordingBuffer.reset();manualRecordingBuffer.write(pcm,0,pcm.length);}
-                manualRecordingAvailable=true;userPlayer.setStaticPcm(pcm);persistManualRecording();
-                sendClientState();updateTranscriptPanel();setForegroundMode(ForegroundMode.REVIEW,getString(R.string.recording_ready));
-              });
-            }catch(Exception problem) {runOnUiThread(()->setForegroundMode(ForegroundMode.REVIEW,getString(R.string.saved_recording_unavailable)));}
-          },"voice-recording-recovery").start())
+          .setPositiveButton(R.string.open_recording,(d,w)->openSavedRecording(selected))
           .setNegativeButton(android.R.string.cancel,null)
           .setNeutralButton(R.string.delete_recording,(d,w)-> {
             if(!selected.delete())setForegroundMode(ForegroundMode.REVIEW,getString(R.string.saved_recording_unavailable));
+            else if(selected.getName().equals(historyPrefs.getString(MANUAL_ARCHIVE_PREF_KEY,"")))
+              clearManualRecording();
           }).show();
     }).show();
   }
@@ -2094,16 +2091,34 @@ public class MainActivity extends Activity {
   }
 
   private void restoreManualRecording() {
-    restoreManualRecording(manualRecordingFile());
+    String selected = historyPrefs.getString(MANUAL_ARCHIVE_PREF_KEY, "");
+    File recording = selected != null && selected.endsWith(".pcm")
+        && selected.equals(new File(selected).getName())
+        ? new File(new File(getFilesDir(), "voice_recordings"), selected) : manualRecordingFile();
+    restoreManualRecording(recording);
   }
 
   void restoreManualRecording(File file) {
+    recoverManualRecording(file, false);
+  }
+
+  void openSavedRecording(File file) {
+    recoverManualRecording(file, true);
+  }
+
+  private void recoverManualRecording(File file, boolean selectedArchive) {
     final int generation = ++recordingRecoveryGeneration;
     final int maxBytes = appConfig.manualRecordingMaxBytes;
     new Thread(() -> {
       try {
+        if (selectedArchive && !new File(getFilesDir(), "voice_recordings").getCanonicalFile()
+            .equals(file.getCanonicalFile().getParentFile()))
+          throw new IOException("Recording is outside the saved archive");
         long length = file.length();
-        if (!file.isFile() || length <= 0) return;
+        if (!file.isFile() || length <= 0) {
+          if (selectedArchive) throw new IOException("Saved recording is unavailable");
+          return;
+        }
         if (length > maxBytes || (length & 1L) != 0)
           throw new IOException("Saved recording is outside the PCM playback limits");
         byte[] data = new byte[(int) length];
@@ -2115,20 +2130,37 @@ public class MainActivity extends Activity {
           if (isDestroyed() || isFinishing() || generation != recordingRecoveryGeneration
               || running.get()) return;
           VoiceForegroundService service = voiceService;
-          if (service != null && (service.isCapturing() || service.hasFinishedManualCapture()
-              || service.userPlayback().hasAudio())) return;
+          if (service != null && (service.isCapturing() || (!selectedArchive
+              && (service.hasFinishedManualCapture() || service.userPlayback().hasAudio())))) return;
+          if (service != null && !service.retainRecoveredManualRecording(data)) return;
+          if (selectedArchive) {
+            // The archive already durably owns these bytes. Keep its identity
+            // instead of copying/fsyncing it on the UI thread or overwriting a
+            // different unsent recording just to make this selection recoverable.
+            autoTranscribe = false;
+            autoSend = false;
+            historyPrefs.edit().putString(MANUAL_ARCHIVE_PREF_KEY, file.getName())
+                .putBoolean(AUTO_TRANSCRIBE_PREF_KEY, false).apply();
+          }
           synchronized (manualRecordingLock) {
             manualRecordingBuffer.reset();
             manualRecordingBuffer.write(data, 0, data.length);
           }
           manualRecordingAvailable = true;
           if (userPlayer != null) userPlayer.setStaticPcm(data);
+          if (selectedArchive) {
+            sendClientState();
+            setForegroundMode(ForegroundMode.REVIEW, getString(R.string.recording_ready));
+          }
           updateTranscriptPanel();
         });
       } catch (Exception failure) {
         mainHandler.post(() -> {
-          if (!isDestroyed() && generation == recordingRecoveryGeneration)
+          if (!isDestroyed() && generation == recordingRecoveryGeneration) {
             appendDiagnostic("Recording restore failed: " + failure.getClass().getSimpleName());
+            if (selectedArchive) setForegroundMode(ForegroundMode.REVIEW,
+                getString(R.string.saved_recording_unavailable));
+          }
         });
         // Keep the only recording intact after an incomplete or failed read.
       }
@@ -2142,10 +2174,14 @@ public class MainActivity extends Activity {
 
   private void clearManualRecording() {
     recordingRecoveryGeneration++;
+    String selected = historyPrefs.getString(MANUAL_ARCHIVE_PREF_KEY, "");
+    historyPrefs.edit().remove(MANUAL_ARCHIVE_PREF_KEY).apply();
     synchronized (manualRecordingLock) { manualRecordingBuffer.reset(); }
     manualRecordingAvailable = false;
     manualTranscribePending = false;
-    deleteManualRecordingFile();
+    if (selected == null || selected.isEmpty()) deleteManualRecordingFile();
+    VoiceForegroundService service = voiceService;
+    if (service != null) service.clearRecoveredManualRecording();
     if (userPlayer != null) userPlayer.setStaticPcm(null);
     updateTranscriptPanel();
   }

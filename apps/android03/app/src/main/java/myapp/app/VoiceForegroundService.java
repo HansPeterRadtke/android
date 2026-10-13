@@ -119,6 +119,20 @@ public final class VoiceForegroundService extends Service {
   private volatile boolean manualReady;
   boolean isManualCapture() {return !automaticCapture;}
   boolean hasFinishedManualCapture() {return manualReady;}
+  boolean retainRecoveredManualRecording(byte[] data) {
+    // Recovery and service binding run on the main looper, like startCapture.
+    // Mark the media as an unsent recording so a replacement Activity can adopt
+    // it instead of mistaking it for unrelated user-history playback.
+    if (capturing.get() || data == null || data.length == 0) return false;
+    userPlayback.setStaticPcm(data);
+    manualReady = true;
+    return true;
+  }
+  void clearRecoveredManualRecording() {
+    if (capturing.get()) return;
+    manualReady = false;
+    userPlayback.setStaticPcm(null);
+  }
   private volatile boolean voiceActivityCues = true;
   private volatile int selectedMicrophoneId = AudioInputOption.DEFAULT_DEVICE_ID;
   private volatile int frameSeq;
