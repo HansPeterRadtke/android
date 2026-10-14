@@ -363,6 +363,7 @@ public class MainActivity extends Activity {
         .build();
     connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
     buildScreen();
+    restoreComposerState(savedInstanceState);
     registerNetworkObserver();
     refreshPreferredMicrophonePreviewAsync();
     startConnectionMonitor();
@@ -513,6 +514,10 @@ public class MainActivity extends Activity {
     transcriptInput.setHint(R.string.recognized_text);
     draftEdit = new TextInputEditText(transcriptInput.getContext());
     draftEdit.setId(R.id.voice_draft);
+    // Save text together with its ASR/human provenance and turn identity below.
+    // Framework-only restoration invokes TextWatcher as if a human had edited
+    // the field and otherwise promotes provisional ASR into a retained draft.
+    draftEdit.setSaveEnabled(false);
     draftEdit.setHint(R.string.transcript_hint);
     draftEdit.setTextSize(17);
     draftEdit.setInputType(InputType.TYPE_CLASS_TEXT
@@ -674,6 +679,8 @@ public class MainActivity extends Activity {
     if(!service.startCapture(selectedDeviceId,voiceActivityCues,autoTranscribe)) {
       running.set(false);setForegroundMode(ForegroundMode.MICROPHONE_ERROR,service.captureError());return;
     }
+    manualTranscriptPendingSubmission = false;
+    manualTranscribePending = false;
     historyPrefs.edit().remove(MANUAL_ARCHIVE_PREF_KEY).apply();
     setForegroundMode(autoTranscribe?(connectionTracker.isOpen()?ForegroundMode.VERIFYING:ForegroundMode.CONNECTING)
         :ForegroundMode.RECORDING_LOCAL,null);
@@ -1012,6 +1019,9 @@ public class MainActivity extends Activity {
       } else if ("turn".equals(type) && "submitted".equals(event)) {
         String submitted = obj.optString("text", "");
         String turnId = obj.optString("turn_id", "");
+        boolean acknowledgesCurrentRecording = manualTranscriptPendingSubmission
+            && !manualTranscribePending && !running.get()
+            && !turnId.isEmpty() && turnId.equals(lastFinalAsrTurnId);
         if (!submitted.trim().isEmpty()) {
           conversationTextModel.confirmUser(turnId, submitted);
           automaticLiveAsrPartial = false;
@@ -1043,25 +1053,26 @@ public class MainActivity extends Activity {
         // Automatic speech never clears unrelated human text. A matching
         // manual acknowledgement may clear only its own unchanged text.
         clearSubmittedDraft(submitted, manualAcknowledged);
-        manualTranscribePending = false;
-        if (manualTranscriptPendingSubmission) {
-          manualTranscriptPendingSubmission = false;
+        // A late acknowledgement for another message cannot consume unsent
+        // media or cancel a newer transcription. Clear only the recording
+        // associated with this exact durable manual submission.
+        if (manualAcknowledged && acknowledgesCurrentRecording) {
           clearManualRecording();
         }
         updateTranscriptPanel();
-        setForegroundMode(ForegroundMode.THINKING, null);
+        if (!manualTranscribePending) setForegroundMode(ForegroundMode.THINKING, null);
       } else if ("assistant".equals(type)) {
-        String reply = obj.optString("text", "").trim();
+        String reply = obj.optString("text", "");
         String turnId = obj.optString("turn_id", "");
         if ("draft".equals(event) || "partial".equals(event)) {
-          if (!reply.isEmpty()) {
+          if (!reply.trim().isEmpty()) {
             conversationTextModel.setLiveAssistant(turnId, reply);
             renderConversationText();
           }
         } else if ("final".equals(event)) {
           if (!turnId.isEmpty()) latestAssistantTurnId = turnId;
           replayAssistantAvailable = obj.optBoolean("has_assistant_audio", true);
-          if (!reply.isEmpty()) {
+          if (!reply.trim().isEmpty()) {
             conversationTextModel.confirmAssistant(turnId, reply);
             persistAndRenderConversation();
           }
@@ -2111,6 +2122,12 @@ public class MainActivity extends Activity {
 
   private void recoverManualRecording(File file, boolean selectedArchive) {
     final int generation = ++recordingRecoveryGeneration;
+    if (selectedArchive) {
+      // Selection changes ownership immediately, before the asynchronous read.
+      // An old ACK must not clear media and invalidate this pending selection.
+      manualTranscriptPendingSubmission = false;
+      manualTranscribePending = false;
+    }
     final int maxBytes = appConfig.manualRecordingMaxBytes;
     new Thread(() -> {
       try {
@@ -2182,6 +2199,7 @@ public class MainActivity extends Activity {
     synchronized (manualRecordingLock) { manualRecordingBuffer.reset(); }
     manualRecordingAvailable = false;
     manualTranscribePending = false;
+    manualTranscriptPendingSubmission = false;
     if (selected == null || selected.isEmpty()) deleteManualRecordingFile();
     VoiceForegroundService service = voiceService;
     if (service != null) service.clearRecoveredManualRecording();
@@ -2871,19 +2889,19 @@ public class MainActivity extends Activity {
         JSONObject turn = turns.optJSONObject(i);
         if (turn == null) continue;
         String turnId = turn.optString("turn_id", "");
-        String user = turn.optString("user", "").trim();
-        String assistant = turn.optString("assistant", "").trim();
+        String user = turn.optString("user", "");
+        String assistant = turn.optString("assistant", "");
         String status = turn.optString("status", "");
         if ("draft".equals(status)) {
           draftTurn = turnId;
-          draftText = turn.optString("recognized_text", user).trim();
+          draftText = turn.optString("recognized_text", user);
           continue;
         }
-        if (!user.isEmpty()) {
+        if (!user.trim().isEmpty()) {
           rendered.append("You\n").append(user).append("\n\n");
           lastUser = turnId;
         }
-        if (!assistant.isEmpty()) {
+        if (!assistant.trim().isEmpty()) {
           rendered.append("Agent\n").append(assistant).append("\n\n");
           lastAssistant = turnId;
         } else if ("answer_error".equals(status) || turn.optBoolean("answer_failed", false)) {
@@ -3016,6 +3034,46 @@ public class MainActivity extends Activity {
 
   private int dp(int value) {
     return Math.round(value * getResources().getDisplayMetrics().density);
+  }
+
+  @Override protected void onSaveInstanceState(Bundle state) {
+    Bundle composer = new Bundle();
+    composer.putString("text", draftEdit.getText().toString());
+    composer.putInt("selection_start", draftEdit.getSelectionStart());
+    composer.putInt("selection_end", draftEdit.getSelectionEnd());
+    composer.putBoolean("human", userClaimedAsrPartial);
+    composer.putBoolean("partial", draftContainsUnstableAsrPartial);
+    composer.putString("turn", pendingTurnId);
+    composer.putString("final_turn", lastFinalAsrTurnId);
+    composer.putString("final_text", lastFinalAsrText);
+    composer.putBoolean("manual_transcribing", manualTranscribePending);
+    composer.putBoolean("manual_submission", manualTranscriptPendingSubmission);
+    state.putBundle("voice_composer_v1", composer);
+    super.onSaveInstanceState(state);
+  }
+
+  private void restoreComposerState(Bundle state) {
+    Bundle composer = state == null ? null : state.getBundle("voice_composer_v1");
+    if (composer == null) return;
+    applyingAsrDraftText = true;
+    try {
+      userClaimedAsrPartial = composer.getBoolean("human");
+      draftContainsUnstableAsrPartial = composer.getBoolean("partial");
+      pendingTurnId = composer.getString("turn", "");
+      lastFinalAsrTurnId = composer.getString("final_turn", "");
+      lastFinalAsrText = composer.getString("final_text", "");
+      manualTranscribePending = composer.getBoolean("manual_transcribing");
+      manualTranscriptPendingSubmission = composer.getBoolean("manual_submission");
+      draftEdit.setText(composer.getString("text", ""));
+      int length = draftEdit.length();
+      int start = Math.max(0, Math.min(length, composer.getInt("selection_start", length)));
+      int end = Math.max(0, Math.min(length, composer.getInt("selection_end", length)));
+      draftEdit.setSelection(start, end);
+      historyPrefs.edit().putBoolean("draft_claimed_v1", userClaimedAsrPartial).apply();
+    } finally {
+      applyingAsrDraftText = false;
+    }
+    updateTranscriptPanel();
   }
 
   @Override protected void onStart() {

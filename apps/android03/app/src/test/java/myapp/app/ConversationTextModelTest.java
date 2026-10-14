@@ -4,6 +4,45 @@ import static org.junit.Assert.*;
 import org.junit.Test;
 
 public class ConversationTextModelTest {
+  @Test public void confirmedMessagesRetainExactWhitespaceAcrossAppendAndRestore() {
+    ConversationTextModel model = new ConversationTextModel();
+    String user = "  first line\n\tindented line  \n";
+    String answer = "\n  exact answer  \n";
+    model.confirmUser("u1", user);
+    assertEquals("You\n" + user + "\n\n", model.confirmedText());
+    model.confirmAssistant("a1", answer);
+    String expected = "You\n" + user + "\n\nAgent\n" + answer + "\n\n";
+    assertEquals(expected, model.confirmedText());
+    ConversationTextModel restored = new ConversationTextModel();
+    restored.replaceHistory(model.confirmedText(), "u1", "a1");
+    assertEquals(expected, restored.render("empty"));
+    restored.confirmUser("u2", "next");
+    assertEquals(expected + "You\nnext\n\n", restored.confirmedText());
+  }
+
+  @Test public void liveMessagesRetainExactWhitespaceThroughConfirmation() {
+    ConversationTextModel model = new ConversationTextModel();
+    String user = "  corrected text  \n";
+    String answer = "\n\tformatted reply  ";
+    model.setLiveUser("u1", user);
+    model.setLiveAssistant("a1", answer);
+    String expected = "You\n" + user + "\n\nAgent\n" + answer + "\n\n";
+    assertEquals(expected, model.render("empty"));
+    model.confirmUser("u1", user);
+    model.confirmAssistant("a1", answer);
+    assertEquals(expected, model.render("empty"));
+  }
+
+  @Test public void whitespaceOnlyMessagesDoNotCreateConversationEntries() {
+    ConversationTextModel model = new ConversationTextModel();
+    model.setLiveUser("u1", " \n\t ");
+    model.setLiveAssistant("a1", " \n\t ");
+    assertEquals("empty", model.render("empty"));
+    model.confirmUser("u1", " \n\t ");
+    model.confirmAssistant("a1", " \n\t ");
+    assertEquals("", model.confirmedText());
+  }
+
   @Test public void liveUserTextIsReplacedInPlaceUntilSubmitted() {
     ConversationTextModel model = new ConversationTextModel();
     model.replaceHistory("Agent\nEarlier answer", "", "a0");

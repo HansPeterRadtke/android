@@ -135,6 +135,94 @@ public class OutgoingMessageUiTest {
     }
   }
 
+  @Test public void finalizedManualRecordingClearsOnlyAfterItsExactSubmissionAck() {
+    Fixture transport = new Fixture();
+    try (ActivityScenario<MainActivity> screen = ActivityScenario.launch(MainActivity.class)) {
+      screen.onActivity(activity -> {
+        transport.attach(activity);
+        byte[] pcm = new byte[32000];
+        ((java.io.ByteArrayOutputStream) get(activity, "manualRecordingBuffer")).write(pcm, 0, pcm.length);
+        set(activity, "manualRecordingAvailable", true);
+        set(activity, "manualTranscriptPendingSubmission", true);
+        set(activity, "pendingTurnId", "manual-recording-turn");
+        set(activity, "lastFinalAsrTurnId", "manual-recording-turn");
+        ((VoicePcmPlayerView) activity.findViewById(R.id.voice_user_player)).setStaticPcm(pcm);
+        editor(activity).setText("  Exact corrected recording text  ");
+        activity.findViewById(R.id.voice_send).performClick();
+      });
+      await(() -> transport.messages.size() == 1, "Manual submission did not send");
+      JSONObject sent = transport.messages.get(0);
+      assertEquals("submit", sent.optString("type"));
+      assertEquals("manual-recording-turn", sent.optString("turn_id"));
+      assertEquals("  Exact corrected recording text  ", sent.optString("text"));
+      screen.onActivity(activity -> {
+        try {
+          JSONObject older = new JSONObject().put("type", "turn").put("event", "submitted")
+              .put("turn_id", "older-submission").put("text", "Older text");
+          invoke(activity, "handleWsJson", new Class<?>[]{String.class, long.class}, older.toString(), transport.generation);
+        } catch (Exception failure) { throw new AssertionError(failure); }
+        assertTrue((Boolean) get(activity, "manualRecordingAvailable"));
+        assertTrue((Boolean) get(activity, "manualTranscriptPendingSubmission"));
+        assertEquals(32000, ((java.io.ByteArrayOutputStream) get(activity, "manualRecordingBuffer")).size());
+        transport.acknowledge(activity, sent);
+        assertFalse((Boolean) get(activity, "manualRecordingAvailable"));
+        assertFalse((Boolean) get(activity, "manualTranscriptPendingSubmission"));
+        assertEquals(0, ((java.io.ByteArrayOutputStream) get(activity, "manualRecordingBuffer")).size());
+        assertEquals("", editor(activity).getText().toString());
+        assertFalse(((VoicePcmPlayerView) activity.findViewById(R.id.voice_user_player)).hasAudio());
+      });
+    }
+  }
+
+  @Test public void newArchiveSelectionSurvivesPreviousRecordingsAcknowledgement() throws Exception {
+    android.content.Context context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().getTargetContext();
+    java.io.File directory = new java.io.File(context.getFilesDir(), "voice_recordings");
+    assertTrue(directory.isDirectory() || directory.mkdirs());
+    java.io.File archive = new java.io.File(directory, "ack-selection-test.pcm");
+    try (java.io.FileOutputStream output = new java.io.FileOutputStream(archive)) { output.write(new byte[64000]); }
+    CountDownLatch reading = new CountDownLatch(1), release = new CountDownLatch(1);
+    java.io.File delayed = new java.io.File(archive.getPath()) {
+      @Override public long length() {
+        reading.countDown();
+        try { if (!release.await(120, TimeUnit.SECONDS)) throw new AssertionError("Selection read never released"); }
+        catch (InterruptedException failure) { throw new AssertionError(failure); }
+        return super.length();
+      }
+    };
+    Fixture transport = new Fixture();
+    try (ActivityScenario<MainActivity> screen = ActivityScenario.launch(MainActivity.class)) {
+      screen.onActivity(activity -> {
+        transport.attach(activity);
+        byte[] pcm = new byte[32000];
+        ((java.io.ByteArrayOutputStream) get(activity, "manualRecordingBuffer")).write(pcm, 0, pcm.length);
+        set(activity, "manualRecordingAvailable", true);
+        set(activity, "manualTranscriptPendingSubmission", true);
+        set(activity, "pendingTurnId", "previous-recording");
+        set(activity, "lastFinalAsrTurnId", "previous-recording");
+        ((VoicePcmPlayerView) activity.findViewById(R.id.voice_user_player)).setStaticPcm(pcm);
+        editor(activity).setText("Previous recording text");
+        activity.findViewById(R.id.voice_send).performClick();
+      });
+      await(() -> transport.messages.size() == 1, "Previous recording was not submitted");
+      screen.onActivity(activity -> activity.openSavedRecording(delayed));
+      assertTrue(reading.await(30, TimeUnit.SECONDS));
+      screen.onActivity(activity -> transport.acknowledge(activity, transport.messages.get(0)));
+      release.countDown();
+      await(() -> {
+        AtomicInteger size = new AtomicInteger();
+        screen.onActivity(activity -> size.set(((java.io.ByteArrayOutputStream) get(activity, "manualRecordingBuffer")).size()));
+        return size.get() == 64000;
+      }, "Old ACK invalidated the pending archive selection");
+      screen.onActivity(activity -> {
+        assertTrue((Boolean) get(activity, "manualRecordingAvailable"));
+        assertEquals(archive.getName(), activity.getSharedPreferences("voice_agent_history", android.content.Context.MODE_PRIVATE)
+            .getString("manual_archive_selection_v1", ""));
+        assertTrue(((VoicePcmPlayerView) activity.findViewById(R.id.voice_user_player)).hasAudio());
+        assertTrue(activity.findViewById(R.id.voice_transcribe).isEnabled());
+      });
+    } finally { release.countDown(); archive.delete(); }
+  }
+
   @Test public void savedSendContinuesAfterTheScreenClosesAndAckReplaysBeforeRetry() throws Exception {
     android.content.Context app = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().getTargetContext();
     VoiceForegroundService service = ((VoiceForegroundService.LocalBinder) retainedService.bindService(
@@ -262,7 +350,7 @@ public class OutgoingMessageUiTest {
     void acknowledge(MainActivity activity, JSONObject sent) {
       try {
         JSONObject ack = new JSONObject().put("type", "turn").put("event", "submitted")
-            .put("turn_id", "turn-client-" + sent.getString("client_request_id"))
+            .put("turn_id", sent.optString("turn_id", "turn-client-" + sent.optString("client_request_id")))
             .put("text", sent.getString("text"));
         invoke(activity, "handleWsJson", new Class<?>[]{String.class, long.class}, ack.toString(), generation);
       } catch (Exception failure) { throw new AssertionError(failure); }

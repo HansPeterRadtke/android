@@ -40,7 +40,7 @@ Interaction rules:
 - Fully manual mode records locally until Stop, exposes the own-audio player, then allows Transcribe, edit, and Send.
 - Live transcription/manual-send mode continuously updates the current editor but never sends until Send.
 - Continuous mode transcribes and sends finalized turns automatically while preserving the editor and manual controls.
-- Partial transcription may update the current editor but never becomes agent input. Final verified text replaces partial text in place. User edits replace it in place. Only the retained submitted text enters history and correction learning.
+- Partial transcription may update the current editor but never becomes agent input automatically. Explicit Send confirms the exact visible text; ordinary recognition still waits for final verification and semantic turn completion. Final verified text replaces partial text in place, unless the user has taken ownership by editing it. Only the retained submitted text enters history and correction learning.
 - Agent messages are not user-editable in normal mode.
 - Manual player Pause/Stop is immediate. Automatic barge-in requires semantic interruption intent; VAD/volume alone never cancels speech.
 - Reconnection preserves conversation and the current unsent message/recording. Stale sockets cannot mutate current UI state.
@@ -62,7 +62,7 @@ Reject the build if any of these are true:
 - The app claims voice Ready when microphone permission or a required voice dependency is unavailable.
 - Typed text is disabled because microphone/STT is unavailable.
 - Automatic send cannot be disabled.
-- A partial transcript reaches the agent.
+- An unconfirmed partial transcript reaches the agent automatically.
 - Loud noise/backchannel alone cancels agent speech.
 - Emulator-only evidence is used to claim the physical-phone voice journey works.
 

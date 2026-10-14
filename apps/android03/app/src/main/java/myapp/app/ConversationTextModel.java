@@ -22,12 +22,12 @@ final class ConversationTextModel {
 
   synchronized void setLiveUser(String turnId, String text) {
     liveUserTurnId = clean(turnId);
-    liveUserText = clean(text);
+    liveUserText = messageText(text);
   }
 
   synchronized void setLiveAssistant(String turnId, String text) {
     liveAssistantTurnId = clean(turnId);
-    liveAssistantText = clean(text);
+    liveAssistantText = messageText(text);
   }
 
   synchronized void clearLiveUser() {
@@ -42,7 +42,7 @@ final class ConversationTextModel {
 
   synchronized void confirmUser(String turnId, String text) {
     String id = clean(turnId);
-    String value = clean(text);
+    String value = messageText(text);
     if (!value.isEmpty() && (id.isEmpty() || !id.equals(lastConfirmedUserTurnId))) {
       confirmed = append(confirmed, "You", value);
       lastConfirmedUserTurnId = id;
@@ -52,7 +52,7 @@ final class ConversationTextModel {
 
   synchronized void confirmAssistant(String turnId, String text) {
     String id = clean(turnId);
-    String value = clean(text);
+    String value = messageText(text);
     if (!value.isEmpty() && (id.isEmpty() || !id.equals(lastConfirmedAssistantTurnId))) {
       confirmed = append(confirmed, "Agent", value);
       lastConfirmedAssistantTurnId = id;
@@ -91,8 +91,14 @@ final class ConversationTextModel {
   }
 
   private static String normalizeBlock(String value) {
-    String clean = value == null ? "" : value.trim();
-    return clean.isEmpty() ? "" : clean + "\n\n";
+    String block = messageText(value);
+    return block.isEmpty() || block.endsWith("\n\n") ? block : block + "\n\n";
+  }
+
+  private static String messageText(String value) {
+    // Whitespace is only an emptiness check. Indentation and trailing spaces
+    // belong to the submitted message, including after later appends/reloads.
+    return value == null || value.trim().isEmpty() ? "" : value;
   }
 
   private static String clean(String value) {
