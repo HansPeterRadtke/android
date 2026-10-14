@@ -1,4 +1,6 @@
 <resources>
+    <fraction name="voice_feedback_max_fraction">35%</fraction>
+    <dimen name="voice_feedback_min_height">96dp</dimen>
     <fraction name="voice_controls_max_fraction">45%</fraction>
     <dimen name="voice_controls_min_height">160dp</dimen>
     <fraction name="voice_lower_controls_max_fraction">52%</fraction>

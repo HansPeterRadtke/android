@@ -51,6 +51,7 @@ Layout and hierarchy:
 - Settings and diagnostics must not consume permanent first-view rows.
 - Primary touch targets are at least forty-eight dp and text uses scalable units. No fixed-height important text.
 - At two hundred percent font scale and supported resizing, readiness, conversation, current editor, microphone and Send remain reachable.
+- Readiness and background-work feedback have a bounded, scrollable height when their content is long. They cannot push the conversation or composer out of the window. Newly changed blocking questions are brought into view; unchanged snapshots do not reset the user's feedback scroll position. The preview remains an entry point to the complete exact question inventory.
 
 ## Rejection gates
 

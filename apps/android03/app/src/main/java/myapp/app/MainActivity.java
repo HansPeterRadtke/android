@@ -181,6 +181,8 @@ public class MainActivity extends Activity {
   private TextView workerView;
   private ProgressBar workerProgressView;
   private TextView questionView;
+  private ScrollView feedbackScroll;
+  private String blockingQuestionPreview = "";
   private TextView conversationView;
   private ScrollView conversationScrollView;
   private MaterialButton latestButton;
@@ -331,6 +333,21 @@ public class MainActivity extends Activity {
     }
   }
 
+  private final class FeedbackScrollView extends ScrollView {
+    FeedbackScrollView(Context context) { super(context); }
+
+    @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+      int windowHeight = Math.round(getResources().getConfiguration().screenHeightDp
+          * getResources().getDisplayMetrics().density);
+      int minimum = getResources().getDimensionPixelSize(R.dimen.voice_feedback_min_height);
+      float fraction = getResources().getFraction(R.fraction.voice_feedback_max_fraction, 1, 1);
+      int cap = Math.max(minimum, Math.round(windowHeight * fraction));
+      if (MeasureSpec.getMode(heightMeasureSpec) != MeasureSpec.UNSPECIFIED)
+        cap = Math.min(cap, MeasureSpec.getSize(heightMeasureSpec));
+      super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(cap, MeasureSpec.AT_MOST));
+    }
+  }
+
   @Override protected void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
     appConfig = VoiceAppConfig.from(this);
@@ -397,6 +414,15 @@ public class MainActivity extends Activity {
     root.setOrientation(LinearLayout.VERTICAL);
     root.setPadding(dp(14), dp(10), dp(14), dp(10));
 
+    // Long readiness/worker/question feedback must remain inspectable without
+    // consuming the conversation and composer on short or large-text windows.
+    LinearLayout feedback = new LinearLayout(this);
+    feedback.setOrientation(LinearLayout.VERTICAL);
+    feedbackScroll = new FeedbackScrollView(this);
+    feedbackScroll.setFillViewport(false);
+    feedbackScroll.addView(feedback, fullWrap());
+    root.addView(feedbackScroll, fullWrap());
+
     LinearLayout header = new LinearLayout(this);
     header.setOrientation(LinearLayout.HORIZONTAL);
     header.setGravity(Gravity.CENTER_VERTICAL);
@@ -431,40 +457,42 @@ public class MainActivity extends Activity {
     LinearLayout.LayoutParams settingsParams = new LinearLayout.LayoutParams(dp(56), dp(48));
     settingsParams.setMarginStart(dp(8));
     header.addView(settingsButton, settingsParams);
-    root.addView(header, fullWrap());
+    feedback.addView(header, fullWrap());
 
     componentHealthView = new TextView(this);
     componentHealthView.setId(R.id.voice_component_health);
     componentHealthView.setTextSize(13);
     componentHealthView.setPadding(0, dp(3), 0, dp(5));
     componentHealthView.setVisibility(View.GONE);
-    root.addView(componentHealthView, fullWrap());
+    feedback.addView(componentHealthView, fullWrap());
 
     workerView = new TextView(this);
     workerView.setId(R.id.voice_worker_status);
     workerView.setTextSize(14);
     workerView.setPadding(dp(10), dp(6), dp(10), dp(6));
     workerView.setVisibility(View.GONE);
-    root.addView(workerView, fullWrap());
+    feedback.addView(workerView, fullWrap());
     workerProgressView = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
     workerProgressView.setId(R.id.voice_worker_progress);
     workerProgressView.setMax(100);
     workerProgressView.setContentDescription(getString(R.string.worker_progress_description));
     workerProgressView.setVisibility(View.GONE);
-    root.addView(workerProgressView, fullWrap());
+    feedback.addView(workerProgressView, fullWrap());
 
     questionView = new TextView(this);
     questionView.setId(R.id.voice_question_status);
     questionView.setTextSize(14);
     questionView.setPadding(dp(10), dp(6), dp(10), dp(6));
     questionView.setMinHeight(dp(48));
+    questionView.setMaxLines(3);
+    questionView.setEllipsize(android.text.TextUtils.TruncateAt.END);
     questionView.setGravity(Gravity.CENTER_VERTICAL);
     questionView.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
     questionView.setClickable(true);
     questionView.setFocusable(true);
     questionView.setOnClickListener(v -> showWorkerQuestions());
     questionView.setVisibility(View.GONE);
-    root.addView(questionView, fullWrap());
+    feedback.addView(questionView, fullWrap());
 
     conversationView = new TextView(this);
     conversationView.setId(R.id.voice_conversation);
@@ -512,13 +540,13 @@ public class MainActivity extends Activity {
     transcriptPanel.setOrientation(LinearLayout.VERTICAL);
     TextInputLayout transcriptInput = new TextInputLayout(this);
     transcriptInput.setHint(R.string.recognized_text);
+    transcriptInput.setPlaceholderText(getString(R.string.transcript_hint));
     draftEdit = new TextInputEditText(transcriptInput.getContext());
     draftEdit.setId(R.id.voice_draft);
     // Save text together with its ASR/human provenance and turn identity below.
     // Framework-only restoration invokes TextWatcher as if a human had edited
     // the field and otherwise promotes provisional ASR into a retained draft.
     draftEdit.setSaveEnabled(false);
-    draftEdit.setHint(R.string.transcript_hint);
     draftEdit.setTextSize(17);
     draftEdit.setInputType(InputType.TYPE_CLASS_TEXT
         | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
@@ -1785,6 +1813,10 @@ public class MainActivity extends Activity {
       workerQuestionInventoryJson = exact == null ? "[]" : exact.toString();
     }
     String questionLabel = questionOverviewLabel(openQuestions, blockingQuestions);
+    boolean revealBlockingQuestion = blockingQuestions > 0
+        && !questionLabel.equals(blockingQuestionPreview);
+    boolean returnToReadiness = blockingQuestions == 0 && !blockingQuestionPreview.isEmpty();
+    blockingQuestionPreview = blockingQuestions > 0 ? questionLabel : "";
     runOnUiThread(() -> {
       workerView.setText(label);
       workerView.setVisibility(visible ? View.VISIBLE : View.GONE);
@@ -1798,12 +1830,23 @@ public class MainActivity extends Activity {
       questionView.setContentDescription(questionLabel);
       questionView.setTypeface(Typeface.DEFAULT, blockingQuestions > 0 ? Typeface.BOLD : Typeface.NORMAL);
       questionView.setVisibility(questionsVisible ? View.VISIBLE : View.GONE);
+      if (revealBlockingQuestion) {
+        android.view.ViewTreeObserver.OnPreDrawListener[] reveal = new android.view.ViewTreeObserver.OnPreDrawListener[1];
+        reveal[0] = () -> {
+          if (feedbackScroll.getViewTreeObserver().isAlive())
+            feedbackScroll.getViewTreeObserver().removeOnPreDrawListener(reveal[0]);
+          feedbackScroll.scrollTo(0, questionView.getTop());
+          return true;
+        };
+        feedbackScroll.getViewTreeObserver().addOnPreDrawListener(reveal[0]);
+      } else if (returnToReadiness) feedbackScroll.scrollTo(0, 0);
     });
   }
 
   private String questionOverviewLabel(int openQuestions, int blockingQuestions) {
     String base = blockingQuestions > 0
-        ? getString(R.string.background_questions_with_blocking, openQuestions, blockingQuestions)
+        ? getResources().getQuantityString(R.plurals.background_questions_with_blocking,
+            openQuestions, openQuestions, blockingQuestions)
         : getResources().getQuantityString(
             R.plurals.background_questions_available, openQuestions, openQuestions);
     if (!workerQuestionInventoryComplete) {
@@ -1817,7 +1860,7 @@ public class MainActivity extends Activity {
         if (!exact.isEmpty()) {
           int limit = getResources().getInteger(R.integer.worker_question_preview_chars);
           if (exact.length() > limit) exact = exact.substring(0, limit - 1).trim() + "…";
-          return base + " " + getString(R.string.worker_questions_top_question, exact);
+          return base + "\n" + getString(R.string.worker_questions_top_question, exact);
         }
       }
     } catch (Exception ignored) {}

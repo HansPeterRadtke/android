@@ -27,7 +27,19 @@ import org.junit.runner.RunWith;
 
 @RunWith(AndroidJUnit4.class)
 public class MainActivityUiTest {
-  @org.junit.Before public void resetScreenFixture() { VoiceUiTestState.reset(); }
+  @org.junit.Before public void resetScreenFixture() {
+    VoiceUiTestState.reset();
+    if ("1".equals(androidx.test.platform.app.InstrumentationRegistry.getArguments().getString("expectLandscape"))) {
+      assertTrue(androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+          .getUiAutomation().setRotation(android.app.UiAutomation.ROTATION_FREEZE_90));
+    }
+  }
+  @org.junit.After public void restoreTestRotation() {
+    if ("1".equals(androidx.test.platform.app.InstrumentationRegistry.getArguments().getString("expectLandscape"))) {
+      androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+          .getUiAutomation().setRotation(android.app.UiAutomation.ROTATION_UNFREEZE);
+    }
+  }
   @Rule public GrantPermissionRule permissions = GrantPermissionRule.grant(
       Manifest.permission.RECORD_AUDIO, Manifest.permission.BLUETOOTH_CONNECT);
 
@@ -80,6 +92,92 @@ public class MainActivityUiTest {
             assertTrue("touch target too short: " + id, view.getHeight() >= minimum);
           }
         }
+      });
+    }
+  }
+
+  @Test public void workerQuestionKeepsConversationAndComposerReachable() throws Exception {
+    java.util.concurrent.CountDownLatch laidOut = new java.util.concurrent.CountDownLatch(1);
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      if ("1".equals(androidx.test.platform.app.InstrumentationRegistry.getArguments().getString("expectLandscape"))) {
+        scenario.onActivity(screen -> screen.setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE));
+        long deadline = android.os.SystemClock.elapsedRealtime() + 30000;
+        java.util.concurrent.atomic.AtomicBoolean landscape = new java.util.concurrent.atomic.AtomicBoolean();
+        do {
+          scenario.onActivity(screen -> landscape.set(screen.getResources().getConfiguration().orientation
+              == android.content.res.Configuration.ORIENTATION_LANDSCAPE));
+          if (landscape.get()) break;
+          Thread.sleep(50);
+        } while (android.os.SystemClock.elapsedRealtime() < deadline);
+        assertTrue("Android never entered requested landscape orientation", landscape.get());
+      }
+      scenario.onActivity(screen -> {
+        try {
+          screen.handleWorkerEvent(new JSONObject()
+              .put("type", "worker").put("event", "snapshot").put("sequence", 0)
+              .put("worker_id", "swaag-orchestrator").put("status", "input_required")
+              .put("message", "A background worker needs your deployment choice before continuing.")
+              .put("question_inventory_complete", true)
+              .put("questions", new JSONArray().put(new JSONObject()
+                  .put("question_id", "layout-question").put("worker_id", "deployment-worker")
+                  .put("question", "Which deployment target should I use for the reviewed application changes?")
+                  .put("criticality", "blocking").put("importance", "critical")))
+              .put("semantic_status", new JSONObject().put("active_workers", 1)
+                  .put("open_questions", 1).put("blocking_questions", 1)
+                  .put("major_or_critical_questions", 1)));
+          View root = screen.findViewById(R.id.voice_draft).getRootView();
+          android.view.ViewTreeObserver.OnGlobalLayoutListener[] listener = new android.view.ViewTreeObserver.OnGlobalLayoutListener[1];
+          listener[0] = () -> {
+            root.getViewTreeObserver().removeOnGlobalLayoutListener(listener[0]);
+            laidOut.countDown();
+          };
+          root.getViewTreeObserver().addOnGlobalLayoutListener(listener[0]);
+        } catch (Exception failure) { throw new AssertionError(failure); }
+      });
+      assertTrue("Worker question never reached layout", laidOut.await(60, java.util.concurrent.TimeUnit.SECONDS));
+      if ("1".equals(androidx.test.platform.app.InstrumentationRegistry.getArguments().getString("captureLayout"))) {
+        android.app.Instrumentation instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation();
+        android.graphics.Bitmap snapshot = instrumentation.getUiAutomation().takeScreenshot();
+        if (snapshot == null) {
+          android.graphics.Bitmap[] rendered = new android.graphics.Bitmap[1];
+          scenario.onActivity(screen -> {
+            View root = screen.findViewById(R.id.voice_draft).getRootView();
+            rendered[0] = android.graphics.Bitmap.createBitmap(root.getWidth(), root.getHeight(), android.graphics.Bitmap.Config.ARGB_8888);
+            root.draw(new android.graphics.Canvas(rendered[0]));
+          });
+          snapshot = rendered[0];
+        }
+        if (snapshot != null) {
+          try (java.io.FileOutputStream output = instrumentation.getTargetContext().openFileOutput("worker-layout.png", android.content.Context.MODE_PRIVATE)) {
+            snapshot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output);
+          } finally { snapshot.recycle(); }
+        }
+      }
+      scenario.onActivity(screen -> {
+        android.os.Bundle geometry = new android.os.Bundle();
+        geometry.putString("voice_layout_configuration", screen.getResources().getConfiguration().toString());
+        androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().sendStatus(2, geometry);
+        if ("1".equals(androidx.test.platform.app.InstrumentationRegistry.getArguments().getString("expectLandscape"))) {
+          assertEquals("Landscape acceptance ran in another orientation",
+              android.content.res.Configuration.ORIENTATION_LANDSCAPE,
+              screen.getResources().getConfiguration().orientation);
+          assertTrue("Landscape acceptance did not reach the wide layout",
+              screen.getResources().getConfiguration().screenWidthDp >= 600);
+        }
+        int minimum = Math.round(48f * screen.getResources().getDisplayMetrics().density);
+        for (int id : new int[]{R.id.voice_conversation, R.id.voice_draft,
+            R.id.voice_start_stop, R.id.voice_send}) {
+          View view = screen.findViewById(id);
+          Rect visible = new Rect();
+          String name = screen.getResources().getResourceEntryName(id);
+          assertTrue("Primary view is outside the window: " + name, view.getGlobalVisibleRect(visible));
+          assertTrue("Primary view is clipped below a usable height: " + name + " " + visible,
+              visible.height() >= minimum);
+          assertTrue("Primary view is clipped below a usable width: " + name + " " + visible,
+              visible.width() >= minimum);
+        }
+        assertTrue(screen.workerQuestionDetailsText().contains(
+            "Which deployment target should I use for the reviewed application changes?"));
       });
     }
   }
