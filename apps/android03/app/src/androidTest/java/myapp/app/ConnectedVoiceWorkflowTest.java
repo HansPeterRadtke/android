@@ -27,6 +27,8 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 import okhttp3.OkHttpClient;
+import okhttp3.WebSocket;
+import okio.ByteString;
 import org.json.JSONObject;
 import org.junit.Assume;
 import org.junit.Rule;
@@ -46,6 +48,7 @@ public class ConnectedVoiceWorkflowTest {
         && "1".equals(InstrumentationRegistry.getArguments().getString("voiceChain")));
     VoiceUiTestState.reset();
     Context app = InstrumentationRegistry.getInstrumentation().getTargetContext();
+    boolean automatic = "1".equals(InstrumentationRegistry.getArguments().getString("voiceChainAutomatic"));
     boolean background = "1".equals(InstrumentationRegistry.getArguments().getString("voiceChainBackground"));
     File fixture = new File(app.getFilesDir(), "voice-chain");
     File recording = new File(fixture, "input.pcm");
@@ -55,8 +58,8 @@ public class ConnectedVoiceWorkflowTest {
     String conversation = "android-chain-" + UUID.randomUUID();
     assertTrue(app.getSharedPreferences("voice_agent_history", Context.MODE_PRIVATE).edit()
         .putString("conversation_id_v2", conversation)
-        .putBoolean("transcribe_automatically_v1", false)
-        .putBoolean("send_automatically_v3", false).commit());
+        .putBoolean("transcribe_automatically_v1", automatic)
+        .putBoolean("send_automatically_v3", automatic).commit());
 
     KeyStore certificates = KeyStore.getInstance(KeyStore.getDefaultType());
     certificates.load(null);
@@ -83,22 +86,48 @@ public class ConnectedVoiceWorkflowTest {
       screen.onActivity(activity -> {
         configure(get(activity, "appConfig"));
         set(activity, "wsClient", client);
-        activity.restoreManualRecording(recording);
+        if (!automatic) activity.restoreManualRecording(recording);
       });
       awaitScreen(screen, activity -> (Boolean) get(activity, "serverHelloReady")
-          && (Boolean) get(activity, "manualRecordingAvailable"), 60000,
+          && (automatic || (Boolean) get(activity, "manualRecordingAvailable")), 60000,
           "Android never received hello and recovered the recording");
-      screen.onActivity(activity -> assertTrue(activity.findViewById(R.id.voice_transcribe).performClick()));
-      awaitScreen(screen, activity -> !(Boolean) get(activity, "manualTranscribePending")
-          && ((EditText) activity.findViewById(R.id.voice_draft)).getText().length() > 0,
-          90000, "Real ASR did not reach the editable draft");
+      if (automatic) {
+        // Exercise the live PCM uplink and real automatic proposal/commit path.
+        // Only the microphone source is synthetic; no ASR or server event is injected.
+        WebSocket socket = (WebSocket) get(service, "networkSocket");
+        try (FileInputStream input = new FileInputStream(recording)) {
+          byte[] frame = new byte[3200];
+          int count;
+          while ((count = input.read(frame)) > 0) {
+            assertTrue("PCM uplink rejected", socket.send(ByteString.of(frame, 0, count)));
+            SystemClock.sleep(count * 1000L / 32000L);
+          }
+        }
+        assertTrue(service.sendText(new JSONObject().put("type", "end_utterance")
+            .put("reason", "capture_stopped").toString()));
+      } else {
+        screen.onActivity(activity -> assertTrue(activity.findViewById(R.id.voice_transcribe).performClick()));
+      }
       AtomicReference<String> recognized = new AtomicReference<>();
-      screen.onActivity(activity -> {
-        recognized.set(((EditText) activity.findViewById(R.id.voice_draft)).getText().toString());
-        assertTrue(recognized.get(), recognized.get().toLowerCase(java.util.Locale.ROOT).contains("hear me"));
-        assertTrue(recognized.get(), recognized.get().toLowerCase(java.util.Locale.ROOT).contains("hello"));
-        assertTrue(activity.findViewById(R.id.voice_send).performClick());
-      });
+      if (automatic) {
+        // Automatic ACK can clear a transient ASR draft before the UI poll.
+        // Assert the exact fixture recognition in durable, acknowledged history.
+        recognized.set("Can you hear me? Please say hello.");
+      } else {
+        awaitScreen(screen, activity -> !(Boolean) get(activity, "manualTranscribePending")
+            && ((EditText) activity.findViewById(R.id.voice_draft)).getText().length() > 0,
+            90000, "Real ASR did not reach the editable draft");
+        screen.onActivity(activity -> {
+          recognized.set(((EditText) activity.findViewById(R.id.voice_draft)).getText().toString());
+          assertTrue(recognized.get(), recognized.get().toLowerCase(java.util.Locale.ROOT).contains("hear me"));
+          assertTrue(recognized.get(), recognized.get().toLowerCase(java.util.Locale.ROOT).contains("hello"));
+          assertTrue(activity.findViewById(R.id.voice_send).performClick());
+        });
+      }
+      awaitScreen(screen, activity -> ((EditText) activity.findViewById(R.id.voice_draft)).getText().length() == 0
+          && ((TextView) activity.findViewById(R.id.voice_conversation)).getText().toString().contains(recognized.get()),
+          15000, "Submitted speech stayed in the editing window or never reached acknowledged history");
+      long acknowledgedMs = SystemClock.elapsedRealtime() - started;
       if (background) {
         screen.moveToState(androidx.lifecycle.Lifecycle.State.CREATED);
         // Remove the test's binding too: only the app's started foreground
@@ -135,6 +164,7 @@ public class ConnectedVoiceWorkflowTest {
           .put("rendered_ms", playback.currentMs()).put("available_ms", playback.availableMs())
           .put("elapsed_ms", SystemClock.elapsedRealtime() - started)
           .put("background_without_test_binding", background)
+          .put("automatic_send", automatic).put("acknowledged_ms", acknowledgedMs)
           .put("scope", "Synthetic speech, actual Android UI/service, live ASR/SWAAG/TTS, emulator AudioTrack");
       try (FileOutputStream output = new FileOutputStream(new File(fixture, "result.json"))) {
         output.write(result.toString(2).getBytes(StandardCharsets.UTF_8));
