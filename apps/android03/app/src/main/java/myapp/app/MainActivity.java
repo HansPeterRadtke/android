@@ -104,7 +104,7 @@ public class MainActivity extends Activity {
   private enum ForegroundMode {
     READY, TEXT_ONLY, CONNECTING, VERIFYING, LISTENING, RECORDING_LOCAL, TRANSCRIBING,
     THINKING, QUEUED, BUFFERING, SPEAKING, RECONNECTING, UNAVAILABLE, PERMISSION,
-    MICROPHONE_ERROR, REVIEW, ANSWER_ERROR, FINISHING
+    MICROPHONE_ERROR, REVIEW, CONTINUING, ANSWER_ERROR, FINISHING
   }
 
   private VoiceAppConfig appConfig;
@@ -202,6 +202,7 @@ public class MainActivity extends Activity {
   private MaterialButton startButton;
   private MaterialButton settingsButton;
   private MaterialButton diagnosticsButton;
+  private MaterialCheckBox automaticSendControl;
 
   private final List<AudioInputOption> microphoneInputs = new ArrayList<>();
   private volatile int selectedDeviceId = AudioInputOption.DEFAULT_DEVICE_ID;
@@ -538,6 +539,16 @@ public class MainActivity extends Activity {
     transcriptPanel = new LinearLayout(this);
     transcriptPanel.setId(R.id.voice_transcript_panel);
     transcriptPanel.setOrientation(LinearLayout.VERTICAL);
+    automaticSendControl = new MaterialCheckBox(this);
+    automaticSendControl.setId(R.id.voice_auto_send_main);
+    automaticSendControl.setText(R.string.send_automatically);
+    automaticSendControl.setMinHeight(dp(48));
+    automaticSendControl.setChecked(autoSend);
+    automaticSendControl.setEnabled(autoTranscribe);
+    automaticSendControl.setOnCheckedChangeListener((button, checked) -> {
+      if (checked != autoSend) setAutomaticSending(checked);
+    });
+    transcriptPanel.addView(automaticSendControl, fullWrap());
     TextInputLayout transcriptInput = new TextInputLayout(this);
     transcriptInput.setHint(R.string.recognized_text);
     transcriptInput.setPlaceholderText(getString(R.string.transcript_hint));
@@ -1013,13 +1024,19 @@ public class MainActivity extends Activity {
           if (!userClaimedAsrPartial && pendingTurnId.equals(lastFinalAsrTurnId)) {
             setAsrDraftText(lastFinalAsrText, false);
           }
-          setForegroundMode(ForegroundMode.REVIEW, null);
+          String reason = obj.optString("reason", "");
+          setForegroundMode(ForegroundMode.REVIEW,
+              "turn_classifier_unavailable".equals(reason) ? getString(R.string.turn_classifier_unavailable)
+              : "asr_verification_degraded".equals(reason) ? getString(R.string.transcription_needs_review)
+              : null);
           updateTranscriptPanel();
         } else if ("playback_completed".equals(state)) {
           if(foregroundMode==ForegroundMode.SPEAKING || foregroundMode==ForegroundMode.BUFFERING)
             showListeningState();
         } else if ("listening".equals(state)) {
-          if (pendingTurnId.isEmpty() && foregroundMode != ForegroundMode.ANSWER_ERROR)
+          if ("turn_incomplete".equals(obj.optString("reason")) && !pendingTurnId.isEmpty())
+            setForegroundMode(ForegroundMode.CONTINUING, null);
+          else if (pendingTurnId.isEmpty() && foregroundMode != ForegroundMode.ANSWER_ERROR)
             showListeningState();
         }
       } else if ("asr".equals(type)) {
@@ -1177,6 +1194,9 @@ public class MainActivity extends Activity {
       state.put("build", buildLabel());
       state.put("conversation", conversationId);
       state.put("auto_transcribe", autoTranscribe);
+      state.put("auto_send_requested", autoSend);
+      state.put("auto_commit_ready", serverCanCommit);
+      state.put("capture_failed", voiceService != null && !voiceService.captureError().isEmpty());
       state.put("auto_send", VoiceAutomationPolicy.effectiveAutoSend(autoTranscribe, autoSend)
           && serverCanCommit
           && (voiceService==null || voiceService.captureError().isEmpty()));
@@ -1537,7 +1557,7 @@ public class MainActivity extends Activity {
     automatic.setId(R.id.voice_auto_send);
     automatic.setText(R.string.send_automatically);
     automatic.setChecked(autoSend);
-    automatic.setEnabled(autoTranscribe && !running.get());
+    automatic.setEnabled(autoTranscribe);
     automatic.setMinHeight(dp(48));
     content.addView(automatic, fullWrap());
 
@@ -1637,7 +1657,7 @@ public class MainActivity extends Activity {
       autoTranscribe = checked;
       if (!checked) autoSend = false;
       automatic.setChecked(autoSend);
-      automatic.setEnabled(checked && !running.get());
+      automatic.setEnabled(checked);
       historyPrefs.edit()
           .putBoolean(AUTO_TRANSCRIBE_PREF_KEY, autoTranscribe)
           .putBoolean(AUTO_SEND_PREF_KEY, autoSend)
@@ -1646,12 +1666,8 @@ public class MainActivity extends Activity {
       updateTranscriptPanel();
     });
     automatic.setOnCheckedChangeListener((button, checked) -> {
-      if (running.get()) return;
-      autoSend = VoiceAutomationPolicy.effectiveAutoSend(autoTranscribe, checked);
+      setAutomaticSending(checked);
       if (automatic.isChecked() != autoSend) automatic.setChecked(autoSend);
-      historyPrefs.edit().putBoolean(AUTO_SEND_PREF_KEY, autoSend).apply();
-      sendClientState();
-      updateTranscriptPanel();
     });
     cues.setOnCheckedChangeListener((button, checked) -> {
       voiceActivityCues = checked;
@@ -2444,6 +2460,16 @@ public class MainActivity extends Activity {
     }
   }
 
+  private void setAutomaticSending(boolean requested) {
+    autoSend = VoiceAutomationPolicy.effectiveAutoSend(autoTranscribe, requested);
+    historyPrefs.edit().putBoolean(AUTO_SEND_PREF_KEY, autoSend).apply();
+    sendClientState();
+    updateTranscriptPanel();
+    updateServiceHealth();
+    // Changing future automation never submits or clears an existing draft.
+    // A retained or edited message still requires its explicit Send action.
+  }
+
   private boolean automaticSpeechToAgent() {
     return autoTranscribe && autoSend && !manualTranscribePending;
   }
@@ -2523,6 +2549,8 @@ public class MainActivity extends Activity {
     runOnUiThread(() -> {
       String text = draftEdit.getText().toString().trim();
       transcriptPanel.setVisibility(View.VISIBLE);
+      automaticSendControl.setEnabled(autoTranscribe);
+      automaticSendControl.setChecked(autoSend);
       draftEdit.setEnabled(true);
       sendDraftButton.setVisibility(View.VISIBLE);
       sendDraftButton.setEnabled(VoiceDraftPolicy.canSubmit(text));
@@ -2816,6 +2844,8 @@ public class MainActivity extends Activity {
         titleRes = R.string.status_microphone_error; detailRes = R.string.detail_microphone_error; break;
       case REVIEW:
         titleRes = R.string.status_review; detailRes = R.string.detail_review; break;
+      case CONTINUING:
+        titleRes = R.string.status_continuing; detailRes = R.string.detail_continuing; break;
       case FINISHING:
         titleRes = R.string.status_finishing; detailRes = R.string.detail_finishing; break;
       case READY:
@@ -2861,6 +2891,9 @@ public class MainActivity extends Activity {
     runOnUiThread(() -> {
       String clean = detail == null ? "" : detail.trim();
       boolean actionableDetail = foregroundMode == ForegroundMode.TEXT_ONLY
+          || foregroundMode == ForegroundMode.TRANSCRIBING
+          || foregroundMode == ForegroundMode.THINKING
+          || foregroundMode == ForegroundMode.BUFFERING
           || foregroundMode == ForegroundMode.CONNECTING
           || foregroundMode == ForegroundMode.VERIFYING
           || foregroundMode == ForegroundMode.RECONNECTING
@@ -2868,6 +2901,7 @@ public class MainActivity extends Activity {
           || foregroundMode == ForegroundMode.PERMISSION
           || foregroundMode == ForegroundMode.MICROPHONE_ERROR
           || foregroundMode == ForegroundMode.REVIEW
+          || foregroundMode == ForegroundMode.CONTINUING
           || foregroundMode == ForegroundMode.ANSWER_ERROR
           || foregroundMode == ForegroundMode.QUEUED;
       statusView.setText(title);

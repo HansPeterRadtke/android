@@ -59,6 +59,7 @@ public class MainActivityUiTest {
         assertDisplayed(screen.findViewById(R.id.voice_start_stop));
         assertDisplayed(screen.findViewById(R.id.voice_send));
         assertDisplayed(screen.findViewById(R.id.voice_settings));
+        assertDisplayed(screen.findViewById(R.id.voice_auto_send_main));
         assertEquals(View.GONE, screen.findViewById(R.id.voice_worker_status).getVisibility());
         assertEquals(View.GONE, screen.findViewById(R.id.voice_question_status).getVisibility());
         assertEquals(View.GONE, screen.findViewById(R.id.voice_user_player).getVisibility());
@@ -74,7 +75,8 @@ public class MainActivityUiTest {
       scenario.onActivity(screen -> {
         int minimum = Math.round(48f * screen.getResources().getDisplayMetrics().density);
         int[] ids = {
-            R.id.voice_settings, R.id.voice_draft, R.id.voice_start_stop, R.id.voice_send
+            R.id.voice_settings, R.id.voice_draft, R.id.voice_start_stop, R.id.voice_send,
+            R.id.voice_auto_send_main
         };
         for (int id : ids) {
           View view = screen.findViewById(id);
@@ -436,6 +438,85 @@ public class MainActivityUiTest {
             ((TextInputEditText) activity.findViewById(R.id.voice_draft))
                 .getText().toString());
         assertTrue(((MaterialButton) activity.findViewById(R.id.voice_send)).isEnabled());
+      });
+    }
+  }
+
+  @Test public void automaticSendCanBeChangedWhileListeningWithoutSubmittingTheDraft() {
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(activity -> {
+        try {
+          java.lang.reflect.Field wanted = MainActivity.class.getDeclaredField("connectionWanted");
+          wanted.setAccessible(true);
+          ((java.util.concurrent.atomic.AtomicBoolean) wanted.get(activity)).set(false);
+          callPrivate(activity, "closeCurrentSocket", new Class<?>[]{String.class, boolean.class}, "fixture", true);
+          java.lang.reflect.Field field = MainActivity.class.getDeclaredField("running");
+          field.setAccessible(true);
+          java.util.concurrent.atomic.AtomicBoolean running =
+              (java.util.concurrent.atomic.AtomicBoolean) field.get(activity);
+          running.set(true);
+          try {
+            TextInputEditText draft = activity.findViewById(R.id.voice_draft);
+            draft.setText("Retained correction: use folder B");
+            com.google.android.material.checkbox.MaterialCheckBox toggle =
+                activity.findViewById(R.id.voice_auto_send_main);
+            assertTrue(toggle.isChecked());
+            assertTrue(toggle.isEnabled());
+            toggle.performClick();
+            assertTrue(!toggle.isChecked());
+            assertTrue(!activity.getSharedPreferences("voice_agent_history", 0)
+                .getBoolean("send_automatically_v3", true));
+            toggle.performClick();
+            assertTrue(toggle.isChecked());
+            assertEquals("Retained correction: use folder B", draft.getText().toString());
+            assertEquals("", activity.getSharedPreferences("voice_agent_history", 0)
+                .getString("send_payload_v1", ""));
+            assertTrue(activity.getSharedPreferences("voice_agent_history", 0)
+                .getBoolean("draft_claimed_v1", false));
+          } finally { running.set(false); }
+        } catch (Exception failure) { throw new AssertionError(failure); }
+      });
+    }
+  }
+
+  @Test public void slowVoiceStagesShowTheirActualExplanation() {
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(activity -> {
+        try {
+          for (String[] phase : new String[][]{
+              {"checking_turn", "Checking whether your message is complete"},
+              {"thinking", "Your speech reached the server. The agent is answering."},
+              {"generating_speech", "Preparing the spoken reply"}}) {
+            callPrivate(activity, "handleWsJson", new Class<?>[]{String.class, long.class},
+                new JSONObject().put("type", "state").put("state", phase[0]).toString(), 1L);
+            android.widget.TextView detail = activity.findViewById(R.id.voice_status_detail);
+            assertEquals(View.VISIBLE, detail.getVisibility());
+            assertEquals(phase[1], detail.getText().toString());
+          }
+        } catch (Exception failure) { throw new AssertionError(failure); }
+      });
+    }
+  }
+
+  @Test public void unfinishedTurnStopsTheBusyIndicatorAndKeepsTheDraftSendable() {
+    try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(activity -> {
+        try {
+          callPrivate(activity, "handleWsJson", new Class<?>[]{String.class, long.class},
+              "{\"type\":\"asr\",\"event\":\"final\",\"turn_id\":\"unfinished\",\"text\":\"Use folder\"}", 1L);
+          callPrivate(activity, "handleWsJson", new Class<?>[]{String.class, long.class},
+              "{\"type\":\"state\",\"state\":\"checking_turn\"}", 1L);
+          callPrivate(activity, "handleWsJson", new Class<?>[]{String.class, long.class},
+              "{\"type\":\"state\",\"state\":\"listening\",\"reason\":\"turn_incomplete\"}", 1L);
+          assertEquals(View.GONE, activity.findViewById(R.id.voice_status_progress).getVisibility());
+          assertEquals("Continue or send", ((android.widget.TextView) activity.findViewById(R.id.voice_status)).getText().toString());
+          assertEquals("Use folder", ((TextInputEditText) activity.findViewById(R.id.voice_draft)).getText().toString());
+          assertTrue(activity.findViewById(R.id.voice_send).isEnabled());
+          callPrivate(activity, "handleWsJson", new Class<?>[]{String.class, long.class},
+              "{\"type\":\"state\",\"state\":\"awaiting_send\",\"reason\":\"turn_classifier_unavailable\"}", 1L);
+          assertEquals(activity.getString(R.string.turn_classifier_unavailable),
+              ((android.widget.TextView) activity.findViewById(R.id.voice_status_detail)).getText().toString());
+        } catch (Exception failure) { throw new AssertionError(failure); }
       });
     }
   }

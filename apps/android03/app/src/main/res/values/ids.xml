@@ -20,6 +20,7 @@
     <item name="voice_version" type="id"/>
     <item name="voice_auto_transcribe" type="id"/>
     <item name="voice_auto_send" type="id"/>
+    <item name="voice_auto_send_main" type="id"/>
     <item name="voice_vocabulary" type="id"/>
     <item name="voice_save_vocabulary" type="id"/>
     <item name="voice_player_play_pause" type="id"/>

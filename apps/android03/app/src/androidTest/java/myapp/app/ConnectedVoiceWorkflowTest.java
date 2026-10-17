@@ -49,6 +49,7 @@ public class ConnectedVoiceWorkflowTest {
     VoiceUiTestState.reset();
     Context app = InstrumentationRegistry.getInstrumentation().getTargetContext();
     boolean automatic = "1".equals(InstrumentationRegistry.getArguments().getString("voiceChainAutomatic"));
+    boolean naturalPause = "1".equals(InstrumentationRegistry.getArguments().getString("voiceChainNaturalPause"));
     boolean background = "1".equals(InstrumentationRegistry.getArguments().getString("voiceChainBackground"));
     File fixture = new File(app.getFilesDir(), "voice-chain");
     File recording = new File(fixture, "input.pcm");
@@ -87,11 +88,23 @@ public class ConnectedVoiceWorkflowTest {
         configure(get(activity, "appConfig"));
         set(activity, "wsClient", client);
         if (!automatic) activity.restoreManualRecording(recording);
+        else {
+          // Match the real Mic entry point's started-service ownership while
+          // substituting only its microphone source. A bound-only synthetic
+          // uploader does not exercise the production capture lifecycle.
+          try {
+            java.lang.reflect.Method start = MainActivity.class.getDeclaredMethod("startVoiceForegroundService");
+            start.setAccessible(true);
+            assertTrue("Could not protect the automatic voice session", (Boolean) start.invoke(activity));
+          } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+        }
       });
       awaitScreen(screen, activity -> (Boolean) get(activity, "serverHelloReady")
           && (automatic || (Boolean) get(activity, "manualRecordingAvailable")), 60000,
           "Android never received hello and recovered the recording");
       if (automatic) {
+        await(() -> (Boolean) get(service, "foreground"), 30000,
+            "The automatic fixture never entered the real started-service lifecycle");
         // Exercise the live PCM uplink and real automatic proposal/commit path.
         // Only the microphone source is synthetic; no ASR or server event is injected.
         WebSocket socket = (WebSocket) get(service, "networkSocket");
@@ -103,8 +116,18 @@ public class ConnectedVoiceWorkflowTest {
             SystemClock.sleep(count * 1000L / 32000L);
           }
         }
-        assertTrue(service.sendText(new JSONObject().put("type", "end_utterance")
-            .put("reason", "capture_stopped").toString()));
+        if (naturalPause) {
+          // Let real acoustic endpointing and the semantic classifier decide.
+          // Do not use the explicit end-utterance escape hatch in this case.
+          byte[] silence = new byte[3200];
+          for (int i = 0; i < 35; i++) {
+            assertTrue("Silence uplink rejected", socket.send(ByteString.of(silence)));
+            SystemClock.sleep(100L);
+          }
+        } else {
+          assertTrue(service.sendText(new JSONObject().put("type", "end_utterance")
+              .put("reason", "capture_stopped").toString()));
+        }
       } else {
         screen.onActivity(activity -> assertTrue(activity.findViewById(R.id.voice_transcribe).performClick()));
       }
@@ -165,6 +188,7 @@ public class ConnectedVoiceWorkflowTest {
           .put("elapsed_ms", SystemClock.elapsedRealtime() - started)
           .put("background_without_test_binding", background)
           .put("automatic_send", automatic).put("acknowledged_ms", acknowledgedMs)
+          .put("natural_pause", naturalPause)
           .put("scope", "Synthetic speech, actual Android UI/service, live ASR/SWAAG/TTS, emulator AudioTrack");
       try (FileOutputStream output = new FileOutputStream(new File(fixture, "result.json"))) {
         output.write(result.toString(2).getBytes(StandardCharsets.UTF_8));

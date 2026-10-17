@@ -168,6 +168,10 @@
     <string name="delete_recording">Delete recording</string>
     <string name="saved_recording_unavailable">Could not open or change the saved recording.</string>
     <string name="checking_turn">Checking whether your message is complete</string>
+    <string name="status_continuing">Continue or send</string>
+    <string name="detail_continuing">Your message is still open. Continue speaking, or tap Send.</string>
+    <string name="turn_classifier_unavailable">Automatic sending is unavailable. Your text is kept; tap Send.</string>
+    <string name="transcription_needs_review">Speech recognition could not verify this text. Check it, then tap Send.</string>
     <string name="generating_speech">Preparing the spoken reply</string>
     <string name="automatic_send_server_update">Automatic sending needs a server update. Review your text and tap Send.</string>
 </resources>

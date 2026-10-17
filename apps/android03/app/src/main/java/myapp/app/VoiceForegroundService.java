@@ -377,6 +377,9 @@ public final class VoiceForegroundService extends Service {
       state.put("conversation",conversationId);
       boolean autoTranscribe=prefs.getBoolean("transcribe_automatically_v1",true);
       state.put("auto_transcribe",autoTranscribe);
+      state.put("auto_send_requested",prefs.getBoolean("send_automatically_v3",true));
+      state.put("auto_commit_ready",serverCanCommit);
+      state.put("capture_failed",captureTransportFailed);
       state.put("auto_send",serverCanCommit && autoTranscribe && prefs.getBoolean("send_automatically_v3",true) && !captureTransportFailed);
       state.put("microphone_label",microphoneLabel);
       state.put("draft_claimed",prefs.getBoolean("draft_claimed_v1",false));
