@@ -1,6 +1,6 @@
 # Voice Button 0.98 — stop fake backup animations; honor explicit Exit
 
-Recorded: October 18, 2026. Scope: the Voice Button audio-recording Android app, not the SWAAG conversational voice client. The currently public 0.97 APK still contains a busy, inaccurate progress display and task-close continuation behavior. Newer uncommitted 0.98 work in the isolated Voice Button checkout contained a redesign and exit control. This patch audits, tests and completes that work.
+Recorded: October 18, 2026. Scope: the Voice Button audio-recording Android app, not the SWAAG conversational voice client. The previously public 0.97 APK contained a busy, inaccurate progress display and task-close continuation behavior. An isolated, independent repair branch integrated the version 0.98 redesign and Exit control, then audited and tested that work without overwriting other active worktrees.
 
 ## Root problems and actual fixes
 
@@ -50,3 +50,34 @@ Credential changes are also observed by an already-running background
 WorkManager uploader, not only by a currently bound Activity/Service. The
 uploader refreshes its HTTP credential and private-folder reconciliation
 state when a new token is saved, without logging the credential.
+
+## Actual October eighteenth release verification
+
+The full Voice Button debug unit-test, assembly and lint command succeeded,
+with at least 102 passing app tests and no failures in the 29 captured app
+test-suite XML results. The later, targeted private-folder-listing network
+test run also succeeded with four passing tests, and assembled an updated
+version 0.98 debug APK. On Jetson, 11 Voice Button access/rollout tests
+and 19 durable-audio tests passed, and the live receiver reported 170
+committed recordings, all with completed canonical final transcription, plus
+six uncommitted sessions that were deliberately left intact. The server's
+private folder endpoint correctly rejected requests lacking a credential
+while accepting the same request with the server's existing private token.
+No private token was embedded in the APK or committed to Git.
+
+The signed 0.98 APK was published in Nitro's Explorer upload directory as
+`voicebutton-0.98.apk` and updated the `voicebutton-latest.apk` and
+`voicebutton-debug.apk` aliases. The old 0.97 APK remains available.
+The 0.98 signing certificate matches 0.97, supporting a normal in-place
+update without removing protected local phone data. A connected physical
+Android phone was unavailable, so the actual phone installation and end-to-end
+microphone/transport test remain unverified. A heavily loaded, shared
+software-rendered two-core emulator suffered a startup ANR while Material
+button drawing was executing; Android itself also logged a system ANR,
+so it is not reliable evidence of a phone-specific regression or of passing
+interactive device tests. Do not claim physical-device validation.
+
+When the phone installs 0.98, background private folder-listing requests
+should no longer hammer Jetson without a credential. Private folder imports
+and private transcript access still require the actual recording-server token;
+legacy audio writes continue as allowed by the server transitional policy.
