@@ -45,3 +45,8 @@ Changing the token resets the guard; network changes also re-evaluate it.
 Server-side authorization remains mandatory for access to private folders.
 Tests verify that no-token, backoff, network and credential states cannot
 cause unauthorized polling.
+
+Credential changes are also observed by an already-running background
+WorkManager uploader, not only by a currently bound Activity/Service. The
+uploader refreshes its HTTP credential and private-folder reconciliation
+state when a new token is saved, without logging the credential.

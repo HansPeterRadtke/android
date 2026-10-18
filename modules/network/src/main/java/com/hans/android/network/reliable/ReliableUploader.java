@@ -57,6 +57,7 @@ public final class ReliableUploader {
     private volatile int watchdogTrips;
     private volatile int retryAttempt;
     private volatile boolean remoteFoldersReconciled;
+    private volatile String currentRecordingServerToken = "";
     private volatile long nextRemoteFolderAttemptWallMs;
 
     public static final class LiveProgress {
@@ -100,14 +101,17 @@ public final class ReliableUploader {
         this.context = context.getApplicationContext();
         this.store = store;
         this.client = new ReliableUploadClient(baseUrl);
-        this.client.setRecordingServerToken(MobileAudioCredential.read(this.context));
+        this.currentRecordingServerToken = MobileAudioCredential.read(this.context);
+        this.client.setRecordingServerToken(currentRecordingServerToken);
         this.listener = listener;
         this.backgroundWorker = backgroundWorker;
         this.completedOnly = completedOnly;
     }
 
     public void refreshCredentials() {
-        client.setRecordingServerToken(MobileAudioCredential.read(context));
+        String updated = MobileAudioCredential.read(context);
+        client.setRecordingServerToken(updated);
+        currentRecordingServerToken = updated;
         remoteFoldersReconciled = false;
         nextRemoteFolderAttemptWallMs = 0L;
         signal();
@@ -281,8 +285,17 @@ public final class ReliableUploader {
                 boolean urgentAudio = false;
                 boolean networkUnavailable = false;
                 try {
-                    boolean privateAccessConfigured =
-                            MobileAudioCredential.isConfigured(context);
+                    // WorkManager can own uploads without a bound Activity or
+                    // RecordingService. Pick up credential changes even in that
+                    // background-only process; never log or expose the token.
+                    String configuredToken = MobileAudioCredential.read(context);
+                    if (!configuredToken.equals(currentRecordingServerToken)) {
+                        client.setRecordingServerToken(configuredToken);
+                        currentRecordingServerToken = configuredToken;
+                        remoteFoldersReconciled = false;
+                        nextRemoteFolderAttemptWallMs = 0L;
+                    }
+                    boolean privateAccessConfigured = !configuredToken.isEmpty();
                     if (!privateAccessConfigured) {
                         // No token can succeed at the protected folder listing.
                         // The user may add one at any time; refreshCredentials()
