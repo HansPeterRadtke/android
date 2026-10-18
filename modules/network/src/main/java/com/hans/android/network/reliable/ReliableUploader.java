@@ -190,6 +190,23 @@ public final class ReliableUploader {
         return false;
     }
 
+    // The receiver deliberately protects folder enumeration behind private
+    // authorization. Old phones must still upload audio in transitional mode,
+    // but must never hammer a protected endpoint without a token.
+    static boolean shouldPullPrivateFolders(boolean tokenConfigured,
+                                            boolean alreadyReconciled,
+                                            boolean networkAvailable,
+                                            long nowMs, long nextAttemptMs) {
+        return tokenConfigured && !alreadyReconciled && networkAvailable
+                && nowMs >= nextAttemptMs;
+    }
+
+    static boolean folderAccessDenied(Throwable failure) {
+        if (!(failure instanceof ReliableUploadClient.ProtocolException)) return false;
+        int code = ((ReliableUploadClient.ProtocolException) failure).httpCode;
+        return code == 401 || code == 403;
+    }
+
     static long folderPullDelayMs(Throwable problem) {
         if (problem instanceof ReliableUploadClient.ProtocolException) {
             int code = ((ReliableUploadClient.ProtocolException) problem).httpCode;
@@ -264,9 +281,18 @@ public final class ReliableUploader {
                 boolean urgentAudio = false;
                 boolean networkUnavailable = false;
                 try {
-                    if (!remoteFoldersReconciled
-                            && System.currentTimeMillis() >= nextRemoteFolderAttemptWallMs
-                            && hasNetwork()) {
+                    boolean privateAccessConfigured =
+                            MobileAudioCredential.isConfigured(context);
+                    if (!privateAccessConfigured) {
+                        // No token can succeed at the protected folder listing.
+                        // The user may add one at any time; refreshCredentials()
+                        // resets this gate, while regular audio upload continues.
+                        remoteFoldersReconciled = true;
+                        nextRemoteFolderAttemptWallMs = 0L;
+                    }
+                    if (shouldPullPrivateFolders(privateAccessConfigured,
+                            remoteFoldersReconciled, hasNetwork(),
+                            System.currentTimeMillis(), nextRemoteFolderAttemptWallMs)) {
                         try {
                             boolean changed = store.reconcileRemoteFolders(client.listFolders());
                             remoteFoldersReconciled = true;
@@ -277,10 +303,18 @@ public final class ReliableUploader {
                                 listener.onChanged();
                             }
                         } catch (Exception folderPullFailure) {
-                            nextRemoteFolderAttemptWallMs = System.currentTimeMillis()
+                            boolean accessDenied = folderAccessDenied(folderPullFailure);
+                            // Credentials do not improve by retrying unchanged.
+                            // Retry only after credential refresh or a network
+                            // transition; stop unbounded error/diagnostic spam.
+                            remoteFoldersReconciled = accessDenied;
+                            nextRemoteFolderAttemptWallMs = accessDenied ? 0L
+                                    : System.currentTimeMillis()
                                     + folderPullDelayMs(folderPullFailure);
                             listener.onDiagnostic("WARN", "upload.folder_tree_pull_deferred", "",
-                                    "Could not refresh the local folder tree from Jetson yet",
+                                    accessDenied
+                                            ? "Private folder listing denied; audio upload continues, check recording-server access"
+                                            : "Could not refresh the local folder tree from Jetson yet",
                                     fields("exception_class", folderPullFailure.getClass().getName(),
                                             "exception_message", String.valueOf(folderPullFailure.getMessage())),
                                     folderPullFailure);

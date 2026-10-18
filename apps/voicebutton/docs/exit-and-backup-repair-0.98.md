@@ -30,3 +30,18 @@ The app's distributed APK is a debug build. Its `MainThreadWatchdog` originally 
 This is not a claim that Android always immediately kills its cached process. Exit means **no visible task, no ongoing foreground service, no upload worker, no recorder and no app-owned periodic debugging activity**, once the safely flushed recording completes. Android retains control over cached process lifetime. Tests target the actual service state, not the misleading presence of a cached PID alone.
 
 The shutdown now also waits for the single-thread recorder metadata executor to process the PCM journal-close and paused-state work submitted by the capture thread, avoiding an earlier race in which `onDestroy` interrupted that work immediately after the capture thread returned. When the storage device is blocked the close remains bounded and retains the recoverable open PCM journal instead of inventing a successful close.
+
+## Protected folder-listing retry suppression
+
+The Jetson recording server's private `/audio/v2/folders` GET deliberately
+rejects an unpaired Voice Button with HTTP 401. The real phone's diagnostics
+show this exact event repeating enough to create hundreds of megabytes of
+server audit records. A backoff alone merely makes the same authorization
+error recur. The uploader now skips private folder enumeration when no token
+is configured, without pausing legacy chunk replication or the locally
+maintained folder tree. When a supplied token is rejected with 401 or 403,
+it records one diagnostic and suppresses unchanged-credential repeats.
+Changing the token resets the guard; network changes also re-evaluate it.
+Server-side authorization remains mandatory for access to private folders.
+Tests verify that no-token, backoff, network and credential states cannot
+cause unauthorized polling.
