@@ -57,6 +57,7 @@ public final class ReliableUploader {
     private volatile int watchdogTrips;
     private volatile int retryAttempt;
     private volatile boolean remoteFoldersReconciled;
+    private volatile long nextRemoteFolderAttemptWallMs;
 
     public static final class LiveProgress {
         public final String operation;
@@ -108,18 +109,17 @@ public final class ReliableUploader {
     public void refreshCredentials() {
         client.setRecordingServerToken(MobileAudioCredential.read(context));
         remoteFoldersReconciled = false;
+        nextRemoteFolderAttemptWallMs = 0L;
         signal();
     }
 
     public synchronized void start() { ensureRunning(); }
 
     private boolean uploadPermitted() {
-        android.content.SharedPreferences p=context.getSharedPreferences("voicebutton_behavior",Context.MODE_PRIVATE);
-        return p.getBoolean("automatic_upload",true)||p.getLong("manual_upload_before_ms",0L)>0;
+        return RecordingUploadPolicy.uploadPermitted(context);
     }
     private boolean eligible(ReliableSessionManifest manifest) {
-        android.content.SharedPreferences p=context.getSharedPreferences("voicebutton_behavior",Context.MODE_PRIVATE);
-        return p.getBoolean("automatic_upload",true)||manifest.createdAt<=p.getLong("manual_upload_before_ms",0L);
+        return RecordingUploadPolicy.eligible(context, manifest);
     }
 
     public synchronized boolean ensureRunning() {
@@ -190,10 +190,19 @@ public final class ReliableUploader {
         return false;
     }
 
+    static long folderPullDelayMs(Throwable problem) {
+        if (problem instanceof ReliableUploadClient.ProtocolException) {
+            int code = ((ReliableUploadClient.ProtocolException) problem).httpCode;
+            if (code == 401 || code == 403) return 5L * 60_000L;
+        }
+        return 30_000L;
+    }
+
     public void signal() { synchronized (wake) { wake.notifyAll(); } }
 
     public void onNetworkChanged() {
         remoteFoldersReconciled = false;
+        nextRemoteFolderAttemptWallMs = 0L;
         client.cancelActiveRequest();
         ensureRunning();
         signal();
@@ -255,16 +264,21 @@ public final class ReliableUploader {
                 boolean urgentAudio = false;
                 boolean networkUnavailable = false;
                 try {
-                    if (!remoteFoldersReconciled && hasNetwork()) {
+                    if (!remoteFoldersReconciled
+                            && System.currentTimeMillis() >= nextRemoteFolderAttemptWallMs
+                            && hasNetwork()) {
                         try {
                             boolean changed = store.reconcileRemoteFolders(client.listFolders());
                             remoteFoldersReconciled = true;
+                            nextRemoteFolderAttemptWallMs = 0L;
                             if (changed) {
                                 listener.onDiagnostic("INFO", "upload.folder_tree_recovered", "",
                                         "Recovered the local folder tree from Jetson", fields(), null);
                                 listener.onChanged();
                             }
                         } catch (Exception folderPullFailure) {
+                            nextRemoteFolderAttemptWallMs = System.currentTimeMillis()
+                                    + folderPullDelayMs(folderPullFailure);
                             listener.onDiagnostic("WARN", "upload.folder_tree_pull_deferred", "",
                                     "Could not refresh the local folder tree from Jetson yet",
                                     fields("exception_class", folderPullFailure.getClass().getName(),

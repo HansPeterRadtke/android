@@ -22,11 +22,19 @@ final class UploadWorkScheduler {
 
     private UploadWorkScheduler() {}
 
+    static void stopAll(Context context) {
+        Context app = context.getApplicationContext();
+        WorkManager manager = WorkManager.getInstance(app);
+        manager.cancelUniqueWork(IMMEDIATE_WORK);
+        manager.cancelUniqueWork(PERIODIC_WORK);
+        manager.cancelAllWorkByTag(TAG);
+    }
+
     static void initialize(Context context) {
         Context app = context.getApplicationContext();
         if(!AppSettings.automaticUpload(app)) {
             WorkManager.getInstance(app).cancelUniqueWork(PERIODIC_WORK);
-            if(!AppSettings.uploadPermitted(app))WorkManager.getInstance(app).cancelUniqueWork(IMMEDIATE_WORK);
+            if(!AppSettings.uploadPermitted(app)) stopAll(app);
             return;
         }
         Constraints connected = connectedConstraint();

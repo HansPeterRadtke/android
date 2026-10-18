@@ -7,14 +7,42 @@ import android.widget.*;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.hans.android.common_ui.AndroidUi;
 import com.hans.android.audio.reliable.RuntimePolicy;
+import com.hans.android.network.reliable.RecordingUploadPolicy;
 
 final class AppSettings {
     static final String NAME="voicebutton_behavior";
     private AppSettings() {}
     static SharedPreferences preferences(Context c) { return c.getSharedPreferences(NAME,Context.MODE_PRIVATE); }
-    static boolean automaticUpload(Context c) { return preferences(c).getBoolean("automatic_upload",true); }
-    static boolean uploadPermitted(Context c) { return automaticUpload(c)||preferences(c).getLong("manual_upload_before_ms",0L)>0; }
-    static void requestUpload(Context c) { preferences(c).edit().putLong("manual_upload_before_ms",System.currentTimeMillis()).apply(); }
+    static boolean automaticUpload(Context c) {
+        return RecordingUploadPolicy.automaticEnabled(c);
+    }
+    static boolean configuredAutomaticUpload(Context c) {
+        return RecordingUploadPolicy.requestedAutomatic(c);
+    }
+    static boolean pausedAfterExit(Context c) {
+        return RecordingUploadPolicy.pausedByExit(c);
+    }
+    static boolean uploadPermitted(Context c) {
+        return RecordingUploadPolicy.uploadPermitted(c);
+    }
+    static boolean pauseForExit(Context c) {
+        // This is called from the Activity's Exit control and the main-thread
+        // task-removal callback. Persist the stop gate immediately; canceling
+        // WorkManager jobs is performed on the service's shutdown executor.
+        // Initializing WorkManager synchronously here can freeze the UI.
+        return RecordingUploadPolicy.pauseForExit(c);
+    }
+    static void requestUpload(Context c) {
+        if (!RecordingUploadPolicy.requestManualUpload(c)) {
+            throw new IllegalStateException("Could not resume background uploads");
+        }
+        UploadWorkScheduler.initialize(c);
+    }
+    static boolean resumeFromUserAction(Context c) {
+        boolean saved = RecordingUploadPolicy.resumeForUserAction(c);
+        if (saved) UploadWorkScheduler.initialize(c);
+        return saved;
+    }
     static boolean automaticTranscription(Context c) { return preferences(c).getBoolean("automatic_transcription",true); }
     static boolean logAllowed(Context c,String level,String event) {
         SharedPreferences p=preferences(c);
@@ -25,7 +53,7 @@ final class AppSettings {
     static void show(Activity activity,Runnable changed) {
         LinearLayout box=new LinearLayout(activity);box.setOrientation(LinearLayout.VERTICAL);
         int pad=AndroidUi.dp(activity,16);box.setPadding(pad,pad,pad,pad);
-        CheckBox upload=check(activity,box,"Upload recordings automatically",automaticUpload(activity));
+        CheckBox upload=check(activity,box,"Upload recordings automatically",configuredAutomaticUpload(activity));
         CheckBox transcribe=check(activity,box,"Transcribe new uploads automatically",automaticTranscription(activity));
         box.addView(AndroidUi.body(activity,"When automatic upload is off, recordings stay on this phone until you choose Send pending recordings. Already submitted server work is not recalled."));
         CheckBox waveform=check(activity,box,"Generate waveforms automatically on Thor",preferences(activity).getBoolean("automatic_waveform",true));
@@ -45,7 +73,9 @@ final class AppSettings {
                             .putBoolean("automatic_waveform",waveform.isChecked())
                             .putBoolean("user_action_logging",actions.isChecked())
                             .putInt("log_verbosity",verbosity.getSelectedItemPosition())
-                            .putLong("manual_upload_before_ms",0L).apply();
+                            .putLong("manual_upload_before_ms",0L)
+                            .putBoolean(RecordingUploadPolicy.USER_EXIT_PAUSE,false)
+                            .commit();
                     UploadWorkScheduler.initialize(activity);changed.run();
                 }).show();
     }

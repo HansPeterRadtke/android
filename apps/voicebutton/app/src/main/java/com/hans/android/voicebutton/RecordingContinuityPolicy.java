@@ -12,7 +12,9 @@ final class RecordingContinuityPolicy {
     static boolean keepServiceAlive(boolean recording, boolean paused,
                                     boolean backgroundWork,
                                     boolean recoveryPending, boolean alarmActive) {
-        return paused || holdWakeLock(recording, backgroundWork,
+        // Paused microphone audio is durable; it requires no permanent
+        // foreground process when there is no other active work.
+        return holdWakeLock(recording, backgroundWork,
                 recoveryPending, alarmActive);
     }
 

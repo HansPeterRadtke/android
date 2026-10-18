@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 final class MainThreadWatchdog {
     private static final AtomicBoolean STARTED = new AtomicBoolean(false);
+    private static Thread workerThread;
     private static final long CHECK_MS = 250L;
     private static final long STALL_MS = 1500L;
     private static final long REPORT_COOLDOWN_MS = 10000L;
@@ -20,7 +21,7 @@ final class MainThreadWatchdog {
         return pendingPostedMs > 0L && nowMs - pendingPostedMs >= thresholdMs;
     }
 
-    static void start() {
+    static synchronized void start() {
         if (!STARTED.compareAndSet(false, true)) return;
         Handler main = new Handler(Looper.getMainLooper());
         AtomicLong pendingPostedMs = new AtomicLong(0L);
@@ -53,6 +54,18 @@ final class MainThreadWatchdog {
             }
         }, "voicebutton-main-watchdog");
         watchdog.setDaemon(true);
+        workerThread = watchdog;
         watchdog.start();
+    }
+
+    static synchronized void stop() {
+        if (!STARTED.getAndSet(false)) return;
+        Thread thread = workerThread;
+        workerThread = null;
+        if (thread != null) thread.interrupt();
+    }
+
+    static boolean isRunning() {
+        return STARTED.get();
     }
 }

@@ -130,6 +130,7 @@ public final class MainActivity extends Activity {
     private Button folderButton;
     private Button inputButton;
     private Button moreButton;
+    private Button exitButton;
     private boolean compactHeight;
 
     private int selectedDeviceId = AudioInputOption.DEFAULT_DEVICE_ID;
@@ -264,6 +265,9 @@ public final class MainActivity extends Activity {
 
     @Override protected void onStart() {
         super.onStart();
+        // An explicit Exit stops the debug-only watchdog. Restart it when the
+        // user actually reopens the interface in a cached Android process.
+        if (BuildConfig.DEBUG) MainThreadWatchdog.start();
         diag(PhoneDiagnostics.INFO, "ui.main.start", null,
                 "MainActivity onStart", PhoneDiagnostics.fields());
         registerAudioDeviceCallback();
@@ -337,6 +341,13 @@ public final class MainActivity extends Activity {
         moreButton.setContentDescription("More options and diagnostics");
         moreButton.setOnClickListener(v -> showMoreMenu());
         header.addView(moreButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        exitButton = materialToolbarButton("Exit");
+        exitButton.setId(R.id.voicebutton_exit);
+        exitButton.setMinWidth(AndroidUi.dp(this, 54));
+        exitButton.setContentDescription("Close Voice Button and pause any recording and backups");
+        exitButton.setOnClickListener(v -> requestExitConfirmation());
+        header.addView(exitButton, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(header);
 
@@ -1155,7 +1166,8 @@ public final class MainActivity extends Activity {
                 "Send pending recordings",
                 "Transcribe uploaded recordings",
                 "Recording server access",
-                "Studio player access"
+                "Studio player access",
+                "Exit app (stop background work)"
         };
         new MaterialAlertDialogBuilder(this).setTitle("More")
                 .setItems(actions, (dialog, which) -> {
@@ -1170,7 +1182,8 @@ public final class MainActivity extends Activity {
                     else if(which==8)retrySynchronization();
                     else if(which==9)requestManualTranscription();
                     else if(which==10)showRecordingServerAccess();
-                    else showStudioPlayerAccess();
+                    else if(which==11)showStudioPlayerAccess();
+                    else requestExitConfirmation();
                 }).setNegativeButton("Back", null).show();
     }
 
@@ -1487,7 +1500,8 @@ public final class MainActivity extends Activity {
     private void showAbout() {
         new MaterialAlertDialogBuilder(this).setTitle("Voice Button")
                 .setMessage("Version " + BuildConfig.VERSION_NAME
-                        + "\nRecording and synchronization continue in the foreground after this screen closes."
+                        + "\nHome switches apps and may keep recording."
+                        + "\nExit or Back pauses audio and stops background backups."
                         + "\n\nOverview diagnostics are intentionally hidden. Use Current status details, Copy support summary, or Export full diagnostics when needed.")
                 .setPositiveButton("Back", null).show();
     }
@@ -1600,94 +1614,21 @@ public final class MainActivity extends Activity {
 
     private void renderUploadOperations() {
         if (uploadQueueContainer == null) return;
-        transferText.setVisibility(View.VISIBLE);
-        transferText.setMaxLines(Integer.MAX_VALUE);
-        progressBar.setVisibility(View.VISIBLE);
-        int remaining=OverviewProgress.uploadFilesRemaining(snapshot.sessions);
-        boolean unknown=OverviewProgress.hasUnmeasuredUpload(snapshot.sessions);
-        int overall=remaining==0?1000:snapshot.uploadProgressPermille;
-        transferText.setText("Uploads · "+(unknown?"preparing":((overall+5)/10)+"%")+" · "+remaining+" pending");
-        progressBar.setIndeterminate(unknown);
-        if(!unknown)progressBar.setProgress(overall);
+        // The recording screen is not a transfer-monitoring dashboard.
+        // A simple status line is adequate; raw per-file progress is available
+        // through More -> Current status details. Never show stale oscillating
+        // indeterminate bars or an upload job for an unfinished microphone
+        // session.
+        String label = BackupOverviewText.summary(snapshot.sessions,
+                AppSettings.uploadPermitted(this), AppSettings.pausedAfterExit(this),
+                snapshot.liveUploadOperation, snapshot.liveUploadSessionId);
+        setTextIfChanged(transferText, label);
+        transferText.setVisibility(label.isEmpty() ? View.GONE : View.VISIBLE);
+        transferText.setContentDescription(label);
+        progressBar.setVisibility(View.GONE);
         uploadCurrentText.setVisibility(View.GONE);
         uploadCurrentProgressBar.setVisibility(View.GONE);
-        uploadQueueContainer.beginUpdate();
-
-        // The durable local ledger, not an unrelated status list, owns completion.
-        java.util.Set<String> serverCommitted = java.util.Collections.emptySet();
-        java.util.HashSet<String> rendered = new java.util.HashSet<>();
-        if("waiting_quarantined_recordings".equals(snapshot.liveUploadOperation)||"session_quarantined".equals(snapshot.liveUploadOperation)) {
-            addOperationMessage(uploadQueueContainer,"Backup incomplete · recovery needed in Library. Keep local audio.",AndroidUi.ORANGE);
-        }
-        if(!AppSettings.uploadPermitted(this)) {
-            addOperationMessage(uploadQueueContainer,"Upload off · saved on phone. More → Send pending recordings.",AndroidUi.MUTED);
-        }
-
-        // Start showing the upload pipeline as soon as recording stops, before the
-        // session-list cache has necessarily caught up. This prevents short uploads
-        // from happening entirely between two UI snapshots.
-        String activeSessionId = snapshot.liveUploadSessionId == null
-                ? "" : snapshot.liveUploadSessionId;
-        boolean finalizingCurrent = ("FINISHING".equals(snapshot.state)
-                || "COMPRESSING".equals(snapshot.state))
-                && snapshot.currentSessionId != null
-                && !snapshot.currentSessionId.isEmpty();
-        if (activeSessionId.isEmpty() && finalizingCurrent) {
-            activeSessionId = snapshot.currentSessionId;
-        }
-        if (!activeSessionId.isEmpty() && !serverCommitted.contains(activeSessionId)) {
-            ReliableSessionManifest activeManifest = null;
-            for (ReliableSessionManifest session : snapshot.sessions) {
-                if (activeSessionId.equals(session.sessionId)) {
-                    activeManifest = session;
-                    break;
-                }
-            }
-            String name = activeManifest == null
-                    ? "Current recording" : OverviewProgress.fileName(activeManifest);
-            String op = snapshot.liveUploadOperation == null
-                    ? "" : snapshot.liveUploadOperation;
-            boolean hasLiveBytes = snapshot.liveUploadTotalBytes > 0L;
-            int permille = hasLiveBytes
-                    ? Math.max(0, Math.min(1000, snapshot.liveUploadProgressPermille)) : 0;
-            boolean indeterminate = !hasLiveBytes;
-            String state;
-            if (finalizingCurrent || "stopped".equals(op) || "idle".equals(op)
-                    || op.isEmpty()) {
-                state = "Preparing file for upload";
-                indeterminate = true;
-            } else if ("retry_backoff".equals(op)) {
-                state = "Retrying upload";
-            } else if (op.contains("commit")) {
-                state = "Committing on Jetson";
-                if (hasLiveBytes) permille = 1000;
-            } else if (op.contains("reconcil")) {
-                state = "Verifying Jetson copy";
-            } else {
-                state = "Uploading";
-            }
-            addOperationRow(uploadQueueContainer, name, state,
-                    permille, indeterminate, false);
-            rendered.add(activeSessionId);
-        }
-
-        List<ReliableSessionManifest> pending = OverviewProgress.pendingUploads(
-                snapshot.sessions, serverCommitted);
-        for (ReliableSessionManifest session : pending) {
-            if (rendered.contains(session.sessionId)) continue;
-            int permille = OverviewProgress.fileProgressPermille(session);
-            boolean accepted = OverviewProgress.allSegmentsAccepted(session);
-            boolean indeterminate = !session.conversionFinished || permille < 0;
-            String state;
-            if (!session.conversionFinished) state = "Preparing file for upload";
-            else if (accepted && !session.remoteCommitted) state = "Committing on Jetson";
-            else if (permille > 0) state = "Waiting to resume upload";
-            else state = "Waiting to upload";
-            if (accepted && !session.remoteCommitted) permille = 1000;
-            addOperationRow(uploadQueueContainer, OverviewProgress.fileName(session),
-                    state, permille, indeterminate, false);
-        }
-        uploadQueueContainer.commitUpdate();
+        uploadQueueContainer.setVisibility(View.GONE);
     }
 
     private void applyTranscriptionStatus(
@@ -1732,62 +1673,27 @@ public final class MainActivity extends Activity {
             renderTranscriptionOperations(lastTranscriptionStatus,
                     " · " + formatStatusAge(age) + " old", true);
         } else {
-            transcriptionQueueContainer.beginUpdate();
-            transcriptionSummaryText.setVisibility(View.VISIBLE);
-            transcriptionSummaryText.setMaxLines(Integer.MAX_VALUE);
-            transcriptionSummaryText.setText("Transcription · unavailable\nCheck Internet · More → Retry synchronization");
-            transcriptionProgressBar.setVisibility(View.VISIBLE);
-            transcriptionProgressBar.setIndeterminate(true);
-            transcriptionSummaryText.setTextColor(AndroidUi.ORANGE);
-            transcriptionQueueContainer.commitUpdate();
+            setTextIfChanged(transcriptionSummaryText,
+                    "Transcription status unavailable; see More → Current status details");
+            transcriptionSummaryText.setVisibility(View.GONE);
+            transcriptionProgressBar.setVisibility(View.GONE);
+            transcriptionQueueContainer.setVisibility(View.GONE);
         }
     }
 
     private void renderTranscriptionOperations(
             ReliableUploadClient.TranscriptionStatus value,
             String staleSuffix, boolean stale) {
-        transcriptionSummaryText.setVisibility(View.VISIBLE);
-        transcriptionSummaryText.setMaxLines(Integer.MAX_VALUE);
-        transcriptionProgressBar.setVisibility(View.VISIBLE);
-        boolean unknown=value==null;
-        int overall=unknown?0:(value.notTranscribedCount==0?100:value.overallPercent);
-        transcriptionSummaryText.setText(unknown?"Transcription status unavailable":
-                "Transcription · "+overall+"% · "+value.notTranscribedCount+" pending"+(stale?"\nLast known"+staleSuffix+" · Retry in More":""));
-        transcriptionSummaryText.setTextColor(stale?AndroidUi.ORANGE:AndroidUi.INK);
-        transcriptionProgressBar.setIndeterminate(unknown||stale);
-        if(!unknown&&!stale)transcriptionProgressBar.setProgress(overall*10);
+        String status = value == null ? "Transcription status unavailable"
+                : "Transcription · " + value.completeCount + " complete · "
+                        + value.notTranscribedCount + " pending"
+                        + (stale ? " · status " + staleSuffix : "");
+        setTextIfChanged(transcriptionSummaryText, status);
+        transcriptionSummaryText.setVisibility(View.GONE);
+        transcriptionProgressBar.setVisibility(View.GONE);
         transcriptionCurrentText.setVisibility(View.GONE);
         transcriptionCurrentProgressBar.setVisibility(View.GONE);
-        transcriptionQueueContainer.beginUpdate();
-        if (value == null || value.pending.isEmpty()) {
-            transcriptionQueueContainer.commitUpdate();
-            return;
-        }
-        for (ReliableUploadClient.CurrentTranscription item : value.pending) {
-            String name = item.displayName == null || item.displayName.isEmpty()
-                    ? item.sessionId : item.displayName;
-            String state = item.state == null ? "" : item.state;
-            boolean running = "RUNNING".equals(state);
-            boolean failed = "FAILED".equals(state);
-            String phase = item.phase == null ? "" : item.phase.toLowerCase(java.util.Locale.ROOT);
-            boolean realFrameProgress = running && item.framesTotal > 0L;
-            boolean loading = running && ("loading".equals(phase)
-                    || "starting".equals(phase) || !realFrameProgress);
-            boolean indeterminate = (!running && !failed) || loading;
-            int permille = realFrameProgress
-                    ? Math.max(0, Math.min(1000, item.percent * 10)) : 0;
-            String label;
-            if (loading && "loading".equals(phase)) label = "Loading transcription model";
-            else if (loading) label = "Starting transcription";
-            else if (running) label = "Transcribing";
-            else if (failed) label = "Transcription failed; audio retained. Use More → Transcribe uploaded recordings to retry.";
-            else if ("MANUAL".equals(state)) label = "Automatic transcription is off. Use More → Transcribe uploaded recordings.";
-            else label = "Waiting for transcription";
-            // Snapshot age is already shown once in the section summary.
-            addOperationRow(transcriptionQueueContainer, name, label,
-                    permille, indeterminate, failed);
-        }
-        transcriptionQueueContainer.commitUpdate();
+        transcriptionQueueContainer.setVisibility(View.GONE);
     }
 
     private void addOperationHeader(LinearLayout container, String title) {
@@ -1887,15 +1793,56 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void requestExitConfirmation() {
+        if (snapshot.recording || snapshot.openSession != null) {
+            new MaterialAlertDialogBuilder(this)
+                    .setTitle("Close Voice Button?")
+                    .setMessage("Recording will be safely paused. Local audio remains saved. Background uploads stop.")
+                    .setPositiveButton("Pause and exit", (d, w) -> closeApplication())
+                    .setNegativeButton("Keep recording", null)
+                    .show();
+        } else {
+            closeApplication();
+        }
+    }
+
+    private void closeApplication() {
+        // Acknowledge the Exit gesture immediately; the service will finish
+        // saving any captured PCM in the background before stopping.
+        if (exitButton != null) {
+            exitButton.setEnabled(false);
+            exitButton.setText("Closing…");
+        }
+        if (!AppSettings.pauseForExit(this)) {
+            resetExitButton();
+            Toast.makeText(this, "Could not save background pause setting.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        try {
+            startService(new Intent(this, RecordingService.class)
+                    .setAction(RecordingService.ACTION_EXIT));
+            finishAndRemoveTask();
+        } catch (RuntimeException failure) {
+            resetExitButton();
+            diag(PhoneDiagnostics.ERROR, "ui.close_failed",
+                    snapshot.currentSessionId,
+                    "Closing recording failed",
+                    PhoneDiagnostics.fields("exception_class",
+                            failure.getClass().getSimpleName()));
+            Toast.makeText(this, "Could not close safely.", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void resetExitButton() {
+        if (exitButton != null) {
+            exitButton.setText("Exit");
+            exitButton.setEnabled(true);
+        }
+    }
+
     @Override public void onBackPressed() {
-        diag(PhoneDiagnostics.INFO, "ui.background_requested", snapshot.currentSessionId,
-                "The main screen was closed; recording and synchronization continue in the foreground service",
-                PhoneDiagnostics.fields("state", snapshot.state,
-                        "recording", snapshot.recording,
-                        "pending_bytes", snapshot.uploadPendingBytes));
-        // Background the recording UI without triggering RecordingService
-        // task-removal cleanup. Capture continues until explicit Pause/Finish.
-        moveTaskToBack(true);
+        requestExitConfirmation();
     }
 
     private static boolean isBusyState(String state) {

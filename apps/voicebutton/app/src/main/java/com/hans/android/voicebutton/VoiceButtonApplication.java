@@ -8,6 +8,10 @@ public final class VoiceButtonApplication extends Application {
         super.onCreate();
         com.hans.android.audio.reliable.RuntimePolicy.load(this);
         CrashRecorder.install(this);
+        // WorkManager or Android package events can recreate our process after
+        // an explicit Exit. Do not restart periodic debug polling or telemetry
+        // merely because Android briefly launched the application process.
+        boolean activelyOpened = !AppSettings.pausedAfterExit(this);
         if (BuildConfig.DEBUG) {
             StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder()
                     .detectDiskReads().detectDiskWrites().detectNetwork()
@@ -15,10 +19,12 @@ public final class VoiceButtonApplication extends Application {
             StrictMode.setVmPolicy(new StrictMode.VmPolicy.Builder()
                     .detectLeakedClosableObjects().detectActivityLeaks()
                     .penaltyLog().build());
-            MainThreadWatchdog.start();
+            if (activelyOpened) MainThreadWatchdog.start();
         }
-        PhoneDiagnostics.initializeAsync(this, BuildConfig.VOICE_BASE_URL,
-                BuildConfig.VERSION_NAME);
+        if (activelyOpened) {
+            PhoneDiagnostics.initializeAsync(this, BuildConfig.VOICE_BASE_URL,
+                    BuildConfig.VERSION_NAME);
+        }
         UploadWorkScheduler.initialize(this);
     }
 }

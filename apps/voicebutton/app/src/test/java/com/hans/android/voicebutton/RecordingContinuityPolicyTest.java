@@ -10,7 +10,7 @@ public class RecordingContinuityPolicyTest {
     @Test public void serviceStaysAliveForPauseWithoutTreatingPauseAsWakeLockWork() {
         assertTrue(RecordingContinuityPolicy.keepServiceAlive(true, false,
                 false, false, false));
-        assertTrue(RecordingContinuityPolicy.keepServiceAlive(false, true,
+        assertFalse(RecordingContinuityPolicy.keepServiceAlive(false, true,
                 false, false, false));
         assertTrue(RecordingContinuityPolicy.keepServiceAlive(false, false,
                 true, false, false));

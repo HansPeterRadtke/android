@@ -15,7 +15,7 @@ public class OverviewProgressTest {
         ReliableSessionManifest done = session("done", true, true, true, 100L, 100L);
         ReliableSessionManifest pending = session("pending", true, true, false, 100L, 40L);
         ReliableSessionManifest open = session("open", false, false, false, 0L, 0L);
-        assertEquals(2, OverviewProgress.uploadFilesRemaining(
+        assertEquals(1, OverviewProgress.uploadFilesRemaining(
                 Arrays.asList(done, pending, open)));
     }
 
@@ -39,7 +39,7 @@ public class OverviewProgressTest {
         segment.seq = 0; segment.mp3Bytes = 0L; segment.remoteAccepted = false;
         value.segments.add(segment);
         assertEquals(-1, OverviewProgress.fileProgressPermille(value));
-        assertTrue(OverviewProgress.hasUnmeasuredUpload(Arrays.asList(value)));
+        assertFalse(OverviewProgress.hasUnmeasuredUpload(Arrays.asList(value)));
     }
 
     private static ReliableSessionManifest session(String id, boolean finished,
@@ -67,8 +67,8 @@ public class OverviewProgressTest {
         segment.pcmBytes = 96000L;
         segment.mp3Bytes = 0L;
         open.segments.add(segment);
-        assertTrue(OverviewProgress.hasUnmeasuredUpload(Arrays.asList(open)));
-        assertEquals(1, OverviewProgress.uploadFilesRemaining(Arrays.asList(open)));
+        assertFalse(OverviewProgress.hasUnmeasuredUpload(Arrays.asList(open)));
+        assertEquals(0, OverviewProgress.uploadFilesRemaining(Arrays.asList(open)));
     }
     @Test public void serverCommittedSessionIsRemovedFromPendingUploads() {
         ReliableSessionManifest stale = session("stale", true, true, false, 100L, 98L);

@@ -13,6 +13,11 @@ public final class RecoveryReceiver extends BroadcastReceiver {
         if (!Intent.ACTION_BOOT_COMPLETED.equals(action)
                 && !Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) return;
         Context app = context.getApplicationContext();
+        // Closing the app is durable user intent across reboot and upgrades.
+        if (AppSettings.pausedAfterExit(app)) {
+            UploadWorkScheduler.stopAll(app);
+            return;
+        }
         PhoneDiagnostics.initializeAsync(app, BuildConfig.VOICE_BASE_URL,
                 BuildConfig.VERSION_NAME);
         UploadWorkScheduler.initialize(app);

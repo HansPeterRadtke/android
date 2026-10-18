@@ -59,19 +59,29 @@ public final class RecordingUploadWorker extends Worker
                         || value.isPermanentlyPaused()) {
                     value.stop();
                     value.awaitStopped(5000L);
-                    return Result.retry();
+                    // A quarantined/blocked file cannot be fixed by immediate
+                    // repeat requests. Let a later explicit user action or the
+                    // periodic safety net re-evaluate the durable state.
+                    return Result.success();
                 }
                 if (!value.isWorkerAlive()) {
                     return Result.retry();
                 }
                 Thread.sleep(1000L);
             }
-            return Result.retry();
+            return retryAfterWorkerStop(
+                    AppSettings.uploadPermitted(getApplicationContext()),
+                    preemptedByService, isStopped()) ? Result.retry()
+                    : Result.success();
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            return Result.retry();
+            return retryAfterWorkerStop(
+                    AppSettings.uploadPermitted(getApplicationContext()),
+                    preemptedByService, true) ? Result.retry()
+                    : Result.success();
         } catch (Exception failure) {
-            return Result.retry();
+            return AppSettings.uploadPermitted(getApplicationContext())
+                    && !preemptedByService ? Result.retry() : Result.success();
         } finally {
             ReliableUploader value = uploader;
             uploader = null;
@@ -81,6 +91,14 @@ public final class RecordingUploadWorker extends Worker
             }
             UploadWorkCoordinator.endBackground(this);
         }
+    }
+
+    static boolean retryAfterWorkerStop(boolean uploadPermitted,
+                                        boolean ownershipPreempted,
+                                        boolean workManagerStopped) {
+        // Explicit Exit and ownership handoff are deliberate cancellations,
+        // not faults requiring rescheduling behind the user's back.
+        return uploadPermitted && !ownershipPreempted && !workManagerStopped;
     }
 
     @Override public void stopForServiceOwnership() {

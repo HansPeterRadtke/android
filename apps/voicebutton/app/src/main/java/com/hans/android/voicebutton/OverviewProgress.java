@@ -13,8 +13,9 @@ final class OverviewProgress {
 
     static boolean needsUpload(ReliableSessionManifest session) {
         if (session == null || session.isDiscardableEmptySession()) return false;
-        if (session.remoteCommitted) return false;
-        if (!session.recordingFinished || !session.conversionFinished) return true;
+        if ("UNREADABLE_METADATA".equals(session.state)) return false;
+        if (session.remoteCommitted || !session.recordingFinished) return false;
+        if (!session.conversionFinished) return true;
         for (ReliableSessionManifest.Segment segment : session.segments) {
             if (!segment.remoteAccepted) return true;
         }

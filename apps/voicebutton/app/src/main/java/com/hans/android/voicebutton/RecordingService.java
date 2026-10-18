@@ -456,6 +456,18 @@ public final class RecordingService extends Service {
                 || requestedFolderId.isEmpty() ? "default" : requestedFolderId;
         final String folderName = requestedFolderName == null
                 || requestedFolderName.isEmpty() ? "Default" : requestedFolderName;
+        if (ACTION_EXIT.equals(action)) {
+            Thread closer = new Thread(
+                    () -> shutdownForUserExit("explicit_close"),
+                    "voicebutton-user-close");
+            closer.start();
+            return START_NOT_STICKY;
+        }
+        if (exitRequested.get()) return START_NOT_STICKY;
+        if (ACTION_START.equals(action) || ACTION_RESUME.equals(action)
+                || ACTION_FINISH_AND_START.equals(action)) {
+            AppSettings.resumeFromUserAction(this);
+        }
         boolean foregroundLaunch = ACTION_START.equals(action)
                 || ACTION_RESUME.equals(action)
                 || ACTION_FINISH_AND_START.equals(action)
@@ -494,6 +506,9 @@ public final class RecordingService extends Service {
     private void executeServiceAction(String action, int deviceId,
                                       String sessionId, String folderId,
                                       String folderName, int startId, int flags) {
+        if (exitRequested.get() || (AppSettings.pausedAfterExit(this)
+                && (ACTION_START.equals(action) || ACTION_RESUME.equals(action)
+                    || ACTION_FINISH_AND_START.equals(action)))) return;
         diag(PhoneDiagnostics.INFO, "service.action_received", sessionId,
                 "RecordingService received an action",
                 PhoneDiagnostics.fields("action", action == null ? "null" : action,
@@ -2630,7 +2645,6 @@ public final class RecordingService extends Service {
     private static boolean isCriticalForegroundState(String state) {
         return "PREPARING".equals(state)
                 || "PAUSING".equals(state)
-                || "PAUSED".equals(state)
                 || "FINISHING".equals(state)
                 || "COMPRESSING".equals(state)
                 || "CLEANING".equals(state);
@@ -2719,6 +2733,12 @@ public final class RecordingService extends Service {
 
     private void shutdownForUserExit(String reason) {
         if (!exitRequested.compareAndSet(false, true)) return;
+        boolean exitStateSaved = AppSettings.pauseForExit(this);
+        if (!exitStateSaved) {
+            diag(PhoneDiagnostics.ERROR, "service.exit_pause_not_persisted",
+                    currentSessionId, "Could not persist upload suspension",
+                    PhoneDiagnostics.fields());
+        }
         diag(PhoneDiagnostics.WARN, "service.user_exit", currentSessionId,
                 "Voice Button was explicitly closed; all workers are stopping",
                 PhoneDiagnostics.fields("reason", reason,
@@ -2730,6 +2750,8 @@ public final class RecordingService extends Service {
         main.removeCallbacks(continuityTicker);
         main.removeCallbacks(recordingRecovery);
         main.removeCallbacks(uploaderRefresh);
+        ReliableUploader stoppingUploader = uploader;
+        if (stoppingUploader != null) stoppingUploader.stop();
         failureAlarm.release();
         unregisterNetworkCallback();
         PhoneDiagnostics value = diagnostics;
@@ -2743,10 +2765,22 @@ public final class RecordingService extends Service {
             }
         }
         if (recorder.isRecording()) {
-            stopDisposition = "task_removed".equals(reason)
-                    ? STOP_PAUSE : STOP_INTERRUPT;
+            // Closing preserves the incomplete recording as a paused journal.
+            stopDisposition = STOP_PAUSE;
         }
         recorder.stop();
+        // The durable gate prevents queued work from sending more bytes. Cancel
+        // scheduled uploads while the recorder's PCM writer finishes closing.
+        // Cancel both periodic and one-shot WorkManager jobs without blocking
+        // the Activity's UI thread. The durable upload permission gate was
+        // written first, so even a concurrently running worker must stop.
+        try {
+            UploadWorkScheduler.stopAll(this);
+        } catch (RuntimeException cancellationFailure) {
+            diagError("service.exit_work_cancel_failed", currentSessionId,
+                    "Cancelling scheduled background uploads after Exit",
+                    cancellationFailure, PhoneDiagnostics.fields());
+        }
         // Data safety has priority over making the task disappear instantly.
         // Keep foreground execution and the wake lock until the journal has
         // flushed, synchronized, and atomically closed.
@@ -2756,6 +2790,27 @@ public final class RecordingService extends Service {
                     "recording.exit_journal_close_timeout", currentSessionId,
                     "Explicit close reached thirty seconds before the PCM journal thread stopped; the open journal remains recoverable",
                     PhoneDiagnostics.fields("reason", reason));
+        }
+        // onJournalCommitted and onStopped enqueue durable manifest updates
+        // on the single-thread maintenance executor. The capture thread joins
+        // BEFORE this barrier is enqueued. Without it, onDestroy can interrupt
+        // markPaused/commitPcmJournal and leave the just-closed recording
+        // looking active on the next launch.
+        boolean recordingMetadataDrained = false;
+        if (recorderStopped) {
+            try {
+                java.util.concurrent.Future<?> barrier =
+                        maintenanceExecutor.submit(() -> {});
+                barrier.get(10_000L, TimeUnit.MILLISECONDS);
+                recordingMetadataDrained = true;
+            } catch (Exception metadataFailure) {
+                recordingMetadataDrained = false;
+                diagError("recording.exit_metadata_drain_failed", currentSessionId,
+                        "Waiting for durable recording journal and paused-state metadata",
+                        metadataFailure, PhoneDiagnostics.fields(
+                                "reason", reason,
+                                "recorder_stopped", recorderStopped));
+            }
         }
         releaseCaptureWakeLock();
         ReliableUploader currentUploader = uploader;
@@ -2790,27 +2845,22 @@ public final class RecordingService extends Service {
         diag(PhoneDiagnostics.INFO, "service.user_exit_complete", currentSessionId,
                 "Voice Button shutdown sequence completed",
                 PhoneDiagnostics.fields("recorder_stopped", recorderStopped,
+                        "recording_metadata_drained", recordingMetadataDrained,
                         "uploader_stopped", uploaderStopped,
                         "conversion_stopped", conversionStopped,
                         "maintenance_stopped", maintenanceStopped));
         if (value != null) value.shutdownForAppExit();
+        // The debug APK is also distributed for on-device diagnosis. Do not
+        // leave its 250-ms watchdog polling forever after explicit close.
+        if (BuildConfig.DEBUG) MainThreadWatchdog.stop();
         stopSelf();
     }
 
     @Override public void onTaskRemoved(Intent rootIntent) {
-        diag(PhoneDiagnostics.INFO, "service.task_removed", currentSessionId,
-                "Recording UI removed; protected capture and queued uploads continue",
-                PhoneDiagnostics.fields("recording", recorder.isRecording(),
-                        "background_work", hasBackgroundWork(),
-                        "recovery_pending", recordingRecoveryPending,
-                        "alarm_active", failureAlarm.isActive()));
-        if (shouldKeepServiceAlive()) {
-            ensureForeground();
-            main.removeCallbacks(continuityTicker);
-            main.post(continuityTicker);
-        } else {
-            leaveForegroundIfIdle();
-        }
+        AppSettings.pauseForExit(this);
+        Thread closer = new Thread(
+                () -> shutdownForUserExit("task_removed"), "voicebutton-task-close");
+        closer.start();
         super.onTaskRemoved(rootIntent);
     }
 
@@ -2869,7 +2919,10 @@ public final class RecordingService extends Service {
             foreground = false;
         }
         UploadWorkCoordinator.markServiceStopped();
-        if (pendingUpload) UploadWorkScheduler.enqueue(this, "service_destroyed");
+        if (pendingUpload && !exitRequested.get()
+                && !AppSettings.pausedAfterExit(this)) {
+            UploadWorkScheduler.enqueue(this, "service_destroyed");
+        }
         super.onDestroy();
     }
 }

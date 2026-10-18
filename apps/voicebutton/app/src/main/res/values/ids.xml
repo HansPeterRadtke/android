@@ -1,6 +1,7 @@
 <resources>
     <item name="voicebutton_finish" type="id" />
     <item name="voicebutton_more" type="id" />
+    <item name="voicebutton_exit" type="id" />
     <item name="voicebutton_backup_text" type="id" />
     <item name="voicebutton_backup_progress" type="id" />
     <item name="voicebutton_status_title" type="id" />
