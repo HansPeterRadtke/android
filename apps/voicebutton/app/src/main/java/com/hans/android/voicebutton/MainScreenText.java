@@ -14,7 +14,7 @@ final class MainScreenText {
                            String liveOperation, int liveSequence,
                            long liveDurableBytes, long liveTotalBytes) {
         if ("STARTING".equals(state)) {
-            return "Upload: continuing in the background while recording opens";
+            return "Opening microphone; existing audio remains safe on this phone";
         }
         if ("retry_backoff".equals(liveOperation) && pendingBytes > 0L) {
             return "Upload: Jetson unavailable · retrying · "

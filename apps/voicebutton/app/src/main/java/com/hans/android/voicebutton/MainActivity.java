@@ -204,7 +204,9 @@ public final class MainActivity extends Activity {
             diag(PhoneDiagnostics.INFO, "ui.main.service_connected", null,
                     "Main screen connected to RecordingService", PhoneDiagnostics.fields());
             service.addStatusListener(statusListener);
-            refreshFolders();
+            // The listener performs the first folder refresh after the
+            // authoritative storage owner has resolved READY. A premature
+            // refresh could reset a saved nondefault folder selection.
             render(service.getSnapshot());
             consumeFinishConfirmationRequest();
         }
@@ -272,7 +274,9 @@ public final class MainActivity extends Activity {
                 "MainActivity onStart", PhoneDiagnostics.fields());
         registerAudioDeviceCallback();
         if (!inputsLoaded) refreshInputs();
-        refreshFolders();
+        // On cold startup, wait for the service's repaired index. On later
+        // visits refresh known folders asynchronously as before.
+        if (foldersRefreshedAfterReady) refreshFolders();
         bindService(new Intent(this, RecordingService.class), connection,
                 Context.BIND_AUTO_CREATE);
         transcriptionStatusPolling = true;

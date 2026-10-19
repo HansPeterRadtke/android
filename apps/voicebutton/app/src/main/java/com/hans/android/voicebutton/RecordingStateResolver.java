@@ -40,7 +40,7 @@ final class RecordingStateResolver {
 
     static String explanation(String normalizedState, String requestedExplanation) {
         if ("RECORDING".equals(normalizedState)) {
-            return "Audio is journaled locally and compressed in the background";
+            return "Recording safely to local PCM; MP3 created after pause or finish";
         }
         if ("PAUSED".equals(normalizedState)) {
             return "Recording is paused and ready to play or resume";

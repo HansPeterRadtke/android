@@ -37,7 +37,7 @@ public class RecordingStateResolverTest {
                 RecordingStateResolver.primaryAction(false, false, true));
     }
     @Test public void uploadExplanationCannotReplaceRecordingOrPausedExplanation() {
-        assertEquals("Audio is journaled locally and compressed in the background",
+        assertEquals("Recording safely to local PCM; MP3 created after pause or finish",
                 RecordingStateResolver.explanation("RECORDING", "Sending segment 2 of 2"));
         assertEquals("Recording is paused and ready to play or resume",
                 RecordingStateResolver.explanation("PAUSED", "Reconciling server storage"));
