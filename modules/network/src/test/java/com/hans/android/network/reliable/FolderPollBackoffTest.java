@@ -37,6 +37,14 @@ public class FolderPollBackoffTest {
                 new java.io.IOException("network unavailable")));
     }
 
+    @Test public void privateFolderWritesCannotSpamWhenAuthorizationFails() {
+        assertTrue(ReliableUploader.mayAttemptFolderWrite(false, 1000L, 0L));
+        assertFalse(ReliableUploader.mayAttemptFolderWrite(true, 9999999L, 0L));
+        assertFalse(ReliableUploader.mayAttemptFolderWrite(false, 29999L, 30000L));
+        assertTrue(ReliableUploader.mayAttemptFolderWrite(false, 30000L, 30000L));
+        assertFalse(ReliableUploader.mayAttemptFolderWrite(false, 1L, 30000L));
+    }
+
     @Test public void transientErrorsAlsoHaveBackoff() {
         assertEquals(30000L, ReliableUploader.folderPullDelayMs(
                 new ReliableUploadClient.ProtocolException(503, "server unavailable")));

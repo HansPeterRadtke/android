@@ -17,7 +17,7 @@ final class BackupOverviewText {
                                   String operation) {
         if (knownBytes <= 0L) {
             if (encodingUnknown) return "Backup · finalizing audio locally; byte total not yet known";
-            if (openRecording) return "Backup · recording locally; waiting for first encoded chunk";
+            if (openRecording) return "Backup · current recording safe locally; upload after pause";
             if (unfinishedFiles > 0) return "Backup · awaiting locally encoded audio";
             return "Backup · no pending audio";
         }
@@ -38,7 +38,7 @@ final class BackupOverviewText {
         } else if (encodingUnknown) state = "More MP3 audio is finalizing";
         else if (durable >= knownBytes && unfinishedFiles > 0) {
             state = "Final server commit still pending";
-        } else if (openRecording) state = "Recording continues; total grows";
+        } else if (openRecording) state = "Current recording local until paused or finished";
         else if (unfinishedFiles > 0) {
             state = unfinishedFiles + (unfinishedFiles == 1
                     ? " recording waiting" : " recordings waiting");
@@ -50,10 +50,12 @@ final class BackupOverviewText {
                               boolean stillRecording) {
         String name = fileName == null ? "" : fileName.trim();
         if (name.isEmpty()) return "";
-        if (progressPermille < 0) return "File · " + name + " · preparing local MP3";
+        if (progressPermille < 0) return "File · " + name
+                + (stillRecording ? " · recording locally; upload not started"
+                        : " · preparing local MP3");
         int percent = Math.max(0, Math.min(1000, progressPermille)) / 10;
         return "File · " + name + " · " + percent + "% confirmed"
-                + (stillRecording ? " of encoded chunks (recording continues)" : "");
+                + (stillRecording ? " of available chunks (new audio remains local)" : "");
     }
 
     static String summary(List<ReliableSessionManifest> sessions,

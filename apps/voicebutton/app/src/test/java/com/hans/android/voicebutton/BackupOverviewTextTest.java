@@ -43,7 +43,7 @@ public class BackupOverviewTextTest {
         assertFalse(encoding.contains("%"));
         String active = BackupOverviewText.durableProgress(
                 0L, 0L, 0, true, false, true, "idle");
-        assertTrue(active.contains("first encoded chunk"));
+        assertTrue(active.contains("upload after pause"));
         assertFalse(active.contains("%"));
     }
 
@@ -51,9 +51,9 @@ public class BackupOverviewTextTest {
         String live = BackupOverviewText.durableProgress(
                 700L, 1000L, 0, true, false, true, "upload_chunk");
         assertTrue(live.contains("70%"));
-        assertTrue(live.contains("Recording continues; total grows"));
+        assertTrue(live.contains("Current recording local until paused or finished"));
         assertTrue(BackupOverviewText.currentFile("test.mp3", 700, true)
-                .contains("recording continues"));
+                .contains("new audio remains local"));
         assertTrue(BackupOverviewText.currentFile("test.mp3", -1, false)
                 .contains("preparing local MP3"));
     }

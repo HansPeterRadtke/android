@@ -30,6 +30,7 @@ public final class ReliableUploader {
     }
 
     private static final long PERMANENT_RECHECK_MS = 15L * 60L * 1000L;
+    private static final long IDLE_RECHECK_MS = 30_000L;
     private static final ReentrantLock PROCESS_UPLOAD_LEASE = new ReentrantLock(true);
     private static final AtomicReference<ReliableUploader> BACKGROUND_OWNER =
             new AtomicReference<>();
@@ -42,6 +43,7 @@ public final class ReliableUploader {
     private final boolean completedOnly;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final Object wake = new Object();
+    private long wakeEpoch;
     private final Set<String> remoteFoldersKnown = new HashSet<>();
     private final Set<String> quarantinedSessionIds =
             Collections.synchronizedSet(new HashSet<>());
@@ -59,6 +61,8 @@ public final class ReliableUploader {
     private volatile boolean remoteFoldersReconciled;
     private volatile String currentRecordingServerToken = "";
     private volatile long nextRemoteFolderAttemptWallMs;
+    private volatile long nextRemoteFolderWriteAttemptWallMs;
+    private volatile boolean folderWriteAuthorizationDenied;
 
     public static final class LiveProgress {
         public final String operation;
@@ -114,6 +118,8 @@ public final class ReliableUploader {
         currentRecordingServerToken = updated;
         remoteFoldersReconciled = false;
         nextRemoteFolderAttemptWallMs = 0L;
+        nextRemoteFolderWriteAttemptWallMs = 0L;
+        folderWriteAuthorizationDenied = false;
         signal();
     }
 
@@ -153,7 +159,9 @@ public final class ReliableUploader {
 
     public boolean hasActionableTransferWork() {
         try {
-            if (!store.foldersNeedingSync().isEmpty()) return true;
+            if (!store.foldersNeedingSync().isEmpty()
+                    && mayAttemptFolderWrite(folderWriteAuthorizationDenied,
+                            System.currentTimeMillis(), nextRemoteFolderWriteAttemptWallMs)) return true;
             for (ReliableSessionManifest manifest : store.list()) {
                 if (!eligible(manifest) || (completedOnly && !manifest.recordingFinished)) continue;
                 if (needsTransferWork(manifest)
@@ -211,6 +219,10 @@ public final class ReliableUploader {
         return code == 401 || code == 403;
     }
 
+    static boolean mayAttemptFolderWrite(boolean accessDenied, long nowMs, long nextAttemptMs) {
+        return !accessDenied && nowMs >= nextAttemptMs;
+    }
+
     static long folderPullDelayMs(Throwable problem) {
         if (problem instanceof ReliableUploadClient.ProtocolException) {
             int code = ((ReliableUploadClient.ProtocolException) problem).httpCode;
@@ -219,11 +231,21 @@ public final class ReliableUploader {
         return 30_000L;
     }
 
-    public void signal() { synchronized (wake) { wake.notifyAll(); } }
+    public void signal() {
+        synchronized (wake) {
+            wakeEpoch++;
+            wake.notifyAll();
+        }
+    }
+
+    private long signalEpoch() {
+        synchronized (wake) { return wakeEpoch; }
+    }
 
     public void onNetworkChanged() {
         remoteFoldersReconciled = false;
         nextRemoteFolderAttemptWallMs = 0L;
+        if (!folderWriteAuthorizationDenied) nextRemoteFolderWriteAttemptWallMs = 0L;
         client.cancelActiveRequest();
         ensureRunning();
         signal();
@@ -277,12 +299,14 @@ public final class ReliableUploader {
             PROCESS_UPLOAD_LEASE.lockInterruptibly();
             leaseHeld = true;
             while (running.get() && uploadPermitted()) {
+                long cycleSignalEpoch = signalEpoch();
                 client.setAutomaticTranscription(context.getSharedPreferences("voicebutton_behavior",Context.MODE_PRIVATE)
                         .getBoolean("automatic_transcription",true));
                 boolean found = false;
                 boolean actionable = false;
                 boolean quarantinedFound = false;
                 boolean urgentAudio = false;
+                boolean audioActionable = false;
                 boolean networkUnavailable = false;
                 try {
                     // WorkManager can own uploads without a bound Activity or
@@ -294,6 +318,8 @@ public final class ReliableUploader {
                         currentRecordingServerToken = configuredToken;
                         remoteFoldersReconciled = false;
                         nextRemoteFolderAttemptWallMs = 0L;
+                        nextRemoteFolderWriteAttemptWallMs = 0L;
+                        folderWriteAuthorizationDenied = false;
                     }
                     boolean privateAccessConfigured = !configuredToken.isEmpty();
                     if (!privateAccessConfigured) {
@@ -335,14 +361,18 @@ public final class ReliableUploader {
                     }
                     List<ReliableSessionStore.Folder> pendingFolders =
                             store.foldersNeedingSync();
+                    boolean deferredFolderSync = false;
                     if (!pendingFolders.isEmpty()) {
                         found = true;
-                        actionable = true;
                         if (!hasNetwork()) {
                             networkUnavailable = true;
                             listener.onState("",
                                     "Waiting for network; folder changes remain queued");
+                        } else if (!mayAttemptFolderWrite(folderWriteAuthorizationDenied,
+                                System.currentTimeMillis(), nextRemoteFolderWriteAttemptWallMs)) {
+                            deferredFolderSync = true;
                         } else {
+                            actionable = true;
                             for (ReliableSessionStore.Folder folder : pendingFolders) {
                                 if (!running.get()) break;
                                 try {
@@ -353,6 +383,12 @@ public final class ReliableUploader {
                                             + folder.name + "\u0000" + folder.parentId);
                                     listener.onChanged();
                                 } catch (Exception folderFailure) {
+                                    Throwable cause = rootCause(folderFailure);
+                                    folderWriteAuthorizationDenied = folderAccessDenied(cause);
+                                    nextRemoteFolderWriteAttemptWallMs =
+                                            folderWriteAuthorizationDenied ? 0L
+                                            : System.currentTimeMillis() + folderPullDelayMs(cause);
+                                    deferredFolderSync = true;
                                     lastFailure = folderFailure.getClass().getSimpleName()
                                             + ": " + String.valueOf(folderFailure.getMessage());
                                     listener.onDiagnostic("WARN", "upload.folder_sync_deferred", "",
@@ -363,6 +399,8 @@ public final class ReliableUploader {
                                                     "exception_class", folderFailure.getClass().getName(),
                                                     "exception_message", String.valueOf(folderFailure.getMessage())),
                                             folderFailure);
+                                    // Stop metadata attempts until auth is changed or retry expires.
+                                    break;
                                 }
                             }
                         }
@@ -398,6 +436,7 @@ public final class ReliableUploader {
                             }
                             if (audioPass) manifest = store.load(manifest.sessionId);
                             actionable = true;
+                            audioActionable = true;
                             urgentAudio |= readablePendingAudio;
                             if (!hasNetwork()) {
                                 networkUnavailable = true;
@@ -439,11 +478,17 @@ public final class ReliableUploader {
                         listener.onState("", "Backup incomplete: " + lastFailure
                                 + ". Open Library and keep the affected local audio.");
                     }
+                    long folderWaitMs = folderWriteAuthorizationDenied
+                            ? PERMANENT_RECHECK_MS
+                            : Math.max(1000L, Math.min(PERMANENT_RECHECK_MS,
+                                    nextRemoteFolderWriteAttemptWallMs - System.currentTimeMillis()));
                     waitForSignal(networkUnavailable ? 60_000L
                             : urgentAudio ? 250L
+                            : (deferredFolderSync && !audioActionable)
+                            ? folderWaitMs
                             : (!actionable && quarantinedFound)
                             ? PERMANENT_RECHECK_MS
-                            : (found ? 1000L : 1500L));
+                            : (found ? 1000L : IDLE_RECHECK_MS), cycleSignalEpoch);
                 } catch (Exception failure) {
                     if (shouldStopAfterFailure(running.get(), failure)) break;
                     if (Thread.currentThread().isInterrupted()) Thread.interrupted();
@@ -946,8 +991,12 @@ public final class ReliableUploader {
     }
 
     private void waitForSignal(long millis) {
+        waitForSignal(millis, signalEpoch());
+    }
+
+    private void waitForSignal(long millis, long observedEpoch) {
         synchronized (wake) {
-            if (!running.get()) return;
+            if (!running.get() || wakeEpoch != observedEpoch) return;
             try {
                 wake.wait(Math.max(1L, millis));
             } catch (InterruptedException interrupted) {
