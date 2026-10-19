@@ -1547,6 +1547,8 @@ public final class RecordingService extends Service {
     }
 
     private void handleRecorderStopped(String sessionId) {
+        LivePcmReplicator replica = livePcmBackup;
+        if (replica != null) replica.captureStopped(sessionId);
         main.removeCallbacks(ticker);
         liveInputRmsDbfs = -120f;
         liveInputPeakDbfs = -120f;

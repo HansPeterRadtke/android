@@ -63,7 +63,12 @@ public class LivePcmReplicatorTest {
             assertTrue(backup.progress().active);
             backup.onDurablePrefix("session-one", 0, previous, 48000, 120L);
             assertEquals(120L, backup.progress().locallyDurableBytes);
+            backup.captureStopped("session-one");
+            assertFalse("Background backup is not an active microphone",
+                    backup.progress().active);
+            assertEquals(120L, backup.progress().locallyDurableBytes);
             backup.begin("session-two", "default", "conversation");
+            assertTrue(backup.progress().active);
             assertEquals("Unacknowledged session-one data was discarded",
                     120L, backup.progress().locallyDurableBytes);
             backup.onDurablePrefix("session-two", 0, next, 48000, 80L);
@@ -73,6 +78,12 @@ public class LivePcmReplicatorTest {
             backup.onDurablePrefix("session-one", 0, previous, 48000, 160L);
             assertEquals(240L, backup.progress().locallyDurableBytes);
             assertEquals(0L, backup.progress().acknowledgedBytes);
+            backup.captureStopped("session-one");
+            assertTrue("Late closure of older recording cannot stop new capture",
+                    backup.progress().active);
+            backup.captureStopped("session-two");
+            assertFalse(backup.progress().active);
+            assertEquals(240L, backup.progress().locallyDurableBytes);
         } finally {
             backup.stop();
             assertTrue(backup.awaitStopped(5000L));

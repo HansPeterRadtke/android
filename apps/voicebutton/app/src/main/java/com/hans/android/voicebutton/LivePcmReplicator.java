@@ -35,6 +35,9 @@ final class LivePcmReplicator {
     private long nextRetryElapsed;
     private int failedAttempts;
     private volatile boolean pairedConfigured;
+    // The background worker may remain alive to finish pending raw backup
+    // after capture stops. Do not report that as an active microphone session.
+    private boolean captureActive;
 
     static final class Progress {
         final boolean paired;
@@ -106,6 +109,7 @@ final class LivePcmReplicator {
             failedAttempts = 0;
             nextRetryElapsed = 0L;
             pairedConfigured = paired;
+            captureActive = true;
             if (running.compareAndSet(false, true)) {
                 worker = new Thread(this::loop, "voicebutton-live-pcm-replica");
                 worker.setDaemon(true);
@@ -145,6 +149,18 @@ final class LivePcmReplicator {
         }
     }
 
+    void captureStopped(String session) {
+        synchronized (wake) {
+            if (sessionId.equals(session)) {
+                captureActive = false;
+                updateProgressLocked(pairedConfigured
+                        ? "Recording stopped; background live backup can finish"
+                        : "Recording stopped; live backup was unpaired");
+                wake.notifyAll();
+            }
+        }
+    }
+
     void credentialsChanged() {
         pairedConfigured = MobileAudioCredential.isConfigured(context);
         synchronized (wake) {
@@ -171,6 +187,7 @@ final class LivePcmReplicator {
 
     void stop() {
         running.set(false);
+        synchronized (wake) { captureActive = false; }
         client.cancelActiveRequest();
         synchronized (wake) { wake.notifyAll(); }
         Thread value = worker;
@@ -185,7 +202,7 @@ final class LivePcmReplicator {
                     item.remoteOffset));
         }
         progress = new Progress(pairedConfigured,
-                running.get(), acknowledged, local, state);
+                captureActive && running.get(), acknowledged, local, state);
     }
 
     private void loop() {
@@ -205,7 +222,10 @@ final class LivePcmReplicator {
                     synchronized (wake) {
                         updateProgressLocked(
                                 "Live backup requires recording-server pairing");
-                        wake.wait(1000L);
+                        // Credentials are changed through settings, which
+                        // signals this lock. No reason to poll every second
+                        // forever on an unpaired phone.
+                        wake.wait(60_000L);
                     }
                     continue;
                 }

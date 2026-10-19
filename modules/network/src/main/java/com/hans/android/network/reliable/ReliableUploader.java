@@ -383,6 +383,8 @@ public final class ReliableUploader {
                                             + folder.name + "\u0000" + folder.parentId);
                                     listener.onChanged();
                                 } catch (Exception folderFailure) {
+                                    if (!running.get() || Thread.currentThread().isInterrupted())
+                                        throw folderFailure;
                                     Throwable cause = rootCause(folderFailure);
                                     folderWriteAuthorizationDenied = folderAccessDenied(cause);
                                     nextRemoteFolderWriteAttemptWallMs =
@@ -463,6 +465,7 @@ public final class ReliableUploader {
                     retryAttempt = 0;
                     if (!quarantinedFound) lastFailureRetryable = true;
                     if (!found) {
+                        lastFailure = "";
                         currentOperation="idle";
                         context.getSharedPreferences("voicebutton_behavior",Context.MODE_PRIVATE).edit()
                                 .putLong("manual_upload_before_ms",0L).apply();
@@ -719,7 +722,8 @@ public final class ReliableUploader {
         long previousDurableBytes = currentDurableBytes;
         currentSessionId = sessionId;
         currentOperation = "reconcile";
-        lastProgressWallMs = System.currentTimeMillis();
+        // Status lookups and metadata retries are not durable byte progress.
+        boolean metadataDeferred = false;
         ReliableSessionStore.Folder localFolder = store.getFolder(snapshot.folderId);
         String folderKey = snapshot.folderId + "\u0000" + snapshot.folderName
                 + "\u0000" + localFolder.parentId;
@@ -731,6 +735,11 @@ public final class ReliableUploader {
                         localFolder.parentId);
                 remoteFoldersKnown.add(folderKey);
             } catch (Exception folderFailure) {
+                // Foreground microphone capture deliberately cancels old
+                // uploader HTTP requests. That is not a failed recording.
+                if (!running.get() || Thread.currentThread().isInterrupted())
+                    throw folderFailure;
+                metadataDeferred = true;
                 lastFailure = folderFailure.getClass().getSimpleName()
                         + ": " + String.valueOf(folderFailure.getMessage());
                 listener.onDiagnostic("WARN", "upload.session_folder_sync_deferred",
@@ -775,7 +784,10 @@ public final class ReliableUploader {
             store.markRemoteDisplayName(sessionId, manifest.displayName);
             manifest = store.load(sessionId);
         } catch (Exception metadataFailure) {
+            if (!running.get() || Thread.currentThread().isInterrupted())
+                throw metadataFailure;
             if(client.requiresTranscriptionPolicyConfirmation())throw metadataFailure;
+            metadataDeferred = true;
             lastFailure = metadataFailure.getClass().getSimpleName()
                     + ": " + String.valueOf(metadataFailure.getMessage());
             listener.onDiagnostic("WARN", "upload.metadata_sync_deferred",
@@ -895,6 +907,8 @@ public final class ReliableUploader {
                 lastProgressWallMs = System.currentTimeMillis();
                 lastFailure = "";
             } catch (Exception failure) {
+                if (!running.get() || Thread.currentThread().isInterrupted())
+                    throw failure;
                 lastFailure = failure.getClass().getSimpleName() + ": "
                         + String.valueOf(failure.getMessage());
                 store.markSendError(sessionId, segment.seq,
@@ -932,7 +946,12 @@ public final class ReliableUploader {
         currentSequence = -1;
         currentDurableBytes = 0L;
         currentTotalBytes = 0L;
-        lastProgressWallMs = System.currentTimeMillis();
+        if (!metadataDeferred) {
+            // A successful reconciliation supersedes old cancellation and
+            // retry errors. Do not show a stale Last Failure after recovery.
+            lastFailure = "";
+            lastFailureRetryable = true;
+        }
         listener.onChanged();
     }
 
