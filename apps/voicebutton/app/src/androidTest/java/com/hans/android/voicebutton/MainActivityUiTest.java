@@ -64,7 +64,6 @@ public class MainActivityUiTest {
             onView(withId(R.id.voicebutton_primary)).check(matches(isDisplayed()));
             onView(withId(R.id.voicebutton_primary)).check(matches(withText("Start recording")));
             onView(withId(R.id.voicebutton_more)).check(matches(isDisplayed()));
-            onView(withId(R.id.voicebutton_exit)).check(matches(isDisplayed()));
             onView(withId(R.id.voicebutton_backup_text))
                     .check(matches(isDisplayed()));
             onView(withId(R.id.voicebutton_backup_progress))

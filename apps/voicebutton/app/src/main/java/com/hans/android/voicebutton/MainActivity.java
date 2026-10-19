@@ -342,13 +342,6 @@ public final class MainActivity extends Activity {
         moreButton.setOnClickListener(v -> showMoreMenu());
         header.addView(moreButton, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        exitButton = materialToolbarButton("Exit");
-        exitButton.setId(R.id.voicebutton_exit);
-        exitButton.setMinWidth(AndroidUi.dp(this, 54));
-        exitButton.setContentDescription("Close Voice Button and pause any recording and backups");
-        exitButton.setOnClickListener(v -> requestExitConfirmation());
-        header.addView(exitButton, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(header);
 
         transferText = AndroidUi.text(this,

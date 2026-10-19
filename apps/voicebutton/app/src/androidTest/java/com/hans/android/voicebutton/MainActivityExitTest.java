@@ -53,11 +53,10 @@ public class MainActivityExitTest {
         RecordingUploadPolicy.resumeForUserAction(context);
     }
 
-    @Test public void visibleExitClosesUiAndPersistentlyStopsBackgroundTransfers() {
+    @Test public void backClosesUiAndPersistentlyStopsBackgroundTransfers() {
         try (ActivityScenario<MainActivity> scenario =
                      ActivityScenario.launch(MainActivity.class)) {
-            onView(withId(R.id.voicebutton_exit)).check(matches(isDisplayed()));
-            onView(withId(R.id.voicebutton_exit)).perform(click());
+            scenario.onActivity(MainActivity::onBackPressed);
             assertTrue("Exit must persist its intent before the Activity closes",
                     RecordingUploadPolicy.pausedByExit(context));
             assertFalse("Exit must disable all automatic and manual upload loops",
@@ -102,7 +101,7 @@ public class MainActivityExitTest {
                     android.os.SystemClock.sleep(200);
                 }
             }
-            onView(withId(R.id.voicebutton_exit)).perform(click());
+            scenario.onActivity(MainActivity::onBackPressed);
             onView(withText("Pause and exit")).perform(click());
             assertTrue(RecordingUploadPolicy.pausedByExit(context));
             waitForServiceShutdown();

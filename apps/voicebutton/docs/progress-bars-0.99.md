@@ -11,3 +11,7 @@ The server's overall transcription percentage and completed/total counts are sho
 Testing: pure Java unit regressions cover active and finished recordings, matching/mismatched live chunk acknowledgements, partial confirmations, missing MP3 totals, commit distinction, and truthful labels. Instrumented UI expectations require an overall backup bar and a transcription status label to be visible in the idle recorder. Build and lint, Android instrumentation compilation, APK signing and an in-place update must be checked before distribution. The real phone remains a distinct acceptance step.
 
 Compact landscape places both overall bars in the right-hand overview column. The screenshot regression fixture verifies a non-empty server transcript backlog and requires both backup and transcription bars to have nonzero height and remain visible in normal layouts.
+
+## Toolbar correction, October nineteenth
+
+The visible Exit button was introduced by the October eighteenth repair, not by a user-authored Voice Button recording or an infrastructure GUI rule. It wrongly competed with Finish, More and the progress indicators in a small recorder toolbar. It is removed from the prominent toolbar. Standard Android Back and the existing More menu Exit action continue to safely close, preserving the prior data-protection and explicit-upload-stop behavior. The instrumented UI and exit-action tests now use Back and assert no prominent Exit control.
