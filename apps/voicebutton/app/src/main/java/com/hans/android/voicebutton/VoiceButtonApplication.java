@@ -25,6 +25,18 @@ public final class VoiceButtonApplication extends Application {
             PhoneDiagnostics.initializeAsync(this, BuildConfig.VOICE_BASE_URL,
                     BuildConfig.VERSION_NAME);
         }
-        UploadWorkScheduler.initialize(this);
+        // WorkManager database initialization and periodic-job reconciliation
+        // must not delay the first Activity frame or microphone readiness.
+        // The already-persisted scheduler jobs survive process restarts.
+        Thread scheduler = new Thread(() -> {
+            try {
+                UploadWorkScheduler.initialize(getApplicationContext());
+            } catch (RuntimeException schedulingFailure) {
+                android.util.Log.e("VoiceButton", "Background upload scheduling failed",
+                        schedulingFailure);
+            }
+        }, "voicebutton-work-scheduler-init");
+        scheduler.setDaemon(true);
+        scheduler.start();
     }
 }

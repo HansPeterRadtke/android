@@ -124,6 +124,11 @@ public final class ReliableSessionStore {
     }
 
     private ReliableSessionStore(Context context, boolean recover) throws IOException {
+        this(context, recover, true);
+    }
+
+    private ReliableSessionStore(Context context, boolean recover,
+                                 boolean repairIndex) throws IOException {
         root = new File(context.getNoBackupFilesDir(), "reliable_audio_sessions");
         foldersRoot = new File(root, "folders");
         folderIndex = new File(root, "folders.json");
@@ -131,7 +136,7 @@ public final class ReliableSessionStore {
         ensureDirectory(foldersRoot);
         synchronized (FOLDER_INDEX_LOCK) {
             ensureDefaultFolder();
-            repairFolderIndexFromDisk();
+            if (repairIndex) repairFolderIndexFromDisk();
         }
         conversationId = loadOrCreateConversationId();
         if (recover) {
@@ -143,6 +148,14 @@ public final class ReliableSessionStore {
     public static ReliableSessionStore openForBrowsing(Context context)
             throws IOException {
         return new ReliableSessionStore(context, false);
+    }
+
+    /** Only use after an authoritative store has repaired the folder index.
+     * Repeating physical manifest discovery for a second read-only status
+     * handle adds unnecessary seconds to startup on large phone libraries. */
+    public static ReliableSessionStore openStatusReader(Context context)
+            throws IOException {
+        return new ReliableSessionStore(context, false, false);
     }
 
     public File getRoot() { return root; }
@@ -1260,6 +1273,34 @@ public final class ReliableSessionStore {
     }
 
     public synchronized long localBytes() { return directoryBytes(root); }
+
+    /** Read-only size scan, deliberately NOT synchronized with the metadata
+     * lock used by the microphone journal. Large libraries must not delay
+     * capture or the first READY state just to count existing files.
+     */
+    public long localBytesInterruptible(BooleanSupplier cancellation)
+            throws IOException {
+        return directoryBytesInterruptible(root, cancellation);
+    }
+
+    static long directoryBytesInterruptible(File file,
+                                            BooleanSupplier cancellation)
+            throws IOException {
+        if (cancellation != null && cancellation.getAsBoolean()) {
+            throw new java.io.InterruptedIOException("Library size scan preempted by capture");
+        }
+        if (file == null || !file.exists()) return 0L;
+        if (file.isFile()) return file.length();
+        File[] entries = file.listFiles();
+        if (entries == null) {
+            throw new IOException("Unable to enumerate private recording storage");
+        }
+        long total = 0L;
+        for (File child : entries) {
+            total += directoryBytesInterruptible(child, cancellation);
+        }
+        return total;
+    }
 
     public synchronized void deleteAll() throws IOException {
         File[] children = root.listFiles();

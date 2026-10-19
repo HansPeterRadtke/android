@@ -36,8 +36,17 @@ public final class RecordingUploadWorker extends Worker
         if(!AppSettings.uploadPermitted(getApplicationContext()))return Result.success();
         if (!UploadWorkCoordinator.beginBackground(this)) return Result.success();
         try {
-            ReliableSessionStore store = new ReliableSessionStore(
+            // Running full recoverAll() in the constructor is not preemptible.
+            // The foreground recorder can otherwise wait many seconds for
+            // WorkManager to finish walking old library metadata.
+            ReliableSessionStore store = ReliableSessionStore.openForBrowsing(
                     getApplicationContext());
+            if (preemptedByService || UploadWorkCoordinator.isServiceActive()
+                    || isStopped()) return Result.success();
+            boolean recovered = store.recoverAll(() ->
+                    preemptedByService || UploadWorkCoordinator.isServiceActive()
+                    || isStopped() || Thread.currentThread().isInterrupted());
+            if (!recovered) return Result.success();
             ReliableUploader value = new ReliableUploader(
                     getApplicationContext(), store, BuildConfig.VOICE_BASE_URL,
                     new QuietListener(), true, false);

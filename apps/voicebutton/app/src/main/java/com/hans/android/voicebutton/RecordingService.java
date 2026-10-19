@@ -76,6 +76,7 @@ public final class RecordingService extends Service {
     private static final long HEARTBEAT_MS = 30000L;
     private static final long NOTIFICATION_REFRESH_MS = 2000L;
     private static final long STATUS_SESSION_SCAN_INTERVAL_MS = 5000L;
+    private static final long LOCAL_BYTES_RECHECK_MS = 300_000L;
 
     public interface StatusListener { void onStatus(Snapshot snapshot); }
 
@@ -206,6 +207,15 @@ public final class RecordingService extends Service {
         thread.setDaemon(true);
         return thread;
     });
+    // A private library can hold >10 GiB of recordings. Never enumerate it
+    // synchronously in initializeService() or the recording status executor.
+    private final ExecutorService byteCountExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "voicebutton-storage-meter");
+        thread.setDaemon(true);
+        thread.setPriority(Thread.MIN_PRIORITY);
+        return thread;
+    });
+    private final AtomicBoolean byteCountWorkerRunning = new AtomicBoolean(false);
     private final AtomicReference<RefreshRequest> pendingRefresh = new AtomicReference<>();
     private final AtomicBoolean refreshWorkerRunning = new AtomicBoolean(false);
     private final AtomicBoolean startActionQueued = new AtomicBoolean(false);
@@ -232,7 +242,7 @@ public final class RecordingService extends Service {
     private volatile boolean serviceInitializing = true;
     private volatile boolean serviceInitialized;
     private volatile long lastUploaderRefreshElapsedMs;
-    private volatile long localBytesCached;
+    private volatile long localBytesCached = -1L; // unknown until verified
     private volatile long lastLocalBytesScanElapsedMs;
     private volatile long lastSessionListScanElapsedMs;
     private final AtomicBoolean sessionListDirty = new AtomicBoolean(true);
@@ -391,21 +401,32 @@ public final class RecordingService extends Service {
                 PhoneDiagnostics.fields("thread", Thread.currentThread().getName()));
         try {
             UploadWorkCoordinator.awaitServiceOwnership();
+            long ownershipAcquired = SystemClock.elapsedRealtime();
             store = ReliableSessionStore.openForBrowsing(this);
-            statusStore = ReliableSessionStore.openForBrowsing(this);
+            long storeOpened = SystemClock.elapsedRealtime();
+            statusStore = ReliableSessionStore.openStatusReader(this);
+            long statusReaderOpened = SystemClock.elapsedRealtime();
             uploader = new ReliableUploader(this, store,
                     BuildConfig.VOICE_BASE_URL, uploaderListener);
             livePcmBackup = new LivePcmReplicator(this,
                     BuildConfig.VOICE_BASE_URL);
             registerNetworkCallback();
-            ReliableSessionManifest durableOpen = store.latestUnfinished();
+            // Open all 156+ manifests once, then derive both the authoritative
+            // open session and the initial overview from the same snapshot.
+            // Previously startup traversed the entire library four times.
+            List<ReliableSessionManifest> startupSessions = store.list();
+            long sessionsLoaded = SystemClock.elapsedRealtime();
+            RecordingManifestIndex startupIndex = RecordingManifestIndex.from(
+                    startupSessions);
+            ReliableSessionManifest durableOpen = startupIndex.unfinished;
             if (durableOpen != null) currentSessionId = durableOpen.sessionId;
             String startupState = RecordingStartupPolicy.requestedState(durableOpen);
             String startupExplanation = RecordingStartupPolicy.explanation(durableOpen);
             lastSessionListScanElapsedMs = 0L;
             RefreshRequest startupRequest = new RefreshRequest(startupState,
                     startupExplanation, "Not recording");
-            Snapshot startupSnapshot = buildSnapshot(startupRequest);
+            Snapshot startupSnapshot = buildSnapshot(startupRequest,
+                    startupSessions);
             snapshot = startupSnapshot;
             currentSessionId = startupSnapshot.currentSessionId;
             serviceInitialized = true;
@@ -416,10 +437,22 @@ public final class RecordingService extends Service {
                     PhoneDiagnostics.fields("initialization_ms", Math.max(0L,
                                     SystemClock.elapsedRealtime() - started),
                             "thread", Thread.currentThread().getName(),
+                            "ownership_wait_ms", Math.max(0L, ownershipAcquired - started),
+                            "store_open_ms", Math.max(0L, storeOpened - ownershipAcquired),
+                            "status_reader_open_ms", Math.max(0L,
+                                    statusReaderOpened - storeOpened),
+                            "manifest_scan_ms", Math.max(0L,
+                                    sessionsLoaded - statusReaderOpened),
+                            "snapshot_build_ms", Math.max(0L,
+                                    SystemClock.elapsedRealtime() - sessionsLoaded),
+                            "session_count", startupSessions.size(),
                             "state", startupSnapshot.state,
                             "paused", startupSnapshot.paused,
                             "has_open_session", startupSnapshot.openSession != null));
             main.post(() -> applySnapshot(startupSnapshot, startupRequest));
+            // Publish READY immediately. Count historical audio in parallel,
+            // and let a user-initiated Start preempt the size walk instantly.
+            main.postDelayed(this::scheduleLocalBytesScan, 1200L);
             scheduleDeferredStartupRecovery("service_initialized");
         } catch (Exception failure) {
             serviceInitialized = false;
@@ -724,7 +757,9 @@ public final class RecordingService extends Service {
         out.append("microphone=").append(limit(value.routedInput, 240))
                 .append(" signal=").append(value.inputSignalDetected).append('\n');
         out.append("duration_ms=").append(value.durationMs)
-                .append(" local_bytes=").append(value.localBytes).append('\n');
+                .append(" local_bytes=")
+                .append(value.localBytes < 0L ? "not_yet_measured"
+                        : String.valueOf(value.localBytes)).append('\n');
         boolean supportUploadUnmeasured = isUploadProgressUnmeasured(value);
         out.append("sync_bytes=").append(value.uploadDurableBytes).append('/')
                 .append(value.uploadTotalBytes);
@@ -1025,6 +1060,7 @@ public final class RecordingService extends Service {
     }
 
     private void startNew(int deviceId, String folderId, String folderName) throws Exception {
+        long startAt = SystemClock.elapsedRealtime();
         diag(PhoneDiagnostics.INFO, "recording.start_requested", null,
                 "A new recording was requested", PhoneDiagnostics.fields("device_id", deviceId));
         if (recorder.isRecording()) {
@@ -1037,11 +1073,17 @@ public final class RecordingService extends Service {
                     true, snapshot.routedInput);
             return;
         }
-        ReliableSessionManifest unfinished = store.latestUnfinished();
-        if (unfinished == null && currentSessionId != null && !currentSessionId.isEmpty()) {
-            try { unfinished = store.load(currentSessionId); }
-            catch (Exception ignored) { unfinished = null; }
+        // The single startup manifest pass already established the known open
+        // recording. Validate that one manifest on disk, rather than rereading
+        // every historical MP3 session before every Start button press.
+        String knownOpen = snapshot.openSession != null
+                ? snapshot.openSession.sessionId : currentSessionId;
+        if ((knownOpen == null || knownOpen.isEmpty())
+                && snapshot.interrupted != null) {
+            knownOpen = snapshot.interrupted.sessionId;
         }
+        ReliableSessionManifest unfinished = knownOpen == null
+                || knownOpen.isEmpty() ? null : store.load(knownOpen);
         if (unfinished != null && !unfinished.recordingFinished) {
             currentSessionId = unfinished.sessionId;
             String state = unfinished.paused ? "PAUSED" : "RECOVERY REQUIRED";
@@ -1051,13 +1093,22 @@ public final class RecordingService extends Service {
             refresh(state, detail, false, "Not recording");
             return;
         }
+        diag(PhoneDiagnostics.INFO, "recording.start_preflight_complete", null,
+                "Validated no unfinished recording without rescanning old files",
+                PhoneDiagnostics.fields("elapsed_ms", Math.max(0L,
+                        SystemClock.elapsedRealtime() - startAt)));
         AudioInputOption input = resolveInput(deviceId);
+        long microphoneSelectedAt = SystemClock.elapsedRealtime();
         ReliableSessionManifest manifest = store.createSession(input.getLabel(), input.getDeviceId(),
                 folderId, folderName);
         diag(PhoneDiagnostics.INFO, "recording.session_created", manifest.sessionId,
-                "New recording metadata was created",
+                "New recording metadata was durably created",
                 PhoneDiagnostics.fields("device_id", input.getDeviceId(),
-                        "device_type", input.getDeviceType(), "label", input.getLabel()));
+                        "device_type", input.getDeviceType(), "label", input.getLabel(),
+                        "metadata_commit_ms", Math.max(0L,
+                                SystemClock.elapsedRealtime() - microphoneSelectedAt),
+                        "total_pre_capture_ms", Math.max(0L,
+                                SystemClock.elapsedRealtime() - startAt)));
         try {
             startCapture(manifest.sessionId, input);
         } catch (Exception failure) {
@@ -1753,6 +1804,10 @@ public final class RecordingService extends Service {
                 File finalMp3 = store.finalMp3File(sessionId);
                 mp3.concatenateMp3Segments(compressed, finalMp3);
                 store.markConversionFinished(sessionId, finalMp3);
+                // Count new finished local audio once, off the metadata/encode
+                // executor, rather than traversing a 10-GB library every 30s.
+                lastLocalBytesScanElapsedMs = 0L;
+                scheduleLocalBytesScan();
                 diag(PhoneDiagnostics.INFO, "recording.finalization_complete", sessionId,
                         "Final MP3 assembly completed",
                         PhoneDiagnostics.fields("operation_duration_ms",
@@ -1944,8 +1999,10 @@ public final class RecordingService extends Service {
                         if (RecordingIsolationPolicy.mayRunDeferredRecovery(
                                 recorder.isRecording(), startActionQueued.get(),
                                 exitRequested.get())) {
-                            localBytesCached = maintenanceStore.localBytes();
-                            lastLocalBytesScanElapsedMs = SystemClock.elapsedRealtime();
+                            // The post-recovery byte total is measured by the
+                            // cancellable low-priority meter, not the finalizer.
+                            lastLocalBytesScanElapsedMs = 0L;
+                            scheduleLocalBytesScan();
                         }
                         diag(PhoneDiagnostics.INFO,
                                 "service.deferred_recovery_scan", currentSessionId,
@@ -2201,7 +2258,57 @@ public final class RecordingService extends Service {
         }
     }
 
+    private void scheduleLocalBytesScan() {
+        if (store == null || serviceInitializing || exitRequested.get()
+                || recorder.isRecording() || startActionQueued.get()) return;
+        long now = SystemClock.elapsedRealtime();
+        if (lastLocalBytesScanElapsedMs > 0L
+                && now - lastLocalBytesScanElapsedMs < LOCAL_BYTES_RECHECK_MS) return;
+        if (!byteCountWorkerRunning.compareAndSet(false, true)) return;
+        try {
+            byteCountExecutor.execute(() -> {
+                long started = SystemClock.elapsedRealtime();
+                try {
+                    ReliableSessionStore reader = statusStore != null
+                            ? statusStore : store;
+                    long verified = reader.localBytesInterruptible(() ->
+                            recorder.isRecording() || startActionQueued.get()
+                            || exitRequested.get()
+                            || Thread.currentThread().isInterrupted());
+                    if (recorder.isRecording() || startActionQueued.get()
+                            || exitRequested.get()) return;
+                    localBytesCached = verified;
+                    lastLocalBytesScanElapsedMs = SystemClock.elapsedRealtime();
+                    diag(PhoneDiagnostics.INFO, "service.local_bytes_measured", null,
+                            "Historical recording bytes counted outside startup/capture",
+                            PhoneDiagnostics.fields("local_bytes", verified,
+                                    "duration_ms", Math.max(0L,
+                                            lastLocalBytesScanElapsedMs - started)));
+                    refresh(snapshot.state, snapshot.explanation,
+                            false, snapshot.routedInput);
+                } catch (java.io.InterruptedIOException preempted) {
+                    // Expected when a user presses Start during a directory walk.
+                    // Capture takes precedence and no guessed byte count is saved.
+                } catch (Exception failure) {
+                    diagError("service.local_bytes_scan_failed",
+                            snapshot.currentSessionId,
+                            "Asynchronous recording library byte measurement",
+                            failure, PhoneDiagnostics.fields());
+                } finally {
+                    byteCountWorkerRunning.set(false);
+                }
+            });
+        } catch (RuntimeException rejected) {
+            byteCountWorkerRunning.set(false);
+        }
+    }
+
     private Snapshot buildSnapshot(RefreshRequest request) {
+        return buildSnapshot(request, null);
+    }
+
+    private Snapshot buildSnapshot(RefreshRequest request,
+                                   List<ReliableSessionManifest> preloaded) {
         Snapshot previous = snapshot;
         boolean actualRecording = recorder.isRecording();
         boolean queuedStart = startActionQueued.get() && !actualRecording;
@@ -2212,7 +2319,7 @@ public final class RecordingService extends Service {
         long nowElapsed = SystemClock.elapsedRealtime();
         ReliableSessionStore scanStore = statusStore != null ? statusStore : store;
         boolean scanSessions = scanStore != null && !captureState
-                && (sessionListDirty.get()
+                && (preloaded != null || sessionListDirty.get()
                 || lastSessionListScanElapsedMs <= 0L
                 || nowElapsed - lastSessionListScanElapsedMs
                 >= STATUS_SESSION_SCAN_INTERVAL_MS);
@@ -2225,9 +2332,10 @@ public final class RecordingService extends Service {
             interrupted = null;
         } else if (scanSessions) {
             try {
-                sessions = scanStore.list();
-                open = scanStore.latestUnfinished();
-                interrupted = scanStore.latestInterrupted();
+                sessions = preloaded != null ? preloaded : scanStore.list();
+                RecordingManifestIndex index = RecordingManifestIndex.from(sessions);
+                open = index.unfinished;
+                interrupted = index.interrupted;
                 lastSessionListScanElapsedMs = nowElapsed;
                 sessionListDirty.set(false);
             } catch (Exception scanFailure) {
@@ -2360,23 +2468,14 @@ public final class RecordingService extends Service {
         float peakDbfs = actualRecording && levelAgeMs < 1500L ? liveInputPeakDbfs : -120f;
         int inputLevelPermille = RecordingFeedback.levelPermille(peakDbfs);
         boolean inputSignalDetected = actualRecording && levelAgeMs < 1500L && peakDbfs > -50f;
-        if (scanStore != null && !captureState) {
-            // Initializing the scan timestamp without actually scanning left
-            // local_bytes at zero in a fully populated idle library until a
-            // later refresh happened. Run the first measurement immediately,
-            // on statusExecutor (never the UI/capture thread).
-            if (lastLocalBytesScanElapsedMs <= 0L
-                    || nowElapsed - lastLocalBytesScanElapsedMs >= 30000L) {
-                try {
-                    localBytesCached = scanStore.localBytes();
-                    lastLocalBytesScanElapsedMs = nowElapsed;
-                } catch (Exception bytesFailure) {
-                    diagError("service.local_bytes_scan_failed",
-                            previous.currentSessionId,
-                            "Scanning local recording byte count", bytesFailure,
-                            PhoneDiagnostics.fields("previous_state", previous.state));
-                }
-            }
+        // Recursive local-byte enumeration is explicitly NOT part of any
+        // status snapshot: it held startup at STARTING for many seconds with
+        // large audio libraries. The dedicated cancellable worker publishes
+        // verified bytes independently, or -1 if not measured yet.
+        if (scanStore != null && !captureState && serviceInitialized
+                && (lastLocalBytesScanElapsedMs <= 0L
+                    || nowElapsed - lastLocalBytesScanElapsedMs >= LOCAL_BYTES_RECHECK_MS)) {
+            scheduleLocalBytesScan();
         }
         long localBytes = localBytesCached;
         if (scanStore == null) pendingFolderSyncCached = false;
@@ -2949,6 +3048,7 @@ public final class RecordingService extends Service {
         if (uploader != null) uploader.stop();
         conversion.shutdownNow();
         maintenanceExecutor.shutdownNow();
+        byteCountExecutor.shutdownNow();
         statusExecutor.shutdownNow();
         serviceExecutor.shutdownNow();
         Thread maintenance = maintenanceThread;

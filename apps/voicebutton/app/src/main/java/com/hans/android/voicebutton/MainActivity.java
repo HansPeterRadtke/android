@@ -661,8 +661,12 @@ public final class MainActivity extends Activity {
             List<ReliableSessionStore.Folder> loaded = new ArrayList<>();
             String failureDetail = "";
             try {
+                // This is a quick UI folder refresh, not the authoritative
+                // startup repair. The recording service repairs metadata once;
+                // repeatedly rebuilding every 10-GB library manifest here
+                // competed with microphone startup and blocked READY.
                 ReliableSessionStore browser =
-                        ReliableSessionStore.openForBrowsing(this);
+                        ReliableSessionStore.openStatusReader(this);
                 loaded.addAll(browser.listFolders());
             } catch (Exception failure) {
                 failureDetail = PhoneDiagnostics.exactFailure(
