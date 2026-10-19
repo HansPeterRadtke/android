@@ -2312,9 +2312,12 @@ public final class RecordingService extends Service {
         int inputLevelPermille = RecordingFeedback.levelPermille(peakDbfs);
         boolean inputSignalDetected = actualRecording && levelAgeMs < 1500L && peakDbfs > -50f;
         if (scanStore != null && !captureState) {
-            if (lastLocalBytesScanElapsedMs <= 0L) {
-                lastLocalBytesScanElapsedMs = nowElapsed;
-            } else if (nowElapsed - lastLocalBytesScanElapsedMs >= 30000L) {
+            // Initializing the scan timestamp without actually scanning left
+            // local_bytes at zero in a fully populated idle library until a
+            // later refresh happened. Run the first measurement immediately,
+            // on statusExecutor (never the UI/capture thread).
+            if (lastLocalBytesScanElapsedMs <= 0L
+                    || nowElapsed - lastLocalBytesScanElapsedMs >= 30000L) {
                 try {
                     localBytesCached = scanStore.localBytes();
                     lastLocalBytesScanElapsedMs = nowElapsed;
