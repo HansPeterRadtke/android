@@ -58,6 +58,16 @@ public class BackupOverviewTextTest {
                 .contains("preparing local MP3"));
     }
 
+    @Test public void liveBackupReportsOnlyServerVerifiedBytes() {
+        String verified=BackupOverviewText.livePcmSummary(true,true,8192L,16384L,"Running");
+        assertTrue(verified.contains("50%"));
+        assertTrue(verified.contains("8.0 KiB / 16.0 KiB"));
+        assertTrue(verified.contains("verified on Jetson"));
+        assertTrue(BackupOverviewText.livePcmSummary(false,true,0L,16384L,"").contains("pairing"));
+        assertTrue(BackupOverviewText.livePcmSummary(true,false,0L,16384L,"").contains("paused"));
+        assertFalse(BackupOverviewText.livePcmSummary(true,true,0L,0L,"").contains("%"));
+    }
+
     @Test public void idleAndOpenAudioNeverPretendToUpload() {
         assertEquals("", BackupOverviewText.summary(Collections.emptyList(),
                 true, false, "idle", ""));

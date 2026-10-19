@@ -216,6 +216,7 @@ public final class RecordingService extends Service {
     private ReliableSessionStore store;
     private ReliableSessionStore statusStore;
     private ReliableUploader uploader;
+    private volatile LivePcmReplicator livePcmBackup;
     private PhoneDiagnostics diagnostics;
     private volatile Snapshot snapshot = Snapshot.initial();
     private volatile String currentSessionId;
@@ -394,6 +395,8 @@ public final class RecordingService extends Service {
             statusStore = ReliableSessionStore.openForBrowsing(this);
             uploader = new ReliableUploader(this, store,
                     BuildConfig.VOICE_BASE_URL, uploaderListener);
+            livePcmBackup = new LivePcmReplicator(this,
+                    BuildConfig.VOICE_BASE_URL);
             registerNetworkCallback();
             ReliableSessionManifest durableOpen = store.latestUnfinished();
             if (durableOpen != null) currentSessionId = durableOpen.sessionId;
@@ -746,6 +749,12 @@ public final class RecordingService extends Service {
                 .append(" service_initializing=").append(serviceInitializing).append('\n');
         out.append("uploader=").append(uploaderValue == null
                 ? "unavailable" : limit(uploaderValue.debugSummary(), 1000)).append('\n');
+        LivePcmReplicator.Progress live = livePcmProgress();
+        out.append("live_pcm=").append(live == null ? "unavailable"
+                : "paired=" + live.paired + " active=" + live.active
+                        + " remote_durable=" + live.acknowledgedBytes
+                        + " local_durable=" + live.locallyDurableBytes
+                        + " state=" + limit(live.state, 200)).append('\n');
         int start = Math.max(0, value.sessions.size() - 5);
         for (int i = start; i < value.sessions.size(); i++) {
             ReliableSessionManifest session = value.sessions.get(i);
@@ -905,10 +914,19 @@ public final class RecordingService extends Service {
     public void refreshRecordingServerAccess() {
         ReliableUploader value = uploader;
         if (value != null) value.refreshCredentials();
+        LivePcmReplicator live = livePcmBackup;
+        if (live != null) live.credentialsChanged();
         signalUploader("private_access_updated");
     }
 
+    LivePcmReplicator.Progress livePcmProgress() {
+        LivePcmReplicator live = livePcmBackup;
+        return live == null ? null : live.progress();
+    }
+
     public void applyAutomationSettings() {
+        LivePcmReplicator live = livePcmBackup;
+        if (live != null) live.credentialsChanged();
         ReliableUploader value=uploader;
         if(!AppSettings.uploadPermitted(this)){if(value!=null)value.stop();return;}
         signalUploader("settings_changed");
@@ -948,7 +966,7 @@ public final class RecordingService extends Service {
         if (currentUploader != null) currentUploader.stop();
         diag(PhoneDiagnostics.INFO,
                 "recording.deferred_work_deprioritized", currentSessionId,
-                "Background upload was asked to stop without blocking microphone capture",
+                "Deferred MP3 transfer was stopped; separate raw PCM replication is independent",
                 PhoneDiagnostics.fields(
                         "uploader_present", currentUploader != null,
                         "conversion_stopped", false));
@@ -1132,6 +1150,20 @@ public final class RecordingService extends Service {
         boolean captureStarted;
         try {captureStarted=recorder.start(this,input,store,sessionId,recorderListener);}
         catch(Exception failure){CapturePlaybackGate.end();throw failure;}
+        if (captureStarted) {
+            // All disk/network reading is performed by the independent low-
+            // priority replicator after the storage writer has fsynced PCM.
+            try {
+                ReliableSessionManifest active = store.load(sessionId);
+                LivePcmReplicator live = livePcmBackup;
+                if (live != null) live.begin(sessionId, active.folderId,
+                        active.conversationId);
+            } catch (Exception backupFailure) {
+                diagError("recording.live_backup_start_failed", sessionId,
+                        "Preparing independent live backup", backupFailure,
+                        PhoneDiagnostics.fields());
+            }
+        }
         if (!captureStarted) {
             CapturePlaybackGate.end();
             boolean removed = false;
@@ -1301,9 +1333,9 @@ public final class RecordingService extends Service {
                                     SystemClock.elapsedRealtime()
                                             - recordingStartedAt),
                             "live_mp3", false,
-                            "upload_during_capture", false));
+                            "mp3_upload_during_capture", false, "live_pcm_mirror_supported", true));
             refresh("RECORDING",
-                    "Microphone audio is being written directly to durable local storage; conversion and transfer are suspended",
+                    "Microphone PCM is durable locally; MP3 conversion is deferred; live backup available with server pairing",
                     true, routedDevice);
             main.removeCallbacks(ticker);
             main.post(ticker);
@@ -1338,12 +1370,29 @@ public final class RecordingService extends Service {
             liveInputLevelAtElapsedMs = SystemClock.elapsedRealtime();
         }
 
+        @Override public void onDurablePcmPrefix(String sessionId, int seq,
+                                                File journalFile, int sampleRate,
+                                                long durableBytes) {
+            LivePcmReplicator live = livePcmBackup;
+            if (live != null) {
+                live.onDurablePrefix(sessionId, seq, journalFile,
+                        sampleRate, durableBytes);
+            }
+        }
+
         @Override public void onJournalCommitted(String sessionId,
                                                   int seq,
                                                   File pcmJournal,
                                                   int inputSampleRate,
                                                   long pcmBytes,
                                                   long durationMs) {
+            // The journal was atomically renamed after a final fsync.
+            // Let any in-flight live backup finish from the final filename.
+            LivePcmReplicator live = livePcmBackup;
+            if (live != null) {
+                live.onDurablePrefix(sessionId, seq, pcmJournal,
+                        inputSampleRate, pcmBytes);
+            }
             long durableAtMs = System.currentTimeMillis();
             long createdAtMs = Math.max(0L,
                     durableAtMs - Math.max(0L, durationMs));
@@ -2736,6 +2785,8 @@ public final class RecordingService extends Service {
         main.removeCallbacks(continuityTicker);
         main.removeCallbacks(recordingRecovery);
         main.removeCallbacks(uploaderRefresh);
+        LivePcmReplicator live = livePcmBackup;
+        if (live != null) live.stop();
         ReliableUploader stoppingUploader = uploader;
         if (stoppingUploader != null) stoppingUploader.stop();
         failureAlarm.release();
@@ -2880,6 +2931,8 @@ public final class RecordingService extends Service {
         main.removeCallbacks(uploaderRefresh);
         failureAlarm.release();
         unregisterNetworkCallback();
+        LivePcmReplicator live = livePcmBackup;
+        if (live != null) live.stop();
         if (recorder.isRecording()) {
             stopDisposition = exitRequested.get() ? STOP_PAUSE : STOP_INTERRUPT;
         }

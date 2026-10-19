@@ -46,6 +46,21 @@ final class BackupOverviewText {
         return label + "\n" + state;
     }
 
+    static String livePcmSummary(boolean paired, boolean permitted,
+                                 long confirmed, long durable,
+                                 String currentState) {
+        if (!permitted) return "Live backup paused · PCM protected on phone";
+        if (!paired) return "Live backup needs server pairing · More → Recording server access";
+        if (durable <= 0) return "Live backup · waiting for first locally durable PCM block";
+        long acknowledged = Math.max(0L, Math.min(confirmed, durable));
+        int percent = RecordingFeedback.uploadPermille(acknowledged, durable) / 10;
+        String state = currentState == null ? "" : currentState.trim();
+        return "Live PCM " + percent + "% · "
+                + RecordingUi.formatBytes(acknowledged) + " / "
+                + RecordingUi.formatBytes(durable) + " verified on Jetson"
+                + (state.isEmpty() ? "" : "\n" + state);
+    }
+
     static String currentFile(String fileName, int progressPermille,
                               boolean stillRecording) {
         String name = fileName == null ? "" : fileName.trim();

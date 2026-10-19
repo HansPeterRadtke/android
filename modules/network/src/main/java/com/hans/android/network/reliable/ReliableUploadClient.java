@@ -219,6 +219,46 @@ public final class ReliableUploadClient {
         recordingServerToken = MobileAudioCredential.normalize(value);
     }
 
+    /** Durable raw-PCM backup for active capture. This is intentionally
+     * separate from the canonical post-capture MP3 chunk ledger. A server
+     * credential is mandatory even during legacy upload migration.
+     */
+    public JSONObject livePcmStatus(String folderId, String sessionId,
+                                    int sequence) throws Exception {
+        if (recordingServerToken.isEmpty()) {
+            throw new ProtocolException(401, "Private live microphone backup requires pairing");
+        }
+        return getJson("/audio/v2/live-pcm-status?folder=" + encode(folderId)
+                + "&sid=" + encode(sessionId) + "&seq=" + sequence);
+    }
+
+    public JSONObject uploadLivePcmPart(String folderId, String sessionId,
+                                       String conversationId, int sequence,
+                                       int sampleRate, long offset,
+                                       byte[] part) throws Exception {
+        if (recordingServerToken.isEmpty()) {
+            throw new ProtocolException(401, "Private live microphone backup requires pairing");
+        }
+        if (part == null || part.length <= 0 || part.length > 65536
+                || part.length % 2 != 0 || offset < 0 || offset % 2 != 0) {
+            throw new IllegalArgumentException("Invalid raw PCM byte range");
+        }
+        JSONObject response = postBytes("/audio/v2/live-pcm-part?folder="
+                + encode(folderId) + "&sid=" + encode(sessionId)
+                + "&conversation=" + encode(conversationId)
+                + "&seq=" + sequence + "&sample_rate=" + sampleRate
+                + "&offset=" + offset + "&part_sha256="
+                + ReliableSessionManifest.sha256(part), part,
+                "application/octet-stream");
+        if (!response.optBoolean("ok", false)
+                || !response.optBoolean("durable", false)
+                || response.optString("server_id", "").isEmpty()) {
+            throw new ProtocolException(409,
+                    "Jetson did not confirm durable raw-PCM storage");
+        }
+        return response;
+    }
+
     public TranscriptionStatus transcriptionStatus() throws Exception {
         return parseTranscriptionStatus(getJson("/audio/v2/transcription-status"));
     }

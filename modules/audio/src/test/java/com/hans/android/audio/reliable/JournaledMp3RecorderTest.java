@@ -42,9 +42,11 @@ public class JournaledMp3RecorderTest {
     }
 
     @Test public void stalledWriterRejectsNextCaptureBeforeBufferOverflow()throws Exception{
-        Class<?> type=Class.forName(JournaledMp3Recorder.class.getName()+"$PcmJournalWriter");java.lang.reflect.Constructor<?> constructor=type.getDeclaredConstructors()[0];constructor.setAccessible(true);
+        Class<?> type=Class.forName(JournaledMp3Recorder.class.getName()+"$PcmJournalWriter");java.lang.reflect.Constructor<?> constructor=type.getDeclaredConstructor(
+                DurablePcmJournal.class,String.class,int.class,int.class,
+                JournaledMp3Recorder.Listener.class);constructor.setAccessible(true);
         JournaledMp3Recorder.Listener listener=(JournaledMp3Recorder.Listener)java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),new Class<?>[]{JournaledMp3Recorder.Listener.class},(proxy,method,args)->null);
-        Object writer=constructor.newInstance(null,0,48000,listener);
+        Object writer=constructor.newInstance(null,"audit",0,48000,listener);
         java.lang.reflect.Method check=type.getDeclaredMethod("requireCapacity"),enqueue=type.getDeclaredMethod("enqueue",short[].class,int.class,long.class);check.setAccessible(true);enqueue.setAccessible(true);
         int capacity=(int)RuntimePolicy.value("pcm_queue_blocks");for(int i=0;i<capacity;i++){check.invoke(writer);enqueue.invoke(writer,new short[]{1,2},2,(long)i*2);}
         try{check.invoke(writer);org.junit.Assert.fail("Capture admitted beyond bounded queue");}catch(java.lang.reflect.InvocationTargetException expected){assertTrue(expected.getCause() instanceof java.io.IOException);}

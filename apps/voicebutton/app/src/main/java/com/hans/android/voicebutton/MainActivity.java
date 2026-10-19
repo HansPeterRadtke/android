@@ -1641,14 +1641,24 @@ public final class MainActivity extends Activity {
         boolean open = snapshot.recording || snapshot.openSession != null;
         boolean unmeasured = OverviewProgress.hasUnmeasuredUpload(snapshot.sessions);
         int pending = OverviewProgress.uploadFilesRemaining(snapshot.sessions);
-        String label = BackupOverviewText.durableProgress(
-                snapshot.uploadDurableBytes, snapshot.uploadTotalBytes, pending,
-                open, unmeasured, permitted, snapshot.liveUploadOperation);
+        LivePcmReplicator.Progress live = service == null ? null
+                : service.livePcmProgress();
+        boolean showingLive = snapshot.recording;
+        String label = showingLive
+                ? (live == null
+                    ? "Live backup · starting; audio protected locally"
+                    : BackupOverviewText.livePcmSummary(live.paired,
+                            permitted && AppSettings.automaticUpload(this),
+                            live.acknowledgedBytes, live.locallyDurableBytes,
+                            live.state))
+                : BackupOverviewText.durableProgress(
+                        snapshot.uploadDurableBytes, snapshot.uploadTotalBytes, pending,
+                        open, unmeasured, permitted, snapshot.liveUploadOperation);
         setTextIfChanged(transferText, label);
         transferText.setContentDescription(label);
         transferText.setVisibility(View.VISIBLE);
 
-        boolean activelyEncoding = permitted && unmeasured
+        boolean activelyEncoding = !showingLive && permitted && unmeasured
                 && snapshot.uploadTotalBytes == 0L
                 && ("COMPRESSING".equals(snapshot.state)
                     || "local_finalizing".equals(snapshot.liveUploadOperation));
@@ -1656,7 +1666,9 @@ public final class MainActivity extends Activity {
             progressBar.setIndeterminate(activelyEncoding);
         }
         if (!activelyEncoding) {
-            int progress = Math.max(0, Math.min(1000, snapshot.uploadProgressPermille));
+            int progress = showingLive
+                    ? (live == null ? 0 : live.permille())
+                    : Math.max(0, Math.min(1000, snapshot.uploadProgressPermille));
             if (progressBar.getProgress() != progress) progressBar.setProgress(progress);
         }
         progressBar.setContentDescription(label);

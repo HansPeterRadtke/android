@@ -38,6 +38,11 @@ public final class JournaledMp3Recorder {
                                 long pcmBytes, long durationMs);
         void onStopped(String sessionId);
         void onFailure(String stage, String exceptionClass, String message);
+        /** Called on the PCM storage writer only after the filesystem sync
+         * has returned. Network work must be queued elsewhere, never here. */
+        default void onDurablePcmPrefix(String sessionId, int sequence,
+                                       File journalFile, int sampleRate,
+                                       long durableBytes) {}
     }
 
     private static final int PREFERRED_INPUT_SAMPLE_RATE = 48000;
@@ -202,8 +207,8 @@ public final class JournaledMp3Recorder {
             journal = new DurablePcmJournal(directory, seq,
                     inputSampleRate);
             createdAtMs = System.currentTimeMillis();
-            writer = new PcmJournalWriter(journal, seq, inputSampleRate,
-                    listener);
+            writer = new PcmJournalWriter(journal, sessionId, seq,
+                    inputSampleRate, listener);
             writer.start();
             listener.onRecorderEvent("capture.writer_thread_started", seq,
                     0L, 0L, "queue_bounded=true, warn_blocks="
@@ -519,6 +524,7 @@ public final class JournaledMp3Recorder {
         private final AtomicReference<Throwable> failure =
                 new AtomicReference<>();
         private final DurablePcmJournal journal;
+        private final String sessionId;
         private final int sequence;
         private final int sampleRate;
         private final Listener listener;
@@ -532,9 +538,10 @@ public final class JournaledMp3Recorder {
         private volatile int maxQueueDepth;
         private volatile boolean finishing;
 
-        PcmJournalWriter(DurablePcmJournal journal, int sequence,
-                         int sampleRate, Listener listener) {
+        PcmJournalWriter(DurablePcmJournal journal, String sessionId,
+                         int sequence, int sampleRate, Listener listener) {
             this.journal = journal;
+            this.sessionId = sessionId;
             this.sequence = sequence;
             this.sampleRate = sampleRate;
             this.listener = listener;
@@ -631,6 +638,21 @@ public final class JournaledMp3Recorder {
                         syncTotalMs += syncMs;
                         syncMaxMs = Math.max(syncMaxMs, syncMs);
                         samplesSinceSync = 0L;
+                        // The prefix is durably on phone storage. Merely notify
+                        // the independent low-priority network worker; never
+                        // wait for the network or encode MP3 here.
+                        try {
+                            listener.onDurablePcmPrefix(sessionId, sequence,
+                                    journal.openFile(), sampleRate,
+                                    journal.bytesWritten());
+                        } catch (RuntimeException backupFailure) {
+                            listener.onRecorderEvent(
+                                    "capture.live_backup_notification_failed",
+                                    sequence, journal.bytesWritten(),
+                                    sampleRate <= 0 ? 0L
+                                            : samplesWritten * 1000L / sampleRate,
+                                    backupFailure.getClass().getSimpleName());
+                        }
                         if (syncMs >= 1000L) {
                             listener.onRecorderEvent(
                                     "capture.slow_pcm_sync", sequence,
