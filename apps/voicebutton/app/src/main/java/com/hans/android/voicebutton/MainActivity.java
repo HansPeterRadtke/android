@@ -351,9 +351,10 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(header);
 
-        transferText = AndroidUi.text(this, "", 14, false, AndroidUi.MUTED);
+        transferText = AndroidUi.text(this,
+                "Backup · checking local audio receipts…", 14, false, AndroidUi.MUTED);
         transferText.setId(R.id.voicebutton_backup_text);
-        AndroidUi.readableLine(this, transferText, 0, compactHeight ? 1 : 3);
+        AndroidUi.readableLine(this, transferText, 0, compactHeight ? 2 : 3);
         transferText.setTextSize(compactHeight ? 12 : 14);
         transferText.setGravity(Gravity.START);
         transferText.setVisibility(View.GONE);
@@ -372,7 +373,7 @@ public final class MainActivity extends Activity {
         progressBar.setContentDescription("Backup progress");
         progressBar.setVisibility(View.GONE);
         LinearLayout.LayoutParams uploadProgressParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8));
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 12));
         uploadProgressParams.setMargins(0, 0,
                 0, AndroidUi.dp(this, 8));
         root.addView(progressBar, uploadProgressParams);
@@ -408,7 +409,7 @@ public final class MainActivity extends Activity {
         root.addView(uploadQueueContainer, uploadQueueParams);
 
         transcriptionSummaryText = AndroidUi.text(this,
-                "Transcription overall: checking…", 14, false, AndroidUi.INK);
+                "Transcription · contacting Jetson…", 14, false, AndroidUi.INK);
         transcriptionSummaryText.setId(R.id.voicebutton_transcription_summary);
         AndroidUi.readableLine(this, transcriptionSummaryText, 0, 2);
         transcriptionSummaryText.setGravity(Gravity.START);
@@ -425,7 +426,7 @@ public final class MainActivity extends Activity {
         transcriptionProgressBar.setIndeterminate(true);
         transcriptionProgressBar.setContentDescription("Transcription overall progress");
         LinearLayout.LayoutParams transcriptionProgressParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8));
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 12));
         transcriptionProgressParams.setMargins(0, 0,
                 0, AndroidUi.dp(this, 4));
         root.addView(transcriptionProgressBar, transcriptionProgressParams);
@@ -462,13 +463,17 @@ public final class MainActivity extends Activity {
                 0, AndroidUi.dp(this, 8));
         root.addView(transcriptionQueueContainer, transcriptionQueueParams);
 
-        // Overall progress and per-file queue rows answer different questions.
-        transferText.setVisibility(View.GONE);
-        progressBar.setVisibility(View.GONE);
+        // Overall bars are present immediately, even before the first
+        // background status lookup. Their initial indeterminate state means
+        // "checking", not a fabricated percentage. Verified values replace it.
+        transferText.setVisibility(View.VISIBLE);
+        progressBar.setIndeterminate(true);
+        progressBar.setVisibility(View.VISIBLE);
         uploadCurrentText.setVisibility(View.GONE);
         uploadCurrentProgressBar.setVisibility(View.GONE);
-        transcriptionSummaryText.setVisibility(View.GONE);
-        transcriptionProgressBar.setVisibility(View.GONE);
+        transcriptionSummaryText.setVisibility(View.VISIBLE);
+        transcriptionProgressBar.setIndeterminate(true);
+        transcriptionProgressBar.setVisibility(View.VISIBLE);
         transcriptionCurrentText.setVisibility(View.GONE);
         transcriptionCurrentProgressBar.setVisibility(View.GONE);
 
@@ -604,8 +609,30 @@ public final class MainActivity extends Activity {
         while (root.getChildCount() > 1) {
             View child=root.getChildAt(1);root.removeView(child);transfers.addView(child);
         }
+        // Show both actual overall progress bars immediately under the toolbar.
+        // Detailed current-file bars remain in the scrollable information area;
+        // the primary recording button remains fixed at the bottom.
+        LinearLayout progressSummary = new LinearLayout(this);
+        progressSummary.setOrientation(LinearLayout.VERTICAL);
+        progressSummary.setBackgroundColor(AndroidUi.SURFACE);
+        progressSummary.setPadding(AndroidUi.dp(this, 12), AndroidUi.dp(this, 1),
+                AndroidUi.dp(this, 12), AndroidUi.dp(this, 1));
+        for (View row : new View[]{transferText, progressBar,
+                transcriptionSummaryText, transcriptionProgressBar}) {
+            ViewGroup.LayoutParams params = row.getLayoutParams();
+            transfers.removeView(row);
+            progressSummary.addView(row, params == null
+                    ? new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT) : params);
+        }
         LinearLayout information=new LinearLayout(this);
         boolean wide=getResources().getConfiguration().screenWidthDp>=600&&compactHeight;
+        if (wide) {
+            transfers.addView(progressSummary, 0);
+        } else {
+            root.addView(progressSummary, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
         information.setOrientation(wide?LinearLayout.HORIZONTAL:LinearLayout.VERTICAL);
         if(wide) {
             LinearLayout recording=new LinearLayout(this);recording.setOrientation(LinearLayout.VERTICAL);
@@ -1614,20 +1641,67 @@ public final class MainActivity extends Activity {
 
     private void renderUploadOperations() {
         if (uploadQueueContainer == null) return;
-        // The recording screen is not a transfer-monitoring dashboard.
-        // A simple status line is adequate; raw per-file progress is available
-        // through More -> Current status details. Never show stale oscillating
-        // indeterminate bars or an upload job for an unfinished microphone
-        // session.
-        String label = BackupOverviewText.summary(snapshot.sessions,
-                AppSettings.uploadPermitted(this), AppSettings.pausedAfterExit(this),
-                snapshot.liveUploadOperation, snapshot.liveUploadSessionId);
+        // Snapshot bytes come from server-acknowledged chunk parts and committed
+        // manifest entries, never socket write completion or a guessed future
+        // recording size. A live recording grows the denominator as MP3 closes.
+        boolean permitted = AppSettings.uploadPermitted(this);
+        boolean open = snapshot.recording || snapshot.openSession != null;
+        boolean unmeasured = OverviewProgress.hasUnmeasuredUpload(snapshot.sessions);
+        int pending = OverviewProgress.uploadFilesRemaining(snapshot.sessions);
+        String label = BackupOverviewText.durableProgress(
+                snapshot.uploadDurableBytes, snapshot.uploadTotalBytes, pending,
+                open, unmeasured, permitted, snapshot.liveUploadOperation);
         setTextIfChanged(transferText, label);
-        transferText.setVisibility(label.isEmpty() ? View.GONE : View.VISIBLE);
         transferText.setContentDescription(label);
-        progressBar.setVisibility(View.GONE);
-        uploadCurrentText.setVisibility(View.GONE);
-        uploadCurrentProgressBar.setVisibility(View.GONE);
+        transferText.setVisibility(View.VISIBLE);
+
+        boolean activelyEncoding = permitted && unmeasured
+                && snapshot.uploadTotalBytes == 0L
+                && ("COMPRESSING".equals(snapshot.state)
+                    || "local_finalizing".equals(snapshot.liveUploadOperation));
+        if (progressBar.isIndeterminate() != activelyEncoding) {
+            progressBar.setIndeterminate(activelyEncoding);
+        }
+        if (!activelyEncoding) {
+            int progress = Math.max(0, Math.min(1000, snapshot.uploadProgressPermille));
+            if (progressBar.getProgress() != progress) progressBar.setProgress(progress);
+        }
+        progressBar.setContentDescription(label);
+        progressBar.setVisibility(View.VISIBLE);
+
+        ReliableSessionManifest current = OverviewProgress.visibleUpload(
+                snapshot.sessions, snapshot.liveUploadSessionId);
+        if (current == null) {
+            uploadCurrentText.setVisibility(View.GONE);
+            uploadCurrentProgressBar.setVisibility(View.GONE);
+        } else {
+            int fileProgress = OverviewProgress.fileProgressPermille(current,
+                    snapshot.liveUploadOperation, snapshot.liveUploadSessionId,
+                    snapshot.liveUploadSequence, snapshot.liveUploadDurableBytes,
+                    snapshot.liveUploadTotalBytes);
+            String fileText = BackupOverviewText.currentFile(
+                    OverviewProgress.fileName(current), fileProgress,
+                    !current.recordingFinished);
+            if (fileProgress >= 1000 && current.recordingFinished
+                    && !current.remoteCommitted) {
+                fileText += " · final commit pending";
+            }
+            setTextIfChanged(uploadCurrentText, fileText);
+            uploadCurrentText.setContentDescription(fileText);
+            uploadCurrentText.setVisibility(View.VISIBLE);
+            uploadCurrentProgressBar.setIndeterminate(false);
+            if (fileProgress >= 0) {
+                if (uploadCurrentProgressBar.getProgress() != fileProgress) {
+                    uploadCurrentProgressBar.setProgress(fileProgress);
+                }
+                uploadCurrentProgressBar.setContentDescription(fileText);
+                uploadCurrentProgressBar.setVisibility(View.VISIBLE);
+            } else {
+                // No actual encoded bytes yet: explain the phase, don't animate
+                // a fictitious 0–100 percent bar.
+                uploadCurrentProgressBar.setVisibility(View.GONE);
+            }
+        }
         uploadQueueContainer.setVisibility(View.GONE);
     }
 
@@ -1671,12 +1745,14 @@ public final class MainActivity extends Activity {
         serverHealthText.setVisibility(View.GONE);
         if (hasSuccess) {
             renderTranscriptionOperations(lastTranscriptionStatus,
-                    " · " + formatStatusAge(age) + " old", true);
+                    formatStatusAge(age) + " ago", true);
         } else {
             setTextIfChanged(transcriptionSummaryText,
                     "Transcription status unavailable; see More → Current status details");
-            transcriptionSummaryText.setVisibility(View.GONE);
+            transcriptionSummaryText.setVisibility(View.VISIBLE);
             transcriptionProgressBar.setVisibility(View.GONE);
+            transcriptionCurrentText.setVisibility(View.GONE);
+            transcriptionCurrentProgressBar.setVisibility(View.GONE);
             transcriptionQueueContainer.setVisibility(View.GONE);
         }
     }
@@ -1684,15 +1760,73 @@ public final class MainActivity extends Activity {
     private void renderTranscriptionOperations(
             ReliableUploadClient.TranscriptionStatus value,
             String staleSuffix, boolean stale) {
-        String status = value == null ? "Transcription status unavailable"
-                : "Transcription · " + value.completeCount + " complete · "
-                        + value.notTranscribedCount + " pending"
-                        + (stale ? " · status " + staleSuffix : "");
+        if (value == null) {
+            setTextIfChanged(transcriptionSummaryText,
+                    "Transcription · waiting for verified server status");
+            transcriptionSummaryText.setVisibility(View.VISIBLE);
+            transcriptionProgressBar.setVisibility(View.GONE);
+            transcriptionCurrentText.setVisibility(View.GONE);
+            transcriptionCurrentProgressBar.setVisibility(View.GONE);
+            transcriptionQueueContainer.setVisibility(View.GONE);
+            return;
+        }
+        int total = value.totalCommittedCount;
+        int complete = Math.min(total, value.completeCount);
+        int pending = value.notTranscribedCount;
+        String status = total <= 0 ? "Transcription · no committed recordings yet"
+                : "Transcription · " + complete + " of " + total
+                        + " complete (" + value.overallPercent + "%)"
+                        + (pending > 0 ? " · " + pending + " pending" : "");
+        if (stale) status += " · last verified " + staleSuffix;
         setTextIfChanged(transcriptionSummaryText, status);
-        transcriptionSummaryText.setVisibility(View.GONE);
-        transcriptionProgressBar.setVisibility(View.GONE);
-        transcriptionCurrentText.setVisibility(View.GONE);
-        transcriptionCurrentProgressBar.setVisibility(View.GONE);
+        transcriptionSummaryText.setContentDescription(status);
+        transcriptionSummaryText.setVisibility(View.VISIBLE);
+        transcriptionProgressBar.setIndeterminate(false);
+        if (total > 0) {
+            int percent = Math.max(0, Math.min(100, value.overallPercent)) * 10;
+            if (transcriptionProgressBar.getProgress() != percent) {
+                transcriptionProgressBar.setProgress(percent);
+            }
+            transcriptionProgressBar.setContentDescription(status);
+            transcriptionProgressBar.setVisibility(View.VISIBLE);
+        } else {
+            transcriptionProgressBar.setVisibility(View.GONE);
+        }
+
+        ReliableUploadClient.CurrentTranscription current = value.current;
+        if (current == null) {
+            // The server may deliberately omit private current-file information
+            // for an unpaired phone; never synthesize a fake current percentage.
+            transcriptionCurrentText.setVisibility(View.GONE);
+            transcriptionCurrentProgressBar.setVisibility(View.GONE);
+        } else {
+            String name = current.displayName == null || current.displayName.trim().isEmpty()
+                    ? "current recording" : current.displayName.trim();
+            boolean measured = current.framesTotal > 0L;
+            int currentProgress = measured ? Math.max(0, Math.min(1000,
+                    (int) (Math.min(current.framesDone, current.framesTotal)
+                            * 1000.0 / current.framesTotal))) : 0;
+            String phase = current.phase == null || current.phase.isEmpty()
+                    ? "starting" : current.phase;
+            String currentText = "Transcribing · " + name + " · "
+                    + (measured ? currentProgress / 10 + "%" : phase)
+                    + (stale ? " · last-known status" : "");
+            setTextIfChanged(transcriptionCurrentText, currentText);
+            transcriptionCurrentText.setContentDescription(currentText);
+            transcriptionCurrentText.setVisibility(View.VISIBLE);
+            boolean indeterminate = !measured && !stale;
+            if (transcriptionCurrentProgressBar.isIndeterminate() != indeterminate) {
+                transcriptionCurrentProgressBar.setIndeterminate(indeterminate);
+            }
+            if (!indeterminate && measured
+                    && transcriptionCurrentProgressBar.getProgress() != currentProgress) {
+                transcriptionCurrentProgressBar.setProgress(currentProgress);
+            }
+            transcriptionCurrentProgressBar.setContentDescription(currentText);
+            // Stale, unmeasured processing must not keep an animated spinner alive.
+            transcriptionCurrentProgressBar.setVisibility(stale && !measured
+                    ? View.GONE : View.VISIBLE);
+        }
         transcriptionQueueContainer.setVisibility(View.GONE);
     }
 

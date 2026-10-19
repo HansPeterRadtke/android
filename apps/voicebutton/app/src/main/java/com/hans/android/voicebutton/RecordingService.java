@@ -2262,25 +2262,6 @@ public final class RecordingService extends Service {
                 ? (request.routedInput == null || "Not recording".equals(request.routedInput)
                         ? previous.routedInput : request.routedInput)
                 : "Not recording";
-        long uploadTotalBytes = 0L;
-        long uploadDurableBytes = 0L;
-        int uploadTotalChunks = 0;
-        int uploadDurableChunks = 0;
-        for (ReliableSessionManifest manifest : sessions) {
-            if (!OverviewProgress.needsUpload(manifest)) continue;
-            for (ReliableSessionManifest.Segment segment : manifest.orderedSegments()) {
-                if (segment.mp3Bytes <= 0L) continue;
-                uploadTotalBytes += segment.mp3Bytes;
-                uploadTotalChunks++;
-                if (segment.remoteAccepted) {
-                    uploadDurableBytes += segment.mp3Bytes;
-                    uploadDurableChunks++;
-                } else {
-                    uploadDurableBytes += Math.max(0L,
-                            Math.min(segment.mp3Bytes, segment.remotePartialBytes));
-                }
-            }
-        }
         ReliableUploader.LiveProgress liveUpload = uploader == null ? null : uploader.liveProgress();
         String liveOperation = liveUpload == null ? "idle" : liveUpload.operation;
         String liveSessionId = liveUpload == null ? "" : liveUpload.sessionId;
@@ -2289,17 +2270,19 @@ public final class RecordingService extends Service {
         long liveTotal = liveUpload == null ? 0L : liveUpload.totalBytes;
         int livePermille = RecordingFeedback.uploadPermille(liveDurable, liveTotal);
         long liveWall = liveUpload == null ? 0L : liveUpload.lastProgressWallMs;
-        if ("upload_chunk".equals(liveOperation) && liveTotal > 0L
-                && liveSequence >= 0 && !liveSessionId.isEmpty()) {
-            long persisted = persistedUploadBytes(sessions, liveSessionId,
-                    liveSequence);
-            long liveDelta = Math.max(0L,
-                    Math.min(liveTotal, liveDurable) - persisted);
-            if (liveDelta > 0L) uploadDurableBytes += liveDelta;
-        }
+        // Include every closed, encoded MP3 chunk, including chunks from a live
+        // recording and previously committed files. Removing a completed file
+        // from the denominator used to make progress jump backwards to zero.
+        // Future open-recording bytes are not estimated.
+        OverviewProgress.UploadEvidence evidence = OverviewProgress.uploadEvidence(
+                sessions, liveOperation, liveSessionId, liveSequence,
+                liveDurable, liveTotal);
+        long uploadTotalBytes = evidence.totalBytes;
+        long uploadDurableBytes = evidence.durableBytes;
         long uploadPendingBytes = Math.max(0L, uploadTotalBytes - uploadDurableBytes);
-        int uploadProgressPermille = RecordingFeedback.uploadPermille(
-                uploadDurableBytes, uploadTotalBytes);
+        int uploadTotalChunks = evidence.totalChunks;
+        int uploadDurableChunks = evidence.durableChunks;
+        int uploadProgressPermille = evidence.progressPermille();
         ReliableSessionManifest finalizing = latestFinalizingSession(sessions);
         if (!actualRecording && !actualPaused && !actualInterrupted
                 && !"PAUSING".equals(state) && !"FINISHING".equals(state)

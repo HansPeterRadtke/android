@@ -21,6 +21,43 @@ public class BackupOverviewTextTest {
         return m;
     }
 
+    @Test public void realByteProgressIsReadableAndCommitIsSeparate() {
+        String inFlight = BackupOverviewText.durableProgress(
+                512L, 1024L, 1, false, false, true, "upload_chunk");
+        assertTrue(inFlight.contains("50%"));
+        assertTrue(inFlight.contains("512 B / 1.0 KiB"));
+        assertTrue(inFlight.contains("1 recording waiting"));
+        String committedAudioOnly = BackupOverviewText.durableProgress(
+                1024L, 1024L, 1, false, false, true, "commit");
+        assertTrue(committedAudioOnly.contains("100%"));
+        assertTrue(committedAudioOnly.contains("Final server commit still pending"));
+        String done = BackupOverviewText.durableProgress(
+                1024L, 1024L, 0, false, false, true, "idle");
+        assertFalse(done.contains("pending"));
+    }
+
+    @Test public void unknownBytesNeverPretendToHavePercentage() {
+        String encoding = BackupOverviewText.durableProgress(
+                0L, 0L, 1, false, true, true, "local_finalizing");
+        assertTrue(encoding.contains("total not yet known"));
+        assertFalse(encoding.contains("%"));
+        String active = BackupOverviewText.durableProgress(
+                0L, 0L, 0, true, false, true, "idle");
+        assertTrue(active.contains("first encoded chunk"));
+        assertFalse(active.contains("%"));
+    }
+
+    @Test public void progressingLiveAudioShowsChangingDenominatorClearly() {
+        String live = BackupOverviewText.durableProgress(
+                700L, 1000L, 0, true, false, true, "upload_chunk");
+        assertTrue(live.contains("70%"));
+        assertTrue(live.contains("Recording continues; total grows"));
+        assertTrue(BackupOverviewText.currentFile("test.mp3", 700, true)
+                .contains("recording continues"));
+        assertTrue(BackupOverviewText.currentFile("test.mp3", -1, false)
+                .contains("preparing local MP3"));
+    }
+
     @Test public void idleAndOpenAudioNeverPretendToUpload() {
         assertEquals("", BackupOverviewText.summary(Collections.emptyList(),
                 true, false, "idle", ""));

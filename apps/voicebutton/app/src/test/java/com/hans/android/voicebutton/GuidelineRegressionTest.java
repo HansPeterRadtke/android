@@ -133,7 +133,7 @@ public class GuidelineRegressionTest {
             }
             Class<?> client=com.hans.android.network.reliable.ReliableUploadClient.class;
             Method parse=client.getDeclaredMethod("parseTranscriptionStatus",JSONObject.class);parse.setAccessible(true);
-            Object status=parse.invoke(null,new JSONObject("{\"complete_count\":0,\"not_transcribed_count\":0,\"pending\":[]}"));
+            Object status=parse.invoke(null,new JSONObject("{\"total_committed_count\":4,\"complete_count\":3,\"not_transcribed_count\":1,\"overall_percent\":75,\"pending\":[]}"));
             Method apply=type.getDeclaredMethod("applyTranscriptionStatus",com.hans.android.network.reliable.ReliableUploadClient.TranscriptionStatus.class,Exception.class);apply.setAccessible(true);
             if(name.contains("-queue-")){
                 JSONArray pending=new JSONArray();
@@ -171,6 +171,16 @@ public class GuidelineRegressionTest {
         root.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(height,dialog==null?View.MeasureSpec.EXACTLY:View.MeasureSpec.AT_MOST));
         if(dialog!=null)height=root.getMeasuredHeight();
         root.layout(0,0,width,height);
+        if (a instanceof MainActivity && !name.contains("-dialog-")) {
+            View backup=root.findViewById(R.id.voicebutton_backup_progress);
+            View transcript=root.findViewById(R.id.voicebutton_transcription_progress);
+            org.junit.Assert.assertNotNull(name+": backup bar", backup);
+            org.junit.Assert.assertNotNull(name+": transcription bar", transcript);
+            org.junit.Assert.assertEquals(name+": backup bar hidden", View.VISIBLE, backup.getVisibility());
+            org.junit.Assert.assertEquals(name+": transcription bar hidden", View.VISIBLE, transcript.getVisibility());
+            org.junit.Assert.assertTrue(name+": backup bar zero height", backup.getHeight()>0);
+            org.junit.Assert.assertTrue(name+": transcription bar zero height", transcript.getHeight()>0);
+        }
         root.getViewTreeObserver().dispatchOnGlobalLayout();
         root.getViewTreeObserver().dispatchOnPreDraw();
         root.jumpDrawablesToCurrentState();

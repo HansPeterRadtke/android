@@ -65,10 +65,14 @@ public class MainActivityUiTest {
             onView(withId(R.id.voicebutton_primary)).check(matches(withText("Start recording")));
             onView(withId(R.id.voicebutton_more)).check(matches(isDisplayed()));
             onView(withId(R.id.voicebutton_exit)).check(matches(isDisplayed()));
+            onView(withId(R.id.voicebutton_backup_text))
+                    .check(matches(isDisplayed()));
             onView(withId(R.id.voicebutton_backup_progress))
-                    .check(matches(withEffectiveVisibility(GONE)));
-            onView(withId(R.id.voicebutton_transcription_progress))
-                    .check(matches(withEffectiveVisibility(GONE)));
+                    .check(matches(isDisplayed()));
+            onView(withId(R.id.voicebutton_transcription_summary))
+                    .check(matches(isDisplayed()));
+            // Server transcription percentages are shown only after a verified
+            // response. An offline idle emulator must not manufacture a value.
             onView(withId(R.id.voicebutton_finish)).check(matches(withEffectiveVisibility(GONE)));
             onView(withId(R.id.voicebutton_duration)).check(matches(withEffectiveVisibility(GONE)));
             onView(withId(R.id.voicebutton_local_protection)).check(matches(withEffectiveVisibility(GONE)));

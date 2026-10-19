@@ -42,6 +42,73 @@ public class OverviewProgressTest {
         assertFalse(OverviewProgress.hasUnmeasuredUpload(Arrays.asList(value)));
     }
 
+    @Test public void overallCountsActualServerDurableBytesIncludingLiveRecording() {
+        ReliableSessionManifest done = session("done", true, true, true, 120L, 120L);
+        ReliableSessionManifest open = session("live", false, false, false, 100L, 35L);
+        OverviewProgress.UploadEvidence data = OverviewProgress.uploadEvidence(
+                Arrays.asList(done, open), "upload_chunk", "live", 0, 60L, 100L);
+        assertEquals(220L, data.totalBytes);
+        assertEquals(180L, data.durableBytes);
+        assertEquals(2, data.totalChunks);
+        assertEquals(1, data.durableChunks);
+        assertEquals(0, data.finishedPending);
+        assertEquals(1, data.uncommittedSessions);
+        assertTrue(data.hasOpenRecording);
+        assertEquals(818, data.progressPermille());
+        assertEquals(600, OverviewProgress.fileProgressPermille(open,
+                "upload_chunk", "live", 0, 60L, 100L));
+    }
+
+    @Test public void idleOrDifferentChunkCannotInflateConfirmedProgress() {
+        ReliableSessionManifest pending = session("one", true, true, false, 200L, 30L);
+        OverviewProgress.UploadEvidence idle = OverviewProgress.uploadEvidence(
+                Arrays.asList(pending), "idle", "one", 0, 200L, 200L);
+        OverviewProgress.UploadEvidence wrongSession = OverviewProgress.uploadEvidence(
+                Arrays.asList(pending), "upload_chunk", "different", 0, 200L, 200L);
+        OverviewProgress.UploadEvidence wrongSize = OverviewProgress.uploadEvidence(
+                Arrays.asList(pending), "upload_chunk", "one", 0, 200L, 201L);
+        assertEquals(30L, idle.durableBytes);
+        assertEquals(30L, wrongSession.durableBytes);
+        assertEquals(30L, wrongSize.durableBytes);
+        assertEquals(150, wrongSize.progressPermille());
+    }
+
+    @Test public void localEncodingIsUnknownButOpenPcmDoesNotInventBytes() {
+        ReliableSessionManifest converting = session("converting", true, false, false, 0L, 0L);
+        ReliableSessionManifest live = session("recording", false, false, false, 0L, 0L);
+        OverviewProgress.UploadEvidence evidence = OverviewProgress.uploadEvidence(
+                Arrays.asList(converting, live), "local_finalizing", "converting", -1, 0L, 0L);
+        assertEquals(0, evidence.progressPermille());
+        assertEquals(0L, evidence.totalBytes);
+        assertTrue(evidence.unfinishedEncoding);
+        assertTrue(evidence.hasOpenRecording);
+        assertEquals(-1, OverviewProgress.fileProgressPermille(converting,
+                "idle", "", -1, 0L, 0L));
+    }
+
+    @Test public void completedRecordingKeepsOneHundredPercentAfterCommit() {
+        ReliableSessionManifest completed = session("committed", true, true, true, 100L, 0L);
+        OverviewProgress.UploadEvidence evidence = OverviewProgress.uploadEvidence(
+                Arrays.asList(completed), "idle", "", -1, 0L, 0L);
+        assertEquals(100L, evidence.durableBytes);
+        assertEquals(1000, evidence.progressPermille());
+        assertEquals(0, evidence.finishedPending);
+        assertEquals(0, evidence.uncommittedSessions);
+        assertEquals(1000, OverviewProgress.fileProgressPermille(completed,
+                "idle", "", -1, 0L, 0L));
+    }
+
+    @Test public void visibleFileTracksPendingUploadRatherThanStaleWorker() {
+        ReliableSessionManifest done = session("done", true, true, true, 100L, 100L);
+        ReliableSessionManifest first = session("first", true, true, false, 100L, 10L);
+        ReliableSessionManifest next = session("next", true, true, false, 100L, 0L);
+        first.createdAt = 1L; next.createdAt = 2L;
+        assertEquals("first", OverviewProgress.visibleUpload(
+                Arrays.asList(done, first, next), "done").sessionId);
+        assertEquals("next", OverviewProgress.visibleUpload(
+                Arrays.asList(done, first, next), "next").sessionId);
+    }
+
     private static ReliableSessionManifest session(String id, boolean finished,
             boolean converted, boolean committed, long total, long durable) {
         ReliableSessionManifest value = new ReliableSessionManifest();
