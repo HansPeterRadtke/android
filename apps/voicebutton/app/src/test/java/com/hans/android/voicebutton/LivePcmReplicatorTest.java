@@ -23,6 +23,64 @@ import org.robolectric.annotation.Config;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk=31, application=Application.class)
 public class LivePcmReplicatorTest {
+    @Test public void stillOpenJournalMayHaveFinalUnsyncedTail() {
+        assertFalse(LivePcmReplicator.mayForgetPrefix(8192L,8192L,"s.open.pcm"));
+        assertFalse(LivePcmReplicator.mayForgetPrefix(8190L,8192L,"s.pcm"));
+        assertTrue(LivePcmReplicator.mayForgetPrefix(8192L,8192L,"s.pcm"));
+    }
+
+    @Test public void receiverProofMustMatchRealDurableBytesAndIdentity()
+            throws Exception {
+        org.json.JSONObject proof = new org.json.JSONObject()
+                .put("durable", true).put("server_id", "jetson")
+                .put("session_id", "s1").put("seq", 3)
+                .put("sample_rate", 48000).put("durable_offset", 4096);
+        assertEquals(4096L, LivePcmReplicator.verifiedOffset(
+                proof, "s1", 3, 48000, 8192));
+        assertThrows(java.io.IOException.class, () ->
+                LivePcmReplicator.verifiedOffset(proof, "s1", 3, 48000, 4000));
+        assertThrows(java.io.IOException.class, () ->
+                LivePcmReplicator.verifiedOffset(proof, "other", 3, 48000, 8192));
+        assertThrows(java.io.IOException.class, () ->
+                LivePcmReplicator.verifiedOffset(proof, "s1", 4, 48000, 8192));
+        assertThrows(java.io.IOException.class, () ->
+                LivePcmReplicator.verifiedOffset(proof, "s1", 3, 16000, 8192));
+        proof.put("durable", false);
+        assertThrows(java.io.IOException.class, () ->
+                LivePcmReplicator.verifiedOffset(proof, "s1", 3, 48000, 8192));
+    }
+
+    @Test public void aNewRecordingCannotDiscardPreviouslyFsyncedPendingAudio()
+            throws Exception {
+        Context app=RuntimeEnvironment.getApplication();
+        MobileAudioCredential.save(app, "");
+        LivePcmReplicator backup=new LivePcmReplicator(app,
+                "http://127.0.0.1:1");
+        File previous=File.createTempFile("voicebutton-s1-", ".pcm");
+        File next=File.createTempFile("voicebutton-s2-", ".pcm");
+        try {
+            backup.begin("session-one", "default", "conversation");
+            assertTrue(backup.progress().active);
+            backup.onDurablePrefix("session-one", 0, previous, 48000, 120L);
+            assertEquals(120L, backup.progress().locallyDurableBytes);
+            backup.begin("session-two", "default", "conversation");
+            assertEquals("Unacknowledged session-one data was discarded",
+                    120L, backup.progress().locallyDurableBytes);
+            backup.onDurablePrefix("session-two", 0, next, 48000, 80L);
+            assertEquals(200L, backup.progress().locallyDurableBytes);
+            // An already-registered journal may close just as the next capture
+            // begins. Its last durable bytes must remain eligible for backup.
+            backup.onDurablePrefix("session-one", 0, previous, 48000, 160L);
+            assertEquals(240L, backup.progress().locallyDurableBytes);
+            assertEquals(0L, backup.progress().acknowledgedBytes);
+        } finally {
+            backup.stop();
+            assertTrue(backup.awaitStopped(5000L));
+            previous.delete();
+            next.delete();
+        }
+    }
+
     @Test public void fsyncedPcmIsMirroredOffTheRecorderThread() throws Exception {
         Context app=RuntimeEnvironment.getApplication();
         String token="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -58,7 +116,7 @@ public class LivePcmReplicatorTest {
                                 : "POST /audio/v2/live-pcm-part?"));
                         if(i==1)assertArrayEquals(data,in.readNBytes(length));
                         byte[] response=(i==0
-                                ? "{\"durable_offset\":0}"
+                                ? "{\"ok\":true,\"durable\":true,\"server_id\":\"jetson\",\"session_id\":\"audit-session\",\"seq\":0,\"sample_rate\":0,\"durable_offset\":0}"
                                 : "{\"ok\":true,\"durable\":true,\"server_id\":\"jetson\",\"durable_offset\":4096}")
                                 .getBytes(StandardCharsets.UTF_8);
                         OutputStream out=socket.getOutputStream();

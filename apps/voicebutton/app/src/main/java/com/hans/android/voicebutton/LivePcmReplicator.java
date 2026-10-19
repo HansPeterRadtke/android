@@ -79,26 +79,42 @@ final class LivePcmReplicator {
         client = new ReliableUploadClient(baseUrl);
     }
 
+    static boolean mayForgetPrefix(long acknowledged, long local,
+                                   String fileName) {
+        // A fully acknowledged .open.pcm still has an unsynced tail that may
+        // become durable on journal close. Preserve it for the final callback.
+        return acknowledged >= 0L && acknowledged >= local
+                && fileName != null && !fileName.endsWith(".open.pcm");
+    }
+
     void begin(String session, String folder, String conversation) {
+        // SharedPreferences may involve disk I/O. Do not hold the lock also
+        // acquired by the fsync-completion callback while reading settings.
+        boolean paired = MobileAudioCredential.isConfigured(context);
         synchronized (wake) {
             sessionId = session == null ? "" : session;
             folderId = folder == null || folder.isEmpty() ? "default" : folder;
             conversationId = conversation == null || conversation.isEmpty()
                     ? sessionId : conversation;
-            targets.clear();
+            // Preserve earlier session prefixes that were fsynced locally but
+            // not yet acknowledged by Jetson. Pause/resume and rapid recording
+            // switches must not discard their pending live backup work.
+            targets.entrySet().removeIf(entry ->
+                    mayForgetPrefix(entry.getValue().remoteOffset,
+                            entry.getValue().syncedBytes,
+                            entry.getValue().file.getName()));
             failedAttempts = 0;
             nextRetryElapsed = 0L;
-            boolean paired = MobileAudioCredential.isConfigured(context);
             pairedConfigured = paired;
-            progress = new Progress(paired, true, 0L, 0L,
-                    paired ? "Live backup waiting for the first durable PCM block"
-                            : "Live backup requires recording-server pairing");
             if (running.compareAndSet(false, true)) {
                 worker = new Thread(this::loop, "voicebutton-live-pcm-replica");
                 worker.setDaemon(true);
                 worker.setPriority(Thread.MIN_PRIORITY);
                 worker.start();
             }
+            updateProgressLocked(paired
+                    ? "Live backup waiting for durable PCM; older sessions retained"
+                    : "Live backup requires recording-server pairing");
             wake.notifyAll();
         }
     }
@@ -108,8 +124,9 @@ final class LivePcmReplicator {
                          int sampleRate, long bytes) {
         if (file == null || bytes <= 0 || (bytes & 1L) != 0L) return;
         synchronized (wake) {
-            if (!running.get() || !sessionId.equals(session)) return;
             String key = session + ":" + seq;
+            if (!running.get() || (!sessionId.equals(session)
+                    && !targets.containsKey(key))) return;
             Target item = targets.get(key);
             if (item == null) {
                 item = new Target(session, folderId, conversationId,
@@ -242,15 +259,32 @@ final class LivePcmReplicator {
         synchronized (wake) { updateProgressLocked("Live backup stopped"); }
     }
 
+    static long verifiedOffset(JSONObject r, String id, int seq, int rate, long local)
+            throws java.io.IOException {
+        if (r == null || !r.optBoolean("durable", false)
+                || r.optString("server_id", "").isEmpty()
+                || !id.equals(r.optString("session_id", ""))
+                || r.optInt("seq", -1) != seq
+                || (r.optInt("sample_rate", 0) != 0
+                    && r.optInt("sample_rate", 0) != rate)) {
+            throw new java.io.IOException("Unverified live PCM receiver identity");
+        }
+        long offset = r.optLong("durable_offset", -1L);
+        if (offset < 0 || (offset & 1L) != 0L || offset > local) {
+            throw new java.io.IOException("Invalid live PCM receiver byte offset");
+        }
+        return offset;
+    }
+
     private void replicate(Target target) throws Exception {
         if (target.remoteOffset < 0L) {
             JSONObject remote = client.livePcmStatus(target.folderId,
                     target.sessionId, target.seq);
+            long offset = verifiedOffset(remote, target.sessionId, target.seq, target.rate, target.syncedBytes);
             if (remote.optBoolean("committed", false)) {
                 synchronized (wake) { targets.remove(target.sessionId + ":" + target.seq); }
                 return;
             }
-            long offset = remote.optLong("durable_offset", -1L);
             if (offset < 0 || (offset & 1L) != 0L) {
                 throw new java.io.IOException("Invalid Jetson live PCM acknowledgement");
             }
