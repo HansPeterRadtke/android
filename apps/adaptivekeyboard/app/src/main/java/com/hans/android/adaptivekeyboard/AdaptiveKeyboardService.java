@@ -595,8 +595,14 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(dp(95),dp(95));p.setMargins(dp(3),dp(2),dp(3),dp(2));
         gifResults.addView(view,p);view.setOnClickListener(w->sendGif(gif));
         view.setOnLongClickListener(w -> {
-            toast(gif.title+" · "+gif.attribution);
-            return true;
+            PopupMenu popup=new PopupMenu(this,view);
+            popup.getMenu().add("GIF als Datei teilen").setOnMenuItemClickListener(item -> {
+                sendGif(gif,true);return true;
+            });
+            popup.getMenu().add("GIF in Zwischenablage kopieren").setOnMenuItemClickListener(item -> {
+                copyGif(gif);return true;
+            });
+            popup.show();return true;
         });
         network.execute(() -> {
             byte[] preview=null;
@@ -623,36 +629,73 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             });
         });
     }
-    private void sendGif(GiphySearch.Gif gif) {
-        if(gifStatus==null)return;
-        gifStatus.setText("GIF wird heruntergeladen …");
+    private void sendGif(GiphySearch.Gif gif) { sendGif(gif,false); }
+
+    private void copyGif(GiphySearch.Gif gif) {
+        gifStatus.setText("GIF wird für die Zwischenablage geladen …");
         network.execute(() -> {
             try {
-                File f=GiphySearch.cacheGif(getCacheDir(),gif);
+                File file=GiphySearch.cacheGif(getCacheDir(),gif);
                 handler.post(() -> {
+                    try {
+                        Uri uri=GifSharing.uriFor(this,file.getName());
+                        GifSharing.copyToClipboard(this,uri,gif.title);
+                        gifStatus.setText("GIF als Bild kopiert · Jetzt in der App einfügen");
+                    } catch(Exception e) {
+                        gifStatus.setText("GIF konnte nicht kopiert werden");
+                        android.util.Log.w("KontextTastatur","GIF clipboard failed",e);
+                    }
+                });
+            } catch(Exception e) {
+                handler.post(() -> {if(gifStatus!=null)gifStatus.setText("GIF konnte nicht geladen werden");});
+            }
+        });
+    }
+
+    private void sendGif(GiphySearch.Gif gif, boolean forceShare) {
+        if(gifStatus==null)return;
+        gifStatus.setText("GIF-Datei wird heruntergeladen …");
+        network.execute(() -> {
+            try {
+                File file=GiphySearch.cacheGif(getCacheDir(),gif);
+                handler.post(() -> {
+                    Uri uri=GifSharing.uriFor(this,file.getName());
                     InputConnection ic=getCurrentInputConnection();
-                    if(ic==null){gifStatus.setText("Eingabefeld ist nicht mehr aktiv");return;}
-                    Uri uri=new Uri.Builder().scheme("content").authority(getPackageName()+".gifs")
-                        .appendPath("gifs").appendPath(f.getName()).build();
-                    boolean supported=false;
-                    if(info!=null&&info.contentMimeTypes!=null)
-                        for(String mime:info.contentMimeTypes)
-                            if(ClipDescription.compareMimeTypes(mime,"image/gif"))supported=true;
+                    boolean supported=!forceShare && ic!=null && info!=null &&
+                        GifDeliveryPolicy.supportsDirectGif(info.contentMimeTypes);
                     boolean committed=false;
                     if(supported) {
                         try {
                             InputContentInfo content=new InputContentInfo(uri,
-                                new ClipDescription(gif.title,new String[]{"image/gif"}), Uri.parse(gif.link));
-                            committed=ic.commitContent(content,InputConnection.INPUT_CONTENT_GRANT_READ_URI_PERMISSION,null);
-                        } catch(Exception ex) {android.util.Log.w("KontextTastatur","GIF commit failed",ex);}
+                                new ClipDescription(gif.title,new String[]{"image/gif"}),
+                                gif.link.startsWith("https://")?Uri.parse(gif.link):null);
+                            committed=ic.commitContent(content,
+                                InputConnection.INPUT_CONTENT_GRANT_READ_URI_PERMISSION,null);
+                        } catch(Exception ex) {
+                            android.util.Log.w("KontextTastatur","GIF rich commit failed",ex);
+                        }
                     }
-                    if(committed)gifStatus.setText("GIF übertragen · "+gif.attribution);
-                    else {
-                        ic.commitText(gif.link,1);
-                        gifStatus.setText("App akzeptiert kein GIF. Link eingefügt.");
+                    if(GifDeliveryPolicy.route(committed)==GifDeliveryPolicy.Route.DIRECT_GIF) {
+                        gifStatus.setText("GIF als Bild an die App übergeben");
+                    } else {
+                        try {
+                            // A plain EditText does not support image/gif. A real binary
+                            // sharesheet can still transfer the GIF; never insert the
+                            // Wikimedia landing-page URL as if it were the image.
+                            GifSharing.share(this,uri,gif.title);
+                            gifStatus.setText("App unterstützt kein direktes GIF. Bild im Teilen-Menü auswählen.");
+                        } catch(android.content.ActivityNotFoundException exception) {
+                            gifStatus.setText("Keine App zum Teilen von GIFs gefunden");
+                        } catch(Exception exception) {
+                            gifStatus.setText("GIF-Teilen nicht möglich");
+                            android.util.Log.e("KontextTastatur","GIF sharing failed",exception);
+                        }
                     }
                 });
-            } catch(Exception e) {handler.post(() -> {if(gifStatus!=null)gifStatus.setText("GIF konnte nicht geladen werden");});}
+            } catch(Exception e) {
+                handler.post(() -> {if(gifStatus!=null)gifStatus.setText("GIF-Datei konnte nicht geladen werden");});
+            }
         });
     }
+
 }
