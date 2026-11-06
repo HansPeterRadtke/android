@@ -20,21 +20,25 @@ public final class TextContext {
         return word == null ? "" : word.toLowerCase(Locale.GERMAN).trim();
     }
 
-    private static boolean wordChar(char c) {
-        return Character.isLetter(c) || Character.getType(c) == Character.NON_SPACING_MARK;
+    private static boolean wordChar(String text,int index) {
+        char c=text.charAt(index);
+        if (Character.isLetter(c) || Character.getType(c) == Character.NON_SPACING_MARK) return true;
+        // Contractions such as don't and I'm are one word, standalone quotes aren't.
+        return (c=='\'' || c=='’') && index>0 && index+1<text.length() &&
+            Character.isLetter(text.charAt(index-1)) && Character.isLetter(text.charAt(index+1));
     }
 
     /** Keeps only real letters (including German umlauts and accents). */
     public static TextContext fromBeforeCursor(CharSequence before) {
         String s = before == null ? "" : before.toString();
-        boolean endsInWord = !s.isEmpty() && wordChar(s.charAt(s.length() - 1));
+        boolean endsInWord = !s.isEmpty() && wordChar(s,s.length() - 1);
         List<String> found = new ArrayList<>(3);
         int i = s.length() - 1;
         while (i >= 0 && found.size() < 3) {
-            while (i >= 0 && !wordChar(s.charAt(i))) i--;
+            while (i >= 0 && !wordChar(s,i)) i--;
             if (i < 0) break;
             int end = i + 1;
-            while (i >= 0 && wordChar(s.charAt(i))) i--;
+            while (i >= 0 && wordChar(s,i)) i--;
             found.add(s.substring(i + 1, end));
         }
         String prefix = endsInWord && !found.isEmpty() ? found.remove(0) : "";

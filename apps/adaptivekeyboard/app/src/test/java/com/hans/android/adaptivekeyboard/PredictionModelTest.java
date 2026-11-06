@@ -34,7 +34,7 @@ public class PredictionModelTest {
         m.addBaseWord("habe",0);m.addBaseWord("Hallo",5);
         assertEquals("habe",m.predict("ha","ich","").get(0));
         // Continuing to type must change the candidates, without any selection event.
-        assertEquals("Hallo",m.predict("hall","ich","").get(0));
+        assertEquals("hallo",m.predict("hall","ich","").get(0));
         assertEquals("habe",m.predict("ha","ich","").get(0));
     }
     @Test public void contextBeatsGenericFrequency() {
@@ -60,14 +60,14 @@ public class PredictionModelTest {
     @Test public void undoRemovesTemporaryLearning() {
         PredictionModel m=new PredictionModel();
         PredictionModel.Event event=m.learnTyped("Mülltüte","bitte","die");
-        assertEquals("Mülltüte",m.predict("müll","bitte","die").get(0));
+        assertEquals("mülltüte",m.predict("müll","bitte","die").get(0));
         m.undo(event);
         assertTrue(m.predict("müll","bitte","die").isEmpty());
     }
     @Test public void misspelledPrefixGetsLowPriorityFallback() {
         PredictionModel m=new PredictionModel();
         m.addBaseWord("Tastatur",0);m.addBaseWord("Tastaturfeld",12);
-        assertEquals("Tastatur",m.predict("tastatru","","").get(0));
+        assertEquals("tastatur",m.predict("tastatru","","").get(0));
     }
     @Test public void noUnsupportedNextWordGuessWithoutContext() {
         PredictionModel m=new PredictionModel();
@@ -76,11 +76,11 @@ public class PredictionModelTest {
         m.learnTyped("Morgen","bis","morgen");
         assertEquals("Morgen",m.predict("","bis","morgen").get(0));
     }
-    @Test public void germanNounCaseSurvivesLowerCaseLearning() {
+    @Test public void lowerCaseInputOverridesLexiconNounCase() {
         PredictionModel m=new PredictionModel();
         m.addBaseWord("Haus",24);
         m.learnTyped("haus","im","");
-        assertEquals("Haus",m.predict("hau","im","").get(0));
+        assertEquals("haus",m.predict("hau","im","").get(0));
     }
     @Test public void savedContextAndSelectionSurviveModelRecreation() {
         PredictionModel first=new PredictionModel();
@@ -97,6 +97,103 @@ public class PredictionModelTest {
         assertEquals("gehen",reloaded.predict("ge","wir","heute").get(0));
     }
 
+    @Test public void honorLowerUpperAndAllCapsPrefixes() {
+        PredictionModel m=new PredictionModel();
+        m.addBaseWord("Haus",7,"de");
+        m.addBaseWord("hello",8,"en");
+        assertEquals("haus",m.predict("hau","","").get(0));
+        assertEquals("Haus",m.predict("Hau","","").get(0));
+        assertEquals("HAUS",m.predict("HAU","","").get(0));
+        assertEquals("hello",m.predict("hell","","").get(0));
+        assertEquals("Hello",m.predict("Hell","","").get(0));
+        assertEquals("HELLO",m.predict("HELL","","").get(0));
+    }
+    @Test public void germanAndEnglishWordsCoexist() {
+        PredictionModel m=new PredictionModel();
+        m.addBaseWord("Haus",10,"de");
+        m.addBaseWord("house",10,"en");
+        m.addBaseWord("hello",7,"en");
+        m.addBaseWord("heute",7,"de");
+        m.addBaseWord("the",0,"en");
+        m.addBaseWord("der",0,"de");
+        assertEquals("house",m.predict("hou","the","").get(0));
+        assertEquals("haus",m.predict("hau","der","").get(0));
+        assertEquals("hello",m.predict("hel","the","").get(0));
+        assertEquals("heute",m.predict("heu","der","").get(0));
+    }
+    @Test public void learningAWordAtLongerPrefixHelpsShorterPrefixToo() {
+        PredictionModel m=new PredictionModel();
+        m.addBaseWord("habe",2,"de");
+        m.addBaseWord("hallo",20,"de");
+        for(int i=0;i<4;i++)m.learnSelection("hall","hallo","ich","sage");
+        assertEquals("hallo",m.predict("ha","ich","sage").get(0));
+    }
+    @Test public void rejectedSuggestionGetsDowngradedWithoutEverBeingAccepted() {
+        PredictionModel m=new PredictionModel();
+        m.addBaseWord("hallo",5,"de");
+        m.addBaseWord("habe",6,"de");
+        assertEquals("hallo",m.predict("ha","ich","heute").get(0));
+        PredictionModel.Rejection r=m.learnRejection("ha","hallo","ich","heute");
+        assertNotNull(r);
+        assertEquals("habe",m.predict("ha","ich","heute").get(0));
+    }
+    @Test public void rejectionsRestoreFromDiskCountAndDoNotOverwriteSelections() {
+        PredictionModel m=new PredictionModel();
+        m.addBaseWord("hallo",5,"de");m.addBaseWord("habe",6,"de");
+        m.restoreRejection("heute","ich","ha","hallo",2);
+        m.restoreRejection("","","ha","hallo",2);
+        assertEquals("habe",m.predict("ha","ich","heute").get(0));
+        m.learnSelection("ha","hallo","ich","heute");
+        assertEquals("hallo",m.predict("ha","ich","heute").get(0));
+    }
+    @Test public void englishContractionsRemainWholeWords() {
+        TextContext c=TextContext.fromBeforeCursor("I don't know wh");
+        assertEquals("wh",c.prefix);
+        assertEquals("know",c.previous);
+        assertEquals("don't",c.beforePrevious);
+        assertEquals("you're",TextContext.fromBeforeCursor("you're").prefix);
+        assertEquals("I'm",TextContext.fromBeforeCursor("I'm happy").previous);
+    }
+
+    @Test public void choosingHelloOnceOverridesGenericCandidatesAtShorterPrefix() {
+        PredictionModel m=new PredictionModel();
+        m.addBaseWord("help",1,"en");
+        m.addBaseWord("hello",200,"en");
+        m.addBaseWord("helfen",3,"de");
+        m.addBaseWord("I",4,"en");
+        m.addBaseWord("am",10,"en");
+        // The user has typed a longer prefix, then explicitly selected hello.
+        m.learnSelection("hell","hello","am","I");
+        assertEquals("hello",m.predict("hel","am","I").get(0));
+    }
+    @Test public void observedNextWordOutranksAlternateInSameConversationContext() {
+        PredictionModel m=new PredictionModel();
+        m.addBaseWord("get",1,"en");
+        m.addBaseWord("go",10,"en");
+        m.learnTyped("get","to","want");
+        for(int i=0;i<3;i++)m.learnTyped("go","to","want");
+        assertEquals("go",m.predict("","to","want").get(0));
+        assertEquals("go",m.predict("g","to","want").get(0));
+    }
+    @Test public void lastSelectedWordBeatsOlderChoiceForTheSamePrefix() throws Exception {
+        PredictionModel model=new PredictionModel();
+        model.addBaseWord("help",0,"en");
+        model.addBaseWord("hello",800,"en");
+        model.learnSelection("hel","help","","");
+        Thread.sleep(22);
+        PredictionModel.Event latest=model.learnSelection("hell","hello","","");
+        assertEquals("hello",model.predict("hel","","").get(0));
+        PredictionModel restored=new PredictionModel();
+        restored.addBaseWord("help",0,"en");restored.addBaseWord("hello",800,"en");
+        restored.restoreWord("help",1,1,latest.timestamp-22);
+        restored.restoreWord("hello",1,1,latest.timestamp);
+        for(String prefix:new String[]{"h","he","hel"}) {
+            restored.restoreChoice("","",prefix,"help",1,latest.timestamp-22);
+            restored.restoreChoice("","",prefix,"hello",1,latest.timestamp);
+        }
+        restored.restoreChoice("","","hell","hello",1,latest.timestamp);
+        assertEquals("hello",restored.predict("hel","","").get(0));
+    }
     @Test public void longOrBlankTokensDoNotLearn() {
         PredictionModel m=new PredictionModel();
         assertNull(m.learnTyped("", "a", "b"));

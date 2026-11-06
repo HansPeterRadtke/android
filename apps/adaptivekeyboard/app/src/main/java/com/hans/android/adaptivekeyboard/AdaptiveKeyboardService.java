@@ -66,12 +66,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     @Override public void onCreate() {
         super.onCreate();active=this;
         predictions=new PredictionModel();database=new LearningDatabase(this);
-        try (java.io.InputStream in=getAssets().open("de_lexicon.json")) {
-            byte[] bytes=new byte[400_000];int total=0,n;
-            while ((n=in.read(bytes,total,bytes.length-total))>0) total+=n;
-            JSONArray words=new JSONObject(new String(bytes,0,total,java.nio.charset.StandardCharsets.UTF_8)).getJSONArray("words");
-            for(int i=0;i<words.length();i++) predictions.addBaseWord(words.getString(i),i);
-        } catch(Exception e) {android.util.Log.e("KontextTastatur","Dictionary load failed",e);}
+        reseed();
         try {database.restore(predictions);} catch(Exception e) {android.util.Log.e("KontextTastatur","Learning DB load failed",e);}
         refreshSettings();
     }
@@ -100,12 +95,25 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         }
     }
     private void reseed() {
-        try (java.io.InputStream in=getAssets().open("de_lexicon.json")) {
-            java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream();byte[] b=new byte[8192];int n;
+        loadLexicon("de_lexicon.json","de");
+        loadLexicon("en_lexicon.json","en");
+    }
+    private void loadLexicon(String name,String language) {
+        try (java.io.InputStream in=getAssets().open(name)) {
+            java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream();
+            byte[] b=new byte[8192];int n;
             while((n=in.read(b))!=-1)out.write(b,0,n);
             JSONArray ws=new JSONObject(out.toString("UTF-8")).getJSONArray("words");
-            for(int i=0;i<ws.length();i++)predictions.addBaseWord(ws.getString(i),i);
-        } catch(Exception e) {android.util.Log.e("KontextTastatur","Reseed failed",e);}
+            for(int i=0;i<ws.length();i++)predictions.addBaseWord(ws.getString(i),i,language);
+        } catch(Exception e) {android.util.Log.e("KontextTastatur","Lexicon load failed: "+language,e);}
+    }
+    private boolean editorWantsCapitalization() {
+        if(info==null)return false;
+        int flags=info.inputType & (InputType.TYPE_TEXT_FLAG_CAP_SENTENCES |
+            InputType.TYPE_TEXT_FLAG_CAP_WORDS | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        if(flags==0)return false;
+        InputConnection ic=getCurrentInputConnection();
+        return ic!=null && ic.getCursorCapsMode(flags)!=0;
     }
     private int dp(float v) {return (int)(getResources().getDisplayMetrics().density*v+0.5f);}
     private GradientDrawable background(int color) {
@@ -140,12 +148,13 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         int cls = attribute == null ? 0 : attribute.inputType & InputType.TYPE_MASK_CLASS;
         mode = (cls == InputType.TYPE_CLASS_NUMBER || cls == InputType.TYPE_CLASS_PHONE ||
             cls == InputType.TYPE_CLASS_DATETIME) ? "numbers" : "letters";
-        shift=true;caps=false;gifQuery="";searchRevision++;recentEvent=null;
+        shift=false;caps=false;gifQuery="";searchRevision++;recentEvent=null;
         if(root!=null){renderToolbar();renderKeyboard();refreshSuggestions();}
     }
     @Override public void onStartInputView(EditorInfo attribute, boolean restarting) {
         super.onStartInputView(attribute,restarting);
         info=attribute;sensitive=isPrivateField(attribute);
+        if(!caps){shift=editorWantsCapitalization();renderKeyboard();}
         refreshSettings();refreshSuggestions();
     }
     @Override public void onUpdateSelection(int oldStart,int oldEnd,int newStart,int newEnd,int candidatesStart,int candidatesEnd) {
@@ -328,7 +337,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             case "Leerzeichen":enterDelimiter(" ");break;
             case "↵":enterDelimiter("\n");break;
             default:
-                if(key.length()==1 && !Character.isLetter(key.charAt(0)))enterDelimiter(key);
+                if("'".equals(key)||"’".equals(key)) enterLetter(key);
+                else if(key.length()==1 && !Character.isLetter(key.charAt(0)))enterDelimiter(key);
                 else enterLetter((shift||caps)?(key.equals("ß")?"ẞ":key.toUpperCase(Locale.GERMAN)):key);
         }
     }
@@ -338,9 +348,29 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             updateGifStatus();return;
         }
         InputConnection ic=getCurrentInputConnection();if(ic==null)return;
+        // A visible completion that the next character contradicts is a weak
+        // negative signal. Continuing to type NEVER counts as a selection.
+        if(!privateMode&&!sensitive && mode.equals("letters") && letter.length()==1 &&
+            (Character.isLetter(letter.charAt(0)) || letter.equals("'"))) {
+            CharSequence before=ic.getTextBeforeCursor(400,0);
+            TextContext context=TextContext.fromBeforeCursor(before);
+            String newPrefix=TextContext.normalize(context.prefix+letter);
+            if(context.prefix.length()>=2 &&
+                (ic.getSelectedText(0)==null||ic.getSelectedText(0).length()==0)) {
+                for(String suggestion:visibleWords) {
+                    if(suggestion==null||suggestion.isEmpty())continue;
+                    String old=TextContext.normalize(suggestion);
+                    if(old.startsWith(TextContext.normalize(context.prefix)) && !old.startsWith(newPrefix)) {
+                        PredictionModel.Rejection r=predictions.learnRejection(
+                            context.prefix,suggestion,context.previous,context.beforePrevious);
+                        database.persistRejection(r);
+                    }
+                }
+            }
+        }
         ic.commitText(letter,1);
         recentEvent=null;
-        if(shift&&!caps) {shift=false;renderKeyboard();}
+        if(shift&&!caps && !letter.equals("'")) {shift=false;renderKeyboard();}
         refreshSuggestions();
     }
     private void enterDelimiter(String symbol) {
@@ -364,7 +394,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             if(action!=EditorInfo.IME_ACTION_NONE && action!=EditorInfo.IME_ACTION_UNSPECIFIED && !multiline) {
                 ic.performEditorAction(action);
             } else ic.commitText("\n",1);
-            shift=true;
+            shift=editorWantsCapitalization();
         } else {
             if(symbol.equals(" ") && before!=null && before.length()>0 && before.charAt(before.length()-1)==' ') {
                 // No unexpected duplicate spaces after accepting a suggestion.
@@ -373,8 +403,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                     ic.deleteSurroundingText(1,0);
                 ic.commitText(symbol,1);
             }
-            if(".!?".contains(symbol))shift=true;
-            if(symbol.equals(" ") && before!=null && before.toString().matches("(?s).*[.!?]$"))shift=true;
+            if (symbol.matches("[.!?]")) shift=editorWantsCapitalization();
+            if(symbol.equals(" ") && before!=null && before.toString().matches("(?s).*[.!?]$"))
+                shift=editorWantsCapitalization();
         }
         if(shift&&!caps)renderKeyboard();
         refreshSuggestions();
@@ -515,7 +546,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(action==android.R.id.paste)showMode("letters");
     }
     private void showGifPanel() {
-        panelHeader("GIFs suchen · Powered By GIPHY",() -> showMode("letters"));
+        boolean viaGiphy=!getSharedPreferences("keyboard_settings",0).getString("giphy_key","").isEmpty();
+        panelHeader(viaGiphy ? "GIF-Suche · Powered By GIPHY" :
+            "GIF-Suche · Openverse (ohne Schlüssel)",() -> showMode("letters"));
         gifStatus=button("Suchbegriff tippen, dann ↵ drücken",14,BG,35);
         panel.addView(gifStatus,new LinearLayout.LayoutParams(-1,dp(35)));
         HorizontalScrollView scroll=new HorizontalScrollView(this);
@@ -537,9 +570,6 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         String query=gifQuery.trim();
         if(query.isEmpty()){updateGifStatus();return;}
         String key=getSharedPreferences("keyboard_settings",0).getString("giphy_key","");
-        if(key==null||key.isEmpty()) {
-            gifStatus.setText("GIPHY-Schlüssel fehlt. ⚙ Einstellungen öffnen.");return;
-        }
         final int request=++searchRevision;
         gifStatus.setText("Suche läuft: "+query);
         gifResults.removeAllViews();
@@ -548,7 +578,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 List<GiphySearch.Gif> results=GiphySearch.search(key,query);
                 handler.post(() -> {
                     if(request!=searchRevision||!mode.equals("gif"))return;
-                    gifStatus.setText(results.isEmpty()?"Keine GIFs gefunden":"GIF antippen zum Senden · Powered By GIPHY");
+                    gifStatus.setText(results.isEmpty()?"Keine passenden GIFs gefunden":
+                        (key==null||key.isEmpty() ? "Freie GIFs von Openverse · Auswahl begrenzt" :
+                            "GIF antippen zum Senden · Powered By GIPHY"));
                     for(GiphySearch.Gif gif:results) addGifPreview(gif,request);
                 });
             } catch(Exception error) {
@@ -559,21 +591,36 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     private void addGifPreview(GiphySearch.Gif gif,int request) {
         ImageView view=new ImageView(this);view.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        view.setContentDescription(gif.title);view.setBackground(background(KEY));
+        view.setContentDescription(gif.title+" · "+gif.attribution);view.setBackground(background(KEY));
         LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(dp(95),dp(95));p.setMargins(dp(3),dp(2),dp(3),dp(2));
         gifResults.addView(view,p);view.setOnClickListener(w->sendGif(gif));
+        view.setOnLongClickListener(w -> {
+            toast(gif.title+" · "+gif.attribution);
+            return true;
+        });
         network.execute(() -> {
+            byte[] preview=null;
             try {
-                byte[] preview=GiphySearch.request(gif.thumbnail,1_500_000);
-                handler.post(() -> {
-                    if(request!=searchRevision || !mode.equals("gif"))return;
-                    try {
-                        if(Build.VERSION.SDK_INT>=28)
-                            view.setImageDrawable(ImageDecoder.decodeDrawable(ImageDecoder.createSource(ByteBuffer.wrap(preview))));
-                        else view.setImageBitmap(android.graphics.BitmapFactory.decodeByteArray(preview,0,preview.length));
-                    } catch(Exception ignored) {/* Bad thumbnail must never block typing. */}
-                });
-            } catch(Exception ignored) { /* Show blank placeholder, allow retry via tap. */ }
+                preview=GiphySearch.request(gif.thumbnail,1_500_000);
+            } catch(Exception thumbFailure) {
+                // Openverse's thumbnail proxy may return HTTP 424 even when the
+                // original CC GIF is available directly on Wikimedia Commons.
+                try {preview=GiphySearch.request(gif.original,1_800_000);}
+                catch(Exception unavailable) { /* Non-fatal missing preview. */ }
+            }
+            final byte[] imageBytes=preview;
+            handler.post(() -> {
+                if(request!=searchRevision || !mode.equals("gif"))return;
+                if(imageBytes==null) {
+                    view.setImageResource(android.R.drawable.ic_menu_gallery);
+                    return;
+                }
+                try {
+                    if(Build.VERSION.SDK_INT>=28)
+                        view.setImageDrawable(ImageDecoder.decodeDrawable(ImageDecoder.createSource(ByteBuffer.wrap(imageBytes))));
+                    else view.setImageBitmap(android.graphics.BitmapFactory.decodeByteArray(imageBytes,0,imageBytes.length));
+                } catch(Exception invalid) {view.setImageResource(android.R.drawable.ic_menu_gallery);}
+            });
         });
     }
     private void sendGif(GiphySearch.Gif gif) {
@@ -599,7 +646,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                             committed=ic.commitContent(content,InputConnection.INPUT_CONTENT_GRANT_READ_URI_PERMISSION,null);
                         } catch(Exception ex) {android.util.Log.w("KontextTastatur","GIF commit failed",ex);}
                     }
-                    if(committed)gifStatus.setText("GIF übertragen");
+                    if(committed)gifStatus.setText("GIF übertragen · "+gif.attribution);
                     else {
                         ic.commitText(gif.link,1);
                         gifStatus.setText("App akzeptiert kein GIF. Link eingefügt.");

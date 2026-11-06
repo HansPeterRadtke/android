@@ -43,8 +43,8 @@ public final class SettingsActivity extends Activity {
             AdaptiveKeyboardService.refreshSettings();
             new AlertDialog.Builder(this).setMessage(newValue?"Privatmodus an. Es wird nichts gelernt.":"Privatmodus aus. Lernen bei bestätigten Wörtern aktiv.").setPositiveButton("OK",null).show();
         });
-        label("GIF-Suche mit GIPHY",19);
-        label("GIPHY verlangt einen eigenen API-Schlüssel. Die Internetverbindung wird nur nach einer ausdrücklich gestarteten GIF-Suche verwendet. Die Eingaben in anderen Apps werden nicht an GIPHY übertragen.",14);
+        label("GIF-Suche ohne API-Schlüssel (GIPHY optional)",19);
+        label("Die GIF-Suche funktioniert ohne Schlüssel über Openverse und Wikimedia Commons. Deren freie Auswahl ist kleiner als GIPHY. Optional kann ein eigener GIPHY-Schlüssel für dessen Bibliothek hinterlegt werden. Das Netzwerk wird nur bei ausdrücklich gestarteter GIF-Suche verwendet; normales Tippen wird nie übertragen. Die GIFs besitzen unterschiedliche Lizenzen und Namensnennungsbedingungen.",14);
         EditText key=new EditText(this);
         key.setHint("GIPHY API-Schlüssel (optional)");
         key.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);

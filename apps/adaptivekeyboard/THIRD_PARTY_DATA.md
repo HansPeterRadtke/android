@@ -12,3 +12,9 @@ Reproduce the lexicon using `scripts/make_lexicon.py` and the above two source f
 License text: https://creativecommons.org/licenses/by-sa/4.0/legalcode and https://creativecommons.org/publicdomain/zero/1.0/legalcode.
 
 GIPHY is a separate third-party online service: no GIFs are bundled with the APK, no provider API key is distributed, and its content is not covered by the lexicon's Creative Commons license. The GIF panel attributes the provider and the receiving application may impose its own content support limitations.
+
+## English vocabulary and keyless GIF search (v0.2.0)
+
+`app/src/main/assets/en_lexicon.json` is a filtered rank-ordered English list generated with `wordfreq==3.1.1`, from the same contributor project and its CC BY-SA 4.0 underlying data. Regenerate it using `scripts/make_english_lexicon.py` in an isolated environment with `wordfreq==3.1.1`. It is adapted and distributed under CC BY-SA 4.0; original licensing and source corpus acknowledgements still apply.
+
+Openverse is a WordPress/open-source search service. Its image search API permits limited unauthenticated queries. The keyless GIF panel filters to Wikimedia Commons GIFs and displays the author/license when available; each retrieved file has its own terms, usually Creative Commons licenses, which the sender should respect. No Commons imagery is bundled with the APK. Sources: https://api.openverse.org/v1/ , https://commons.wikimedia.org/ , and https://docs.openverse.org/ .
