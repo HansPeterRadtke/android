@@ -14,6 +14,7 @@ public final class PredictionModel {
     private static final int UNKNOWN_RANK=999999;
     private static final class Word {
         String surface;
+        String lexicalSurface;
         int baseRank=UNKNOWN_RANK;
         int deRank=UNKNOWN_RANK;
         int enRank=UNKNOWN_RANK;
@@ -76,6 +77,7 @@ public final class PredictionModel {
         else w.deRank=Math.min(w.deRank,r);
         if(r<w.baseRank){
             w.baseRank=r;
+            w.lexicalSurface=value; // canonical noun/name case, not last sentence case
             if(w.typed==0)w.surface=value;
         }
     }
@@ -188,9 +190,24 @@ public final class PredictionModel {
         return position>=0?position:-position-1;
     }
     public synchronized List<String> predict(String rawPrefix,String prev,String prev2) {
+        return predict(rawPrefix,prev,prev2,Collections.emptyMap());
+    }
+
+    /** Neural scores are optional, async-only and never stored in personal history. */
+    public synchronized List<String> predict(String rawPrefix,String prev,String prev2,
+                                             Map<String,Double> neuralScores) {
+        return predict(rawPrefix,prev,prev2,neuralScores,"");
+    }
+    public synchronized List<String> predict(String rawPrefix,String prev,String prev2,
+                                             Map<String,Double> neuralScores,String language) {
         String prefix=norm(rawPrefix),a=norm(prev),b=norm(prev2);
-        Map<String,Double> generic = baseline==null ? Collections.emptyMap() :
-            baseline.candidates(prefix,a,b);
+        Map<String,Double> generic=new HashMap<>();
+        if(baseline!=null)generic.putAll(baseline.candidates(prefix,a,b,language));
+        if(neuralScores!=null)for(Map.Entry<String,Double> e:neuralScores.entrySet()) {
+            String word=norm(e.getKey());
+            if(word.startsWith(prefix) && e.getValue()!=null && e.getValue()>0)
+                generic.merge(word,e.getValue(),Double::sum);
+        }
         if(prefix.isEmpty()&&a.isEmpty()&&generic.isEmpty())return Collections.emptyList();
         Scored[] best=new Scored[3];
         double englishBias=languageBias(a,b);
@@ -230,7 +247,7 @@ public final class PredictionModel {
         }
         // Baseline can propose valid corpus words outside the packaged unigram
         // list; offer those too, without storing them as personal learning.
-        if(!prefix.isEmpty())for(Map.Entry<String,Double> entry:generic.entrySet()) {
+        for(Map.Entry<String,Double> entry:generic.entrySet()) {
             if(words.containsKey(entry.getKey()))continue;
             offer(best,entry.getKey(),new Word(entry.getKey()),a,b,prefix,
                 rawPrefix,englishBias,0,entry.getValue());
@@ -249,6 +266,19 @@ public final class PredictionModel {
     }
     private double languageBias(String a,String b) {
         return signal(a)*1.2 + signal(b)*0.8;
+    }
+    public synchronized boolean likelyEnglish(String rawPrefix,String previous,String beforePrevious) {
+        String a=norm(previous),b=norm(beforePrevious);
+        double bias=languageBias(a,b);
+        if(bias < -0.35)return false;
+        if(bias > 0.35)return true;
+        if(rawPrefix!=null && rawPrefix.length()>=3) {
+            String prefix=norm(rawPrefix);
+            // Distinctive vocabulary is a useful signal in code-switched text.
+            if(prefix.startsWith("sch")||prefix.startsWith("über")||
+                prefix.startsWith("mö")||prefix.startsWith("dür"))return false;
+        }
+        return true;
     }
     /** Positive=English, negative=German; ambiguous shared words are neutral. */
     private double signal(String token) {
@@ -299,7 +329,13 @@ public final class PredictionModel {
             -10*Math.log1p(contextualReject)
             -5*Math.log1p(get(rejections,key("","",prefix,form)))
             +(form.equals(prefix)?2:0)+penalty;
-        String output=caseMatched(w.surface,rawPrefix);
+        String canonical=w.lexicalSurface!=null ? w.lexicalSurface : w.surface;
+        // Custom names with internal capitals remain intact after repeated use.
+        if(w.typed>2 && w.surface!=null && w.surface.length()>1 &&
+            !w.surface.equals(w.surface.toLowerCase(Locale.GERMAN)) &&
+            !w.surface.equals(w.surface.substring(0,1).toUpperCase(Locale.GERMAN)+
+                w.surface.substring(1).toLowerCase(Locale.GERMAN))) canonical=w.surface;
+        String output=caseMatched(canonical,rawPrefix);
         Scored candidate=new Scored(output,score);
         for(int i=0;i<best.length;i++) {
             if(best[i]==null || candidate.score>best[i].score ||
@@ -310,14 +346,7 @@ public final class PredictionModel {
         }
     }
     static String caseMatched(String surface,String rawPrefix) {
-        if(surface.isEmpty()||rawPrefix==null||rawPrefix.isEmpty())return surface;
-        if(rawPrefix.length()>1 && rawPrefix.equals(rawPrefix.toUpperCase(Locale.GERMAN)) &&
-            !rawPrefix.equals(rawPrefix.toLowerCase(Locale.GERMAN)))return surface.toUpperCase(Locale.GERMAN);
-        if(Character.isUpperCase(rawPrefix.charAt(0)))
-            return surface.substring(0,1).toUpperCase(Locale.GERMAN)+surface.substring(1);
-        if(Character.isLowerCase(rawPrefix.charAt(0)))
-            return surface.substring(0,1).toLowerCase(Locale.GERMAN)+surface.substring(1);
-        return surface;
+        return WordCase.matchPrefix(surface,rawPrefix);
     }
     private static boolean oneEditFromPrefix(String prefix,String word) {
         int n=prefix.length();

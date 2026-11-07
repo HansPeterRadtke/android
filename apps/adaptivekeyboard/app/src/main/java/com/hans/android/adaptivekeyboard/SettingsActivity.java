@@ -9,6 +9,7 @@ import android.provider.Settings;
 import android.view.Gravity;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -40,6 +41,23 @@ public final class SettingsActivity extends Activity {
         caretTest.setPadding(0,dp(3),0,dp(5));
         layout.addView(caretTest,new LinearLayout.LayoutParams(-1,-2));
         input.setReadout(caretTest);
+        label("Neuronale Wortvorhersage",19);
+        label("Chime-SMS-2M von Luke Steuber (Modellgewichte CC BY-SA 4.0, Referenzcode Apache 2.0). Der englische Sprachprädiktor benötigt etwa zwei Megabyte, läuft offline im Hintergrund und ersetzt niemals Wörter automatisch. Deutsche Vorhersagen und persönliche Wortauswahl bleiben aktiv.",14);
+        action("Modellquelle und Lizenz öffnen",() -> {
+            Intent i=new Intent(Intent.ACTION_VIEW,
+                android.net.Uri.parse("https://huggingface.co/lukeslp/chime-sms-2m"));
+            try{startActivity(i);}catch(Exception e){new AlertDialog.Builder(this)
+                .setMessage("https://huggingface.co/lukeslp/chime-sms-2m")
+                .setPositiveButton("OK",null).show();}
+        });
+        CheckBox neural=new CheckBox(this);
+        neural.setText("Englische neuronale Vorschläge verwenden");
+        neural.setChecked(getSharedPreferences("keyboard_settings",0).getBoolean("neural_predictions",true));
+        neural.setOnCheckedChangeListener((button,checked)-> {
+            getSharedPreferences("keyboard_settings",0).edit().putBoolean("neural_predictions",checked).apply();
+            AdaptiveKeyboardService.refreshSettings();
+        });
+        layout.addView(neural);
         label("Lernverhalten",19);
         label("Beim Weitertippen wird nichts übernommen. Erst Leertaste, Satzzeichen, Eingabetaste oder die Wahl eines Vorschlags bestätigt ein Wort. Das vollständige Eingabefeld und Passwörter werden nicht gespeichert. Private Felder werden automatisch ausgeschlossen.",14);
         action("Privatmodus umschalten",() -> {

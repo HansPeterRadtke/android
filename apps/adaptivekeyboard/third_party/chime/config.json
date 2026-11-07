@@ -1,0 +1,50 @@
+{
+  "model_name": "Chime-SMS-2M",
+  "architecture": "CIFG-LSTM with projection and tied input/output embeddings",
+  "vocab_size": 16384,
+  "embedding_size": 96,
+  "hidden_size": 670,
+  "num_layers": 1,
+  "num_parameters": 2025114,
+  "gate_order": [
+    "forget",
+    "output",
+    "update"
+  ],
+  "context_tokens": 64,
+  "context_hop": 32,
+  "special_tokens": [
+    "<pad>",
+    "<s>",
+    "</s>",
+    "<unk>",
+    "<num>",
+    "<sym>"
+  ],
+  "tensors": {
+    "embedding": [
+      16384,
+      96
+    ],
+    "wx": [
+      96,
+      2010
+    ],
+    "wr": [
+      96,
+      2010
+    ],
+    "b": [
+      2010
+    ],
+    "proj": [
+      670,
+      96
+    ]
+  },
+  "files": {
+    "cifg_int8.bin": "int8 weights with one float32 scale per row, float32 bias and the vocabulary (LTCF format, version 1)",
+    "model.safetensors": "float32 weights"
+  },
+  "int8_sha256": "3255dbeaf6e7fc0922afdca42ef751a22e3ad28903ab4acc9eb0022b9a704318"
+}

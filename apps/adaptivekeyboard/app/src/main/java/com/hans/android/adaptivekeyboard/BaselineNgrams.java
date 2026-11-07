@@ -59,24 +59,28 @@ public final class BaselineNgrams {
 
     /** Return bounded offline scores; a personal choice carries much greater weight. */
     public synchronized Map<String,Double> candidates(String rawPrefix,String previous,String beforePrevious) {
+        return candidates(rawPrefix,previous,beforePrevious,"");
+    }
+    public synchronized Map<String,Double> candidates(String rawPrefix,String previous,String beforePrevious,String language) {
         String prefix=norm(rawPrefix),a=norm(previous),b=norm(beforePrevious);
         Map<String,Double> scores=new LinkedHashMap<>(24);
         if(!a.isEmpty()) {
-            addScores(scores,nextAfterOne.get(a),prefix,2.7,16);
-            if(!b.isEmpty())addScores(scores,nextAfterTwo.get(ctx(b,a)),prefix,4.2,24);
+            addScores(scores,nextAfterOne.get(a),prefix,2.7,16,language);
+            if(!b.isEmpty())addScores(scores,nextAfterTwo.get(ctx(b,a)),prefix,4.2,24,language);
         }
         // Without any observed personal or baseline continuation, still show
         // useful possible first words instead of a permanently empty suggestion bar.
         if(scores.size()<3) {
-            addScores(scores,starts,prefix,1.25,8);
+            addScores(scores,starts,prefix,1.45,18,language);
         }
         return scores;
     }
     private static void addScores(Map<String,Double> scores,List<Candidate> candidates,
-                                  String prefix,double weight,double maxScore) {
+                                  String prefix,double weight,double maxScore,String language) {
         if(candidates==null)return;
         for(Candidate entry:candidates) {
             if(!entry.token.startsWith(prefix))continue;
+            if(language!=null && !language.isEmpty() && !language.equals(entry.language))continue;
             double score=Math.min(maxScore,weight*Math.log1p(entry.count));
             scores.merge(entry.token,score,Double::sum);
         }

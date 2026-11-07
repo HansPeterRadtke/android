@@ -1,0 +1,33 @@
+package com.hans.android.adaptivekeyboard;
+import org.junit.Test;
+import static org.junit.Assert.*;
+public final class WordCaseTest {
+    @Test public void preservesExactTypedPrefixCase() {
+        assertEquals("haus",WordCase.matchPrefix("Haus","hau"));
+        assertEquals("Haus",WordCase.matchPrefix("haus","Ha"));
+        assertEquals("HAUS",WordCase.matchPrefix("Haus","HA"));
+        assertEquals("hAus",WordCase.matchPrefix("haus","hA"));
+        assertEquals("Haus",WordCase.matchPrefix("Haus","Haus"));
+        assertEquals("häuser",WordCase.matchPrefix("Häuser","häu"));
+    }
+    @Test public void startAndAfterPunctuationAreCapitalsButNotMidSentence() {
+        assertTrue(WordCase.sentenceStart(""));
+        assertTrue(WordCase.sentenceStart("Das war gut. "));
+        assertTrue(WordCase.sentenceStart("Are you there? "));
+        assertTrue(WordCase.sentenceStart("Okay! "));
+        assertFalse(WordCase.sentenceStart("Ich bin "));
+        assertFalse(WordCase.sentenceStart("I am not"));
+        assertEquals("Nicht",WordCase.display("nicht","","Okay. ",false));
+        assertEquals("nicht",WordCase.display("nicht","","Ich bin ",false));
+    }
+    @Test public void lowerCaseManualInputOverridesSentenceCapital() {
+        assertEquals("nichT",WordCase.display("Nicht","nichT","Hallo. nichT",true));
+        assertEquals("hallo",WordCase.display("Hallo","hallo","",true));
+        assertEquals("i",WordCase.display("i","i","",true));
+        assertEquals("I",WordCase.display("i","","you and ",false));
+    }
+    @Test public void germanCanonicalNounsRetainTheirCapitalWhenUnprefixed() {
+        assertEquals("Haus",WordCase.display("Haus","","ich sehe ein ",false));
+        assertEquals("schön",WordCase.display("schön","","das ist ",false));
+    }
+}

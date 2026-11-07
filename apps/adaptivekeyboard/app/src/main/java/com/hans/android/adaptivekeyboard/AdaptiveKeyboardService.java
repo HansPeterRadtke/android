@@ -44,6 +44,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.Map;
+import java.util.HashMap;
 
 /** A stand-alone German QWERTZ IME. No network use outside the explicit GIF panel. */
 public final class AdaptiveKeyboardService extends InputMethodService {
@@ -57,6 +62,14 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private final ExecutorService languageWorker = Executors.newSingleThreadExecutor(r -> {
         Thread t=new Thread(r,"keyboard-offline-language-model");t.setDaemon(true);return t;
     });
+    // At most one running and one queued neural task: stale text cannot pile up.
+    private final ThreadPoolExecutor neuralWorker=new ThreadPoolExecutor(1,1,0L,
+        TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(1),r -> {
+            Thread t=new Thread(r,"keyboard-neural-predict");t.setDaemon(true);return t;
+        },new ThreadPoolExecutor.DiscardOldestPolicy());
+    private volatile ChimeEnglish neuralModel;
+    private int predictionRevision=0;
+    private boolean manualShiftPending=false;
     private final android.util.LruCache<String,byte[]> previewCache =
         new android.util.LruCache<String,byte[]>(5_000_000) {
             @Override protected int sizeOf(String key,byte[] value) {return value.length;}
@@ -106,12 +119,22 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                     android.util.Log.e("KontextTastatur","Offline next-word baseline load failed "+language,ex);
                 }
             }
+            ChimeEnglish englishModel=null;
+            try(java.io.InputStream modelStream=getAssets().open("chime_en.ltc")) {
+                englishModel=new ChimeEnglish(modelStream);
+            } catch(Exception ex) {
+                android.util.Log.e("KontextTastatur","Optional offline neural model not available",ex);
+            }
+            final ChimeEnglish ready=englishModel;
             handler.post(() -> {
                 if(active!=this)return;
                 baselineNgrams=loaded;
                 predictions.setBaselineNgrams(loaded);
+                neuralModel=ready;
                 refreshSuggestions();
-                android.util.Log.i("KontextTastatur","Offline next-word model loaded: "+loaded.size());
+                android.util.Log.i("KontextTastatur","Offline ngram model loaded: "+loaded.size());
+                if(ready!=null)android.util.Log.i("KontextTastatur",
+                    "Offline English Chime neural model ready: "+ready.vocabularySize());
             });
         });
         refreshSettings();
@@ -123,6 +146,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         searchWorker.shutdownNow();
         sendWorker.shutdownNow();
         languageWorker.shutdownNow();
+        neuralWorker.shutdownNow();
+        neuralModel=null;
         if(database!=null) database.close();
         if(active==this) active=null;
         super.onDestroy();
@@ -165,6 +190,32 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(flags==0)return false;
         InputConnection ic=getCurrentInputConnection();
         return ic!=null && ic.getCursorCapsMode(flags)!=0;
+    }
+    /** Re-evaluate sentence auto-capitalization after an edit or cursor move. */
+    private void updateAutoShift() {
+        if(caps || manualShiftPending || !"letters".equals(mode) || info==null)return;
+        InputConnection ic=getCurrentInputConnection();
+        if(ic==null)return;
+        CharSequence previous=ic.getTextBeforeCursor(200,0);
+        if(previous==null)return;
+        if(!TextContext.fromBeforeCursor(previous).prefix.isEmpty())return;
+        boolean desired=editorWantsCapitalization() || WordCase.sentenceStart(previous.toString());
+        if(desired!=shift) {
+            shift=desired;
+            if(keys!=null)renderKeyboard();
+        }
+    }
+    private boolean neuralEnabled() {
+        return getSharedPreferences("keyboard_settings",0).getBoolean("neural_predictions",true);
+    }
+    private Map<String,Double> neuralScores(List<ChimeEnglish.Candidate> candidates) {
+        Map<String,Double> result=new HashMap<>();
+        for(int i=0;i<candidates.size();i++) {
+            String token=TextContext.normalize(candidates.get(i).word);
+            if(!token.isEmpty() && Character.isLetter(token.charAt(0)))
+                result.put(token,Math.max(0,43.0-3.5*i));
+        }
+        return result;
     }
     private int dp(float v) {return (int)(getResources().getDisplayMetrics().density*v+0.5f);}
     private GradientDrawable background(int color) {
@@ -209,13 +260,14 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         int cls = attribute == null ? 0 : attribute.inputType & InputType.TYPE_MASK_CLASS;
         mode = (cls == InputType.TYPE_CLASS_NUMBER || cls == InputType.TYPE_CLASS_PHONE ||
             cls == InputType.TYPE_CLASS_DATETIME) ? "numbers" : "letters";
-        shift=false;caps=false;gifQuery="";searchRevision++;recentEvent=null;
+        shift=false;caps=false;manualShiftPending=false;gifQuery="";
+        searchRevision++;predictionRevision++;recentEvent=null;
         if(root!=null){renderToolbar();renderKeyboard();refreshSuggestions();}
     }
     @Override public void onStartInputView(EditorInfo attribute, boolean restarting) {
         super.onStartInputView(attribute,restarting);
         info=attribute;sensitive=isPrivateField(attribute);
-        if(!caps){shift=editorWantsCapitalization();renderKeyboard();}
+        if(!caps){manualShiftPending=false;updateAutoShift();}
         InputConnection ic=getCurrentInputConnection();
         if(Build.VERSION.SDK_INT>=31 && ic!=null)ic.setImeConsumesInput(false);
         refreshSettings();refreshSuggestions();
@@ -225,6 +277,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(root!=null && "letters".equals(mode)) {
             InputConnection ic=getCurrentInputConnection();
             if(Build.VERSION.SDK_INT>=31 && ic!=null)ic.setImeConsumesInput(false);
+            updateAutoShift();
             refreshSuggestions();
         }
     }
@@ -286,30 +339,68 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         renderKeyboard();refreshSuggestions();
     }
     private void refreshSuggestions() {
+        final int revision=++predictionRevision;
         if(suggestions[0]==null)return;
         updateCaretIndicator();
         List<String> ranked=new ArrayList<>();
-        if(!sensitive && !privateMode && mode.equals("letters")) {
+        String rawBefore=null,rawPrefix="",prev="",prev2="",language="de";
+        boolean canPredict=!sensitive && !privateMode && "letters".equals(mode);
+        if(canPredict) {
             InputConnection ic=getCurrentInputConnection();
             if(ic!=null) {
                 CharSequence selection=ic.getSelectedText(0);
                 CharSequence after=ic.getTextAfterCursor(1,0);
                 boolean selectionActive=selection!=null && selection.length()>0;
+                CharSequence before=ic.getTextBeforeCursor(350,0);
+                String beforeStr=before==null?"":before.toString();
                 boolean insideWord=after!=null && after.length()>0 &&
                     Character.isLetter(after.charAt(0)) &&
-                    TextContext.fromBeforeCursor(ic.getTextBeforeCursor(100,0)).prefix.length()>0;
+                    !TextContext.fromBeforeCursor(beforeStr).prefix.isEmpty();
                 if(!selectionActive && !insideWord) {
-                    TextContext c=TextContext.fromBeforeCursor(ic.getTextBeforeCursor(500,0));
-                    ranked=predictions.predict(c.prefix,c.previous,c.beforePrevious);
+                    TextContext c=TextContext.fromBeforeCursor(beforeStr);
+                    rawBefore=beforeStr;rawPrefix=c.prefix;prev=c.previous;prev2=c.beforePrevious;
+                    language=LanguageContext.detect(beforeStr);
+                    ranked=predictions.predict(rawPrefix,prev,prev2,
+                        java.util.Collections.emptyMap(),language);
+                    updateSuggestionButtons(ranked,rawPrefix,rawBefore,editorWantsCapitalization());
+                } else {
+                    updateSuggestionButtons(ranked,"",beforeStr,false);
                 }
+            } else updateSuggestionButtons(ranked,"","",false);
+        } else updateSuggestionButtons(ranked,"","",false);
+        if(rawBefore==null || neuralModel==null || !neuralEnabled() ||
+            !"en".equals(language))return;
+        final String snapshot=rawBefore;
+        final String prefix=rawPrefix, a=prev, b=prev2, lang=language;
+        final boolean capital=editorWantsCapitalization();
+        neuralWorker.execute(() -> {
+            if(revision!=predictionRevision || Thread.currentThread().isInterrupted())return;
+            List<ChimeEnglish.Candidate> neural;
+            try {neural=neuralModel.predict(snapshot,10);}
+            catch(Exception ex) {
+                android.util.Log.w("KontextTastatur","Neural inference unavailable",ex);
+                return;
             }
-        }
-        visibleWords[0]=ranked.size()>1?ranked.get(1):"";
-        visibleWords[1]=ranked.size()>0?ranked.get(0):"";
-        visibleWords[2]=ranked.size()>2?ranked.get(2):"";
+            if(revision!=predictionRevision)return;
+            Map<String,Double> hints=neuralScores(neural);
+            List<String> mixed=predictions.predict(prefix,a,b,hints,lang);
+            handler.post(() -> {
+                if(active==this && revision==predictionRevision && !sensitive && !privateMode &&
+                    "letters".equals(mode))updateSuggestionButtons(mixed,prefix,snapshot,capital);
+            });
+        });
+    }
+
+    /** The middle slot remains highest ranked; apply case only at display time. */
+    private void updateSuggestionButtons(List<String> ranked,String prefix,String before,boolean capital) {
+        if(suggestions[0]==null)return;
+        visibleWords[0]=ranked.size()>1?WordCase.display(ranked.get(1),prefix,before,capital):"";
+        visibleWords[1]=ranked.size()>0?WordCase.display(ranked.get(0),prefix,before,capital):"";
+        visibleWords[2]=ranked.size()>2?WordCase.display(ranked.get(2),prefix,before,capital):"";
         for(int i=0;i<3;i++) {
             String value=visibleWords[i];
-            suggestions[i].setText(!value.isEmpty()?value:(i==1?(sensitive?"Privates Feld":privateMode?"Privatmodus":""):""));
+            suggestions[i].setText(!value.isEmpty()?value:
+                (i==1?(sensitive?"Privates Feld":privateMode?"Privatmodus":""):""));
             suggestions[i].setEnabled(!value.isEmpty());
         }
     }
@@ -354,7 +445,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         PredictionModel.Event e=predictions.learnSelection(ctx.prefix,chosen,ctx.previous,ctx.beforePrevious);
         database.persist(e,chosen,1);
         recentEvent=e;recentSurface=chosen;recentAt=System.currentTimeMillis();
-        shift=false;refreshSuggestions();
+        manualShiftPending=false;
+        shift=false;updateAutoShift();refreshSuggestions();
     }
     private long lastShiftAt=0;
     private void renderKeyboard() {
@@ -377,6 +469,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             row(new String[]{"@","#","€","%","&","-","+","(",")","/"},null);
             row(new String[]{"=","*","\"","'",":",";","!","?","_","⌫"},null);
         } else {
+            // Numeric shortcuts are permanently available without switching modes.
+            row(new String[]{"1","2","3","4","5","6","7","8","9","0"},null);
             row(new String[]{"q","w","e","r","t","z","u","i","o","p","ü"},null);
             row(new String[]{"a","s","d","f","g","h","j","k","l","ö","ä"},null);
             row(new String[]{"⇧","y","x","c","v","b","n","m","ß","⌫"},
@@ -402,13 +496,60 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 v.setContentDescription("Leerzeichen. Halten und links oder rechts schieben, um den Cursor zu bewegen.");
                 v.setOnTouchListener(this::spaceTouch);
             }
-            String[] alternates=alternates(original);
-            if(alternates!=null) v.setOnLongClickListener(w -> {
-                PopupMenu popup=new PopupMenu(this,v);
-                for(String option:alternates)popup.getMenu().add(option);
-                popup.setOnMenuItemClickListener(item -> {enterLetter(item.getTitle().toString());return true;});
-                popup.show();return true;
-            });
+            String favorite=KeyPriority.favorite(original,shift||caps);
+            if(favorite!=null) {
+                String[] choices=KeyPriority.alternatives(original,shift||caps);
+                // Release after an extended hold inserts the preferred umlaut.
+                // Drag UP while holding to access the less frequently used popup.
+                v.setContentDescription(output+"; lange halten für "+favorite+
+                    "; nach oben ziehen für weitere Sonderzeichen");
+                v.setOnTouchListener(new View.OnTouchListener() {
+                    long start;
+                    float downX,downY;
+                    boolean submenu;
+                    @Override public boolean onTouch(View target,MotionEvent event) {
+                        switch(event.getActionMasked()) {
+                            case MotionEvent.ACTION_DOWN:
+                                start=android.os.SystemClock.uptimeMillis();
+                                downX=event.getX();downY=event.getY();submenu=false;
+                                return true;
+                            case MotionEvent.ACTION_MOVE:
+                                if(!submenu && downY-event.getY()>dp(36)) {
+                                    submenu=true;
+                                    PopupMenu popup=new PopupMenu(AdaptiveKeyboardService.this,v);
+                                    for(String choice:choices)popup.getMenu().add(choice);
+                                    popup.setOnMenuItemClickListener(item -> {
+                                        enterLetter(item.getTitle().toString());return true;
+                                    });
+                                    popup.show();
+                                    target.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                                }
+                                return true;
+                            case MotionEvent.ACTION_UP:
+                                if(!submenu) {
+                                    long held=android.os.SystemClock.uptimeMillis()-start;
+                                    if(KeyPriority.longHold(held,Math.abs(event.getX()-downX),
+                                        Math.max(0,downY-event.getY()))) {
+                                        enterLetter(KeyPriority.favorite(original,shift||caps));
+                                    } else press(original);
+                                }
+                                return true;
+                            case MotionEvent.ACTION_CANCEL:return true;
+                            default:return true;
+                        }
+                    }
+                });
+            } else {
+                String[] alternates=alternates(original);
+                if(alternates!=null) v.setOnLongClickListener(w -> {
+                    PopupMenu popup=new PopupMenu(this,v);
+                    for(String option:alternates)popup.getMenu().add(option);
+                    popup.setOnMenuItemClickListener(item -> {
+                        enterLetter(item.getTitle().toString());return true;
+                    });
+                    popup.show();return true;
+                });
+            }
             if(original.equals("⌫"))v.setOnTouchListener((view,event) -> {
                 if(event.getAction()==MotionEvent.ACTION_DOWN) {
                     backspaceRepeat=new Runnable() {
@@ -495,6 +636,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             case "⇧":
                 if(System.currentTimeMillis()-lastShiftAt<420) {caps=!caps;shift=caps;}
                 else {shift=!shift;caps=false;}
+                manualShiftPending=true;
                 lastShiftAt=System.currentTimeMillis();renderKeyboard();break;
             case "⌫":backspace();break;
             case "?123":mode="symbols";renderKeyboard();refreshSuggestions();break;
@@ -535,6 +677,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             }
         }
         ic.commitText(letter,1);
+        manualShiftPending=false;
         recentEvent=null;
         if(shift&&!caps && !letter.equals("'")) {shift=false;renderKeyboard();}
         refreshSuggestions();
@@ -560,7 +703,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             if(action!=EditorInfo.IME_ACTION_NONE && action!=EditorInfo.IME_ACTION_UNSPECIFIED && !multiline) {
                 ic.performEditorAction(action);
             } else ic.commitText("\n",1);
-            shift=editorWantsCapitalization();
+            manualShiftPending=false;
+            updateAutoShift();
         } else {
             if(symbol.equals(" ") && before!=null && before.length()>0 && before.charAt(before.length()-1)==' ') {
                 // No unexpected duplicate spaces after accepting a suggestion.
@@ -569,9 +713,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                     ic.deleteSurroundingText(1,0);
                 ic.commitText(symbol,1);
             }
-            if (symbol.matches("[.!?]")) shift=editorWantsCapitalization();
-            if(symbol.equals(" ") && before!=null && before.toString().matches("(?s).*[.!?]$"))
-                shift=editorWantsCapitalization();
+            manualShiftPending=false;
+            // Use the newly committed editor contents, not the old cursor mode.
+            updateAutoShift();
         }
         if(shift&&!caps)renderKeyboard();
         refreshSuggestions();

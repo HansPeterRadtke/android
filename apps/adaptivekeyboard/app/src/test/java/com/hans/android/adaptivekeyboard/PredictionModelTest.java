@@ -227,6 +227,31 @@ public class PredictionModelTest {
         c=TextContext.fromBeforeCursor("Ich war da? Hello");
         assertEquals("Hello",c.prefix);assertEquals("",c.previous);
     }
+    @Test public void neuralBoostRanksEnglishAndRespectsStrongerPersonalLearning() {
+        PredictionModel model=new PredictionModel();
+        BaselineNgrams baseline=new BaselineNgrams();
+        baseline.add("T","i","am","hungry",50,"en");
+        baseline.add("T","i","am","going",30,"en");
+        model.addBaseWord("hungry",100,"en");model.addBaseWord("going",200,"en");
+        model.setBaselineNgrams(baseline);
+        assertEquals("hungry",model.predict("","am","i").get(0));
+        java.util.Map<String,Double> hints=java.util.Map.of("going",40.0,"hungry",2.0);
+        assertEquals("going",model.predict("","am","i",hints).get(0));
+        for(int i=0;i<8;i++)model.learnSelection("","hungry","am","i");
+        assertEquals("hungry",model.predict("","am","i",hints).get(0));
+    }
+    @Test public void keepDictionaryNounCaseSeparateFromSentenceUse() {
+        PredictionModel model=new PredictionModel();
+        model.addBaseWord("Haus",7,"de");
+        model.addBaseWord("ich",2,"de");
+        model.learnTyped("Ich","","");
+        model.learnTyped("haus","im","");
+        model.learnTyped("Haus","das","");
+        assertEquals("haus",model.predict("hau","im","").get(0));
+        assertEquals("Haus",model.predict("","im","").get(0));
+        assertEquals("ich",model.predict("","","").isEmpty()?"ich":
+            WordCase.display("ich","","wir sagen ",false));
+    }
     @Test public void longOrBlankTokensDoNotLearn() {
         PredictionModel m=new PredictionModel();
         assertNull(m.learnTyped("", "a", "b"));
