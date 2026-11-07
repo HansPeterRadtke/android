@@ -8,6 +8,8 @@ import android.content.Intent;
 import android.content.res.Resources;
 import android.graphics.Color;
 import android.graphics.ImageDecoder;
+import android.graphics.drawable.AnimatedImageDrawable;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.inputmethodservice.InputMethodService;
 import android.net.Uri;
@@ -23,6 +25,7 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputContentInfo;
 import android.widget.GridLayout;
+import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -46,7 +49,14 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private static final int BG=0xff18212a, KEY=0xff303e4b, PRESSED=0xff406179, TEXT=Color.WHITE;
     private static AdaptiveKeyboardService active;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    // Never queue a user-initiated send behind background thumbnail downloads.
     private final ExecutorService network = Executors.newFixedThreadPool(3);
+    private final ExecutorService searchWorker = Executors.newSingleThreadExecutor();
+    private final ExecutorService sendWorker = Executors.newSingleThreadExecutor();
+    private final android.util.LruCache<String,byte[]> previewCache =
+        new android.util.LruCache<String,byte[]>(5_000_000) {
+            @Override protected int sizeOf(String key,byte[] value) {return value.length;}
+        };
     private PredictionModel predictions;
     private LearningDatabase database;
     private LinearLayout root, suggestionRow, toolbar, keys, panel;
@@ -55,6 +65,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private String mode="letters",gifQuery="";
     private TextView gifStatus;
     private LinearLayout gifResults;
+    private int gifPreviewsExpected, gifPreviewsLoaded, gifPreviewsFailed;
     private boolean shift=true,caps=false,sensitive=false,privateMode=false;
     private EditorInfo info;
     private int searchRevision=0;
@@ -73,6 +84,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     @Override public void onDestroy() {
         searchRevision++; handler.removeCallbacksAndMessages(null);
         network.shutdownNow();
+        searchWorker.shutdownNow();
+        sendWorker.shutdownNow();
         if(database!=null) database.close();
         if(active==this) active=null;
         super.onDestroy();
@@ -553,9 +566,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         panel.addView(gifStatus,new LinearLayout.LayoutParams(-1,dp(35)));
         HorizontalScrollView scroll=new HorizontalScrollView(this);
         scroll.setHorizontalScrollBarEnabled(false);
-        panel.addView(scroll,new LinearLayout.LayoutParams(-1,dp(110)));
+        panel.addView(scroll,new LinearLayout.LayoutParams(-1,dp(119)));
         gifResults=new LinearLayout(this);gifResults.setGravity(Gravity.CENTER_VERTICAL);
-        scroll.addView(gifResults,new HorizontalScrollView.LayoutParams(-2,dp(105)));
+        scroll.addView(gifResults,new HorizontalScrollView.LayoutParams(-2,dp(115)));
         TextView search=button("Suchen",15,PRESSED,32);
         panel.addView(search,new LinearLayout.LayoutParams(-1,dp(32)));
         search.setOnClickListener(v->searchGif());
@@ -573,29 +586,55 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         final int request=++searchRevision;
         gifStatus.setText("Suche läuft: "+query);
         gifResults.removeAllViews();
-        network.execute(() -> {
+        gifPreviewsExpected=0;gifPreviewsLoaded=0;gifPreviewsFailed=0;
+        searchWorker.execute(() -> {
             try {
                 List<GiphySearch.Gif> results=GiphySearch.search(key,query);
                 handler.post(() -> {
                     if(request!=searchRevision||!mode.equals("gif"))return;
+                    gifPreviewsExpected=results.size();
                     gifStatus.setText(results.isEmpty()?"Keine passenden GIFs gefunden":
-                        (key==null||key.isEmpty() ? "Freie GIFs von Openverse · Auswahl begrenzt" :
-                            "GIF antippen zum Senden · Powered By GIPHY"));
+                        ("GIFs gefunden: "+results.size()+" · Vorschau wird geladen"));
                     for(GiphySearch.Gif gif:results) addGifPreview(gif,request);
                 });
             } catch(Exception error) {
                 handler.post(() -> {if(request==searchRevision&&mode.equals("gif"))
-                    gifStatus.setText("GIF-Suche fehlgeschlagen: "+error.getClass().getSimpleName());});
+                    gifStatus.setText(GiphySearch.userErrorMessage(error));});
             }
         });
     }
+    private void updateGifPreviewProgress(int request, boolean success) {
+        if(request!=searchRevision || !mode.equals("gif") || gifStatus==null)return;
+        if(success)gifPreviewsLoaded++;else gifPreviewsFailed++;
+        String status=gifStatus.getText().toString();
+        // Image loading may continue after an explicit share/copy action;
+        // it must not overwrite the more important share/copy result.
+        if(!status.startsWith("GIFs gefunden:") && !status.startsWith("Vorschau"))return;
+        int finished=gifPreviewsLoaded+gifPreviewsFailed;
+        if(finished==gifPreviewsExpected && gifPreviewsLoaded==0)
+            gifStatus.setText("GIFs gefunden, Vorschau nicht verfügbar. Titel antippen oder erneut suchen.");
+        else gifStatus.setText("Vorschau "+finished+"/"+gifPreviewsExpected+
+            (gifPreviewsFailed>0?" · "+gifPreviewsFailed+" nicht geladen":""));
+    }
+
     private void addGifPreview(GiphySearch.Gif gif,int request) {
-        ImageView view=new ImageView(this);view.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        view.setContentDescription(gif.title+" · "+gif.attribution);view.setBackground(background(KEY));
-        LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(dp(95),dp(95));p.setMargins(dp(3),dp(2),dp(3),dp(2));
-        gifResults.addView(view,p);view.setOnClickListener(w->sendGif(gif));
-        view.setOnLongClickListener(w -> {
-            PopupMenu popup=new PopupMenu(this,view);
+        FrameLayout tile=new FrameLayout(this);
+        tile.setBackground(background(KEY));
+        tile.setContentDescription(gif.title+" · "+gif.attribution);
+        LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(dp(112),dp(112));
+        p.setMargins(dp(3),dp(2),dp(3),dp(2));
+        gifResults.addView(tile,p);
+        ImageView imageView=new ImageView(this);
+        imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        imageView.setImageResource(android.R.drawable.ic_menu_gallery);
+        tile.addView(imageView,new FrameLayout.LayoutParams(-1,-1));
+        TextView name=button(gif.title,10,0xd522323d,23);
+        name.setMaxLines(1);name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(-1,dp(23),Gravity.BOTTOM);
+        tile.addView(name,lp);
+        tile.setOnClickListener(w->sendGif(gif));
+        tile.setOnLongClickListener(w -> {
+            PopupMenu popup=new PopupMenu(this,tile);
             popup.getMenu().add("GIF als Datei teilen").setOnMenuItemClickListener(item -> {
                 sendGif(gif,true);return true;
             });
@@ -605,27 +644,49 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             popup.show();return true;
         });
         network.execute(() -> {
-            byte[] preview=null;
-            try {
-                preview=GiphySearch.request(gif.thumbnail,1_500_000);
-            } catch(Exception thumbFailure) {
-                // Openverse's thumbnail proxy may return HTTP 424 even when the
-                // original CC GIF is available directly on Wikimedia Commons.
-                try {preview=GiphySearch.request(gif.original,1_800_000);}
-                catch(Exception unavailable) { /* Non-fatal missing preview. */ }
+            if(request!=searchRevision || !mode.equals("gif"))return;
+            byte[] preview=previewCache.get(gif.thumbnail);
+            if(preview==null) {
+                try {
+                    preview=GiphySearch.requestPreview(gif.thumbnail,1_500_000);
+                } catch(Exception thumbFailure) {
+                    try {preview=GiphySearch.requestPreview(gif.original,1_800_000);}
+                    catch(Exception sourceFailure) {
+                        android.util.Log.w("KontextTastatur","GIF preview unavailable: "+
+                            GiphySearch.userErrorMessage(sourceFailure));
+                    }
+                }
+                if(preview!=null)previewCache.put(gif.thumbnail,preview);
             }
             final byte[] imageBytes=preview;
             handler.post(() -> {
                 if(request!=searchRevision || !mode.equals("gif"))return;
-                if(imageBytes==null) {
-                    view.setImageResource(android.R.drawable.ic_menu_gallery);
-                    return;
+                boolean success=false;
+                if(imageBytes!=null) {
+                    try {
+                        if(Build.VERSION.SDK_INT>=28) {
+                            Drawable image=ImageDecoder.decodeDrawable(
+                                ImageDecoder.createSource(ByteBuffer.wrap(imageBytes)),
+                                (decoder,info,source)-> {
+                                    android.util.Size size=info.getSize();
+                                    int longest=Math.max(size.getWidth(),size.getHeight());
+                                    if(longest>256) {
+                                        double factor=256.0/longest;
+                                        decoder.setTargetSize(Math.max(1,(int)(size.getWidth()*factor)),
+                                            Math.max(1,(int)(size.getHeight()*factor)));
+                                    }
+                                });
+                            imageView.setImageDrawable(image);
+                            if(image instanceof AnimatedImageDrawable)
+                                ((AnimatedImageDrawable)image).start();
+                        } else imageView.setImageBitmap(
+                            android.graphics.BitmapFactory.decodeByteArray(imageBytes,0,imageBytes.length));
+                        success=true;
+                    } catch(Exception invalid) {
+                        android.util.Log.w("KontextTastatur","GIF decode failed",invalid);
+                    }
                 }
-                try {
-                    if(Build.VERSION.SDK_INT>=28)
-                        view.setImageDrawable(ImageDecoder.decodeDrawable(ImageDecoder.createSource(ByteBuffer.wrap(imageBytes))));
-                    else view.setImageBitmap(android.graphics.BitmapFactory.decodeByteArray(imageBytes,0,imageBytes.length));
-                } catch(Exception invalid) {view.setImageResource(android.R.drawable.ic_menu_gallery);}
+                updateGifPreviewProgress(request,success);
             });
         });
     }
@@ -633,7 +694,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
 
     private void copyGif(GiphySearch.Gif gif) {
         gifStatus.setText("GIF wird für die Zwischenablage geladen …");
-        network.execute(() -> {
+        sendWorker.execute(() -> {
             try {
                 File file=GiphySearch.cacheGif(getCacheDir(),gif);
                 handler.post(() -> {
@@ -655,7 +716,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private void sendGif(GiphySearch.Gif gif, boolean forceShare) {
         if(gifStatus==null)return;
         gifStatus.setText("GIF-Datei wird heruntergeladen …");
-        network.execute(() -> {
+        sendWorker.execute(() -> {
             try {
                 File file=GiphySearch.cacheGif(getCacheDir(),gif);
                 handler.post(() -> {
