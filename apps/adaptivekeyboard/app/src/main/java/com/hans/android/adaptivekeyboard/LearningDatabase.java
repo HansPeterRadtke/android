@@ -14,7 +14,7 @@ public final class LearningDatabase extends SQLiteOpenHelper {
     private final ExecutorService disk = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "keyboard-local-database"); t.setDaemon(true); return t;
     });
-    public LearningDatabase(Context c) { super(c, "learned.db", null, 3); }
+    public LearningDatabase(Context c) { super(c, "learned.db", null, 4); }
 
     @Override public void onCreate(SQLiteDatabase d) {
         d.execSQL("CREATE TABLE words(token TEXT PRIMARY KEY, surface TEXT NOT NULL, typed INTEGER NOT NULL DEFAULT 0, selected INTEGER NOT NULL DEFAULT 0, last_used_ms INTEGER NOT NULL DEFAULT 0)");
@@ -23,9 +23,10 @@ public final class LearningDatabase extends SQLiteOpenHelper {
         d.execSQL("CREATE TABLE choices(prev2 TEXT NOT NULL, prev TEXT NOT NULL, prefix TEXT NOT NULL, word TEXT NOT NULL, cnt INTEGER NOT NULL, last_selected_ms INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(prev2,prev,prefix,word))");
         d.execSQL("CREATE TABLE clipboard(value TEXT PRIMARY KEY, inserted INTEGER NOT NULL)");
         d.execSQL("CREATE TABLE rejections(prev2 TEXT NOT NULL, prev TEXT NOT NULL, prefix TEXT NOT NULL, word TEXT NOT NULL, cnt INTEGER NOT NULL, PRIMARY KEY(prev2,prev,prefix,word))");
+        d.execSQL("CREATE TABLE next_recent(prev TEXT PRIMARY KEY, history TEXT NOT NULL)");
     }
     @Override public void onUpgrade(SQLiteDatabase db, int from, int to) {
-        if (from<1 || from>3 || to!=3)
+        if (from<1 || from>4 || to!=4)
             throw new IllegalStateException("Unsupported database version; personal history unchanged");
         if (from<=1) {
             db.execSQL("CREATE TABLE IF NOT EXISTS rejections(prev2 TEXT NOT NULL, prev TEXT NOT NULL, prefix TEXT NOT NULL, word TEXT NOT NULL, cnt INTEGER NOT NULL, PRIMARY KEY(prev2,prev,prefix,word))");
@@ -34,6 +35,12 @@ public final class LearningDatabase extends SQLiteOpenHelper {
             // Add timestamps while preserving every old word/context/selection/clipboard row.
             db.execSQL("ALTER TABLE words ADD COLUMN last_used_ms INTEGER NOT NULL DEFAULT 0");
             db.execSQL("ALTER TABLE choices ADD COLUMN last_selected_ms INTEGER NOT NULL DEFAULT 0");
+        }
+        if (from<=3) {
+            // Legacy lifetime counts are preserved. True observation order
+            // cannot be reconstructed; the recent window starts accumulating
+            // from the user's next confirmed word transition.
+            db.execSQL("CREATE TABLE IF NOT EXISTS next_recent(prev TEXT PRIMARY KEY, history TEXT NOT NULL)");
         }
     }
 
@@ -44,6 +51,9 @@ public final class LearningDatabase extends SQLiteOpenHelper {
         }
         try (Cursor c = d.rawQuery("SELECT prev,word,cnt FROM pairs WHERE cnt>0",null)) {
             while(c.moveToNext()) model.restorePair(c.getString(0),c.getString(1),c.getInt(2));
+        }
+        try (Cursor c = d.rawQuery("SELECT prev,history FROM next_recent",null)) {
+            while(c.moveToNext())model.restoreRecent(c.getString(0),c.getString(1));
         }
         try (Cursor c = d.rawQuery("SELECT prev2,prev,word,cnt FROM triples WHERE cnt>0",null)) {
             while(c.moveToNext()) model.restoreTriple(c.getString(0),c.getString(1),c.getString(2),c.getInt(3));
@@ -79,7 +89,10 @@ public final class LearningDatabase extends SQLiteOpenHelper {
                 d.execSQL("INSERT OR IGNORE INTO words(token,surface,typed,selected) VALUES (?,?,0,0)",new Object[]{e.word,surface});
                 d.execSQL("UPDATE words SET surface=?, typed=max(0,typed+?),selected=max(0,selected+?),last_used_ms=? WHERE token=?",
                     new Object[]{surface,delta,e.selected ? delta : 0,delta>0?e.timestamp:0,e.word});
-                if (!e.previous.isEmpty()) increment(d,"pairs",new String[]{"prev","word"},new String[]{e.previous,e.word},delta);
+                if (!e.previous.isEmpty()) {
+                    increment(d,"pairs",new String[]{"prev","word"},new String[]{e.previous,e.word},delta);
+                    updateRecent(d,e.previous,e.word,delta,e.oldestEvicted);
+                }
                 if (!e.beforePrevious.isEmpty() && !e.previous.isEmpty())
                     increment(d,"triples",new String[]{"prev2","prev","word"},new String[]{e.beforePrevious,e.previous,e.word},delta);
                 if (e.selected && !e.prefix.isEmpty()) {
@@ -93,6 +106,17 @@ public final class LearningDatabase extends SQLiteOpenHelper {
                 d.setTransactionSuccessful();
             } finally { d.endTransaction(); }
         });
+    }
+    private static void updateRecent(SQLiteDatabase db,String previous,String word,int delta,String evicted) {
+        String stored="";
+        try (Cursor c=db.rawQuery("SELECT history FROM next_recent WHERE prev=?",
+                                   new String[]{previous})) {
+            if(c.moveToFirst())stored=c.getString(0);
+        }
+        String next=PersonalNextWords.updated(stored,word,delta,evicted);
+        if(next.isEmpty())db.delete("next_recent","prev=?",new String[]{previous});
+        else db.execSQL("INSERT OR REPLACE INTO next_recent(prev,history) VALUES (?,?)",
+                        new Object[]{previous,next});
     }
     private static void incrementChoice(SQLiteDatabase db,String[] values,int delta,long timestamp) {
         increment(db,"choices",new String[]{"prev2","prev","prefix","word"},values,delta);
@@ -134,7 +158,7 @@ public final class LearningDatabase extends SQLiteOpenHelper {
             SQLiteDatabase db = getWritableDatabase();
             db.beginTransaction();
             try {
-                for (String table : new String[]{"words","pairs","triples","choices","rejections"}) db.delete(table,null,null);
+                for (String table : new String[]{"words","pairs","triples","choices","rejections","next_recent"}) db.delete(table,null,null);
                 db.setTransactionSuccessful();
             } finally {db.endTransaction();}
         });

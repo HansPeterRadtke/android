@@ -13,6 +13,10 @@ public final class LanguageContext {
     private static final Set<String> EN=new HashSet<>(Arrays.asList(
         "i","i'm","i've","you","you're","your","the","is","are","was",
         "have","has","had","do","does","did","don't","what","why","how",
+        "am","be","my","me","us","let's","lets","let","let's","i'll","i'd",
+        "we're","we'll","it's","that's","there's","isn't","aren't","can't",
+        "won't","didn't","doesn't","wasn't","wouldn't","shouldn't","couldn't",
+        "they're","you'll","he's","she's","we've","you've","i've",
         "where","which","there","this","that","with","would","could","should",
         "we","they","them","hello","hi","please","thank","thanks","going","want","will","can"));
     private static final Set<String> DE=new HashSet<>(Arrays.asList(
@@ -39,6 +43,9 @@ public final class LanguageContext {
             String w=words.get(i);
             double weight=i>=words.size()-3?2.0:1.0;
             if(EN.contains(w)&&!DE.contains(w))english+=weight;
+            // English contractions are strong evidence even after earlier
+            // German text; 'okay' is language-neutral, but 'let's' is not.
+            if(w.contains("'") && EN.contains(w) && !DE.contains(w))english+=3.0*weight;
             if(DE.contains(w)&&!EN.contains(w))german+=weight;
             if(w.contains("ä")||w.contains("ö")||w.contains("ü")||w.contains("ß"))german+=weight;
         }
@@ -46,7 +53,7 @@ public final class LanguageContext {
         // supplies a language signal without reinterpreting its capitalization.
         String last=prefix.toLowerCase(Locale.GERMAN);
         if(last.length()>2) {
-            if(EN.contains(last)&&!DE.contains(last))english+=1.5;
+            if(EN.contains(last)&&!DE.contains(last))english+=last.contains("'")?5.0:1.5;
             if(DE.contains(last)&&!EN.contains(last))german+=1.5;
         }
         return english>german+0.4?"en":"de";

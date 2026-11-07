@@ -295,6 +295,99 @@ public class PredictionModelTest {
         for(int i=0;i<1600;i++)m.addBaseWord("aaaa"+i,300+i,"de");
         for(int i=0;i<60;i++)m.predict("aaaaaaaaaaaaaaaaaaaaaaa","ich","bin");
     }
+    @Test public void knownNextWordCannotBeOverriddenByAnyNeuralOrGenericScore(){
+        PredictionModel model=new PredictionModel();
+        BaselineNgrams baseline=new BaselineNgrams();
+        baseline.add("B","","let's","gehen",500000,"de");
+        baseline.add("B","","let's","machen",300000,"de");
+        model.setBaselineNgrams(baseline);
+        model.learnTyped("go","let's","okay");
+        model.learnTyped("go","let's","hello");
+        assertEquals(java.util.List.of("go"),model.predict("","let's","okay",
+            java.util.Map.of("gehen",999999.0,"machen",99999.0),"en"));
+        assertEquals(java.util.List.of("go"),model.predict("g","let's","okay",
+            java.util.Map.of("gehen",999999.0),"en"));
+        assertTrue(model.hasPersonalNext("","let's"));
+        assertTrue(model.hasPersonalNext("g","let's"));
+        assertFalse(model.hasPersonalNext("x","let's"));
+        // No previous personal candidate for this intentionally different
+        // prefix; now neural/model completion is allowed.
+        assertEquals("newword",model.predict("new","let's","okay",
+            java.util.Map.of("newword",1000.0),"en").get(0));
+    }
+    @Test public void lifetimeFrequencyAndMovingAverageAreBothUsed(){
+        PredictionModel model=new PredictionModel();
+        model.addBaseWord("gehen",1,"de");
+        model.addBaseWord("bleiben",8,"de");
+        for(int i=0;i<100;i++)model.learnTyped("gehen","möchte","");
+        assertEquals("gehen",model.predict("","möchte","").get(0));
+        model.learnTyped("bleiben","möchte","");
+        assertEquals("gehen",model.predict("","möchte","").get(0));
+        for(int i=0;i<8;i++)model.learnTyped("bleiben","möchte","");
+        assertEquals("bleiben",model.predict("","möchte","").get(0));
+        assertEquals(2,model.predict("","möchte","").size());
+    }
+    @Test public void restoredHistoryGivesSameOrderingAndUndoWorks(){
+        PredictionModel live=new PredictionModel();
+        live.restorePair("let's","go",50);
+        live.restorePair("let's","stay",12);
+        String data="";
+        for(int i=0;i<10;i++)data=PersonalNextWords.updated(data,"stay",1);
+        live.restoreRecent("let's",data);
+        PredictionModel restored=new PredictionModel();
+        restored.restorePair("let's","go",50);
+        restored.restorePair("let's","stay",12);
+        restored.restoreRecent("let's",data);
+        assertEquals(live.predict("","let's",""),restored.predict("","let's",""));
+        assertEquals("stay",restored.predict("","let's","").get(0));
+        PredictionModel.Event temporary=restored.learnTyped("hello","let's","");
+        restored.undo(temporary);
+        assertFalse(restored.predict("","let's","").contains("hello"));
+    }
+    @Test public void latestPreviousWordHasPriorityOverGenericEarlierSentence(){
+        PredictionModel model=new PredictionModel();
+        model.learnTyped("going","let's","we");
+        model.learnTyped("start","let's","we");
+        model.learnTyped("going","let's","i");
+        assertEquals("going",model.predict("","let's","we").get(0));
+        assertTrue(model.predict("","let's","we").stream()
+            .allMatch(w->w.equals("going")||w.equals("start")));
+    }
+    @Test public void straightAndCurlyApostrophesShareOnePersonalContext() {
+        PredictionModel model=new PredictionModel();
+        model.learnTyped("go","let's","");
+        assertEquals("go",model.predict("","let’s","").get(0));
+        assertEquals("go",model.predict("","Let's","").get(0));
+    }
+    @Test public void freshEnglishContractionContextCannotSuggestGermanDictionaryWords(){
+        PredictionModel m=new PredictionModel();
+        m.addBaseWord("gehen",1,"de");
+        m.addBaseWord("gemütlich",2,"de");
+        m.addBaseWord("go",10000,"en");
+        m.addBaseWord("good",2000,"en");
+        assertEquals("en",LanguageContext.detect("Okay, let's "));
+        java.util.List<String> next=m.predict("g","let's","okay",
+            java.util.Collections.emptyMap(),"en");
+        assertTrue(next.contains("go"));
+        assertFalse(next.contains("gehen"));
+        assertFalse(next.contains("gemütlich"));
+        assertTrue(m.predict("geh","let's","okay",java.util.Collections.emptyMap(),"en").isEmpty());
+    }
+    @Test public void phraseContinuationUsesExactPersonalHistoryInsteadOfModelGuess(){
+        PredictionModel model=new PredictionModel();
+        model.learnTyped("go","let's","okay");
+        model.learnTyped("home","go","let's");
+        java.util.List<String> first=model.predict("","let's","okay",
+            java.util.Map.of("gehen",50000.0),"en");
+        java.util.List<String> phrases=PhrasePredictor.complete("Okay, let's ",first,
+            (text,limit) -> {
+                TextContext c=TextContext.fromBeforeCursor(text);
+                if(model.hasPersonalNext("",c.previous))
+                    return model.predict("",c.previous,c.beforePrevious);
+                return java.util.List.of("random");
+            },(w,p,c) -> WordCase.display(w,p,c,false),3);
+        assertEquals(java.util.List.of("go home"),phrases);
+    }
     @Test public void longOrBlankTokensDoNotLearn() {
         PredictionModel m=new PredictionModel();
         assertNull(m.learnTyped("", "a", "b"));

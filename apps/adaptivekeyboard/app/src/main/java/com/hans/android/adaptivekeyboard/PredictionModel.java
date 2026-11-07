@@ -28,9 +28,11 @@ public final class PredictionModel {
         public final String word, previous, beforePrevious, prefix;
         public final boolean selected;
         public final long timestamp;
-        private Event(String word,String previous,String beforePrevious,String prefix,boolean selected,long timestamp) {
+        public final String oldestEvicted;
+        private Event(String word,String previous,String beforePrevious,String prefix,boolean selected,
+                      long timestamp,String oldestEvicted) {
             this.word=word;this.previous=previous;this.beforePrevious=beforePrevious;this.prefix=prefix;
-            this.selected=selected;this.timestamp=timestamp;
+            this.selected=selected;this.timestamp=timestamp;this.oldestEvicted=oldestEvicted;
         }
     }
     public static final class Rejection {
@@ -55,6 +57,9 @@ public final class PredictionModel {
     private final Map<String,Set<String>> nextByPrevious=new HashMap<>();
     private final Map<String,Set<String>> nextByTwoPrevious=new HashMap<>();
     private final Map<String,Integer> pairs=new HashMap<>();
+    // Explicitly confirmed next words, newest observations last, per context.
+    // This history never contains mere displayed model guesses.
+    private final Map<String,java.util.ArrayDeque<String>> recentByPrevious=new HashMap<>();
     private final Map<String,Integer> triples=new HashMap<>();
     private final Map<String,Integer> choices=new HashMap<>();
     private final Map<String,Long> choiceTimes=new HashMap<>();
@@ -107,13 +112,16 @@ public final class PredictionModel {
         w.lastUsedMs=now;
         w.typed++;
         if(selected)w.selected++;
+        String evicted=null;
         if(!a.isEmpty()) {
             adjust(pairs,key(a,word),1);
             rememberNext(a,b,word);
+            evicted=PersonalNextWords.append(recentByPrevious.computeIfAbsent(a,
+                k->new java.util.ArrayDeque<>(PersonalNextWords.WINDOW)),word);
         }
         if(!b.isEmpty()&&!a.isEmpty())adjust(triples,key(b,a,word),1);
         if(selected&&!prefix.isEmpty())updateChoices(b,a,prefix,word,1,now);
-        return new Event(word,a,b,prefix,selected,now);
+        return new Event(word,a,b,prefix,selected,now,evicted);
     }
     private void rememberNext(String a,String b,String word) {
         if(a.isEmpty())return;
@@ -153,6 +161,7 @@ public final class PredictionModel {
             if(w.typed==0 && w.baseRank==UNKNOWN_RANK){words.remove(e.word);indexDirty=true;}
         }
         if(!e.previous.isEmpty()) {
+            PersonalNextWords.undoLast(recentByPrevious.get(e.previous),e.word,e.oldestEvicted);
             adjust(pairs,key(e.previous,e.word),-1);
             if(get(pairs,key(e.previous,e.word))==0) {
                 Set<String> after=nextByPrevious.get(e.previous);
@@ -181,6 +190,11 @@ public final class PredictionModel {
     }
     public synchronized void restorePair(String a,String word,int count) {
         if(count>0){pairs.put(key(a,word),count);rememberNext(a,"",word);}
+    }
+    public synchronized void restoreRecent(String previous,String serialized) {
+        if(previous==null||previous.isEmpty())return;
+        java.util.ArrayDeque<String> tokens=PersonalNextWords.decode(serialized);
+        if(!tokens.isEmpty())recentByPrevious.put(norm(previous),tokens);
     }
     public synchronized void restoreTriple(String b,String a,String word,int count) {
         if(count>0){triples.put(key(b,a,word),count);rememberNext(a,b,word);}
@@ -224,7 +238,7 @@ public final class PredictionModel {
             else {w.typed=0;w.selected=0;w.lastUsedMs=0;
                 if(w.lexicalSurface!=null)w.surface=w.lexicalSurface;}
         }
-        pairs.clear();triples.clear();choices.clear();choiceTimes.clear();
+        pairs.clear();triples.clear();recentByPrevious.clear();choices.clear();choiceTimes.clear();
         latestChoiceByPrefix.clear();rejections.clear();nextByPrevious.clear();
         nextByTwoPrevious.clear();commonPrefixCache.clear();indexDirty=true;
     }
@@ -267,6 +281,70 @@ public final class PredictionModel {
         return best;
     }
 
+    /**
+     * Strict personal-history priority. If the previous word has confirmed
+     * continuations matching the user's typed prefix, use ONLY those words.
+     * Generic corpora and neural output are not allowed to overrule them.
+     */
+    private List<String> personalNext(String rawPrefix,String previous,String beforePrevious) {
+        String a=norm(previous),b=norm(beforePrevious),prefix=norm(rawPrefix);
+        if(a.isEmpty())return Collections.emptyList();
+        Set<String> successors=nextByPrevious.get(a);
+        if(successors==null||successors.isEmpty())return Collections.emptyList();
+        int countTotal=0;
+        for(String word:successors)countTotal+=get(pairs,key(a,word));
+        if(countTotal<=0)return Collections.emptyList();
+        java.util.ArrayDeque<String> recent=recentByPrevious.get(a);
+        Map<String,Double> recentShares=PersonalNextWords.recentShares(recent);
+        int observations=recent==null?0:recent.size();
+        class Ranked {
+            final String word;
+            final double score;
+            Ranked(String word,double score){this.word=word;this.score=score;}
+        }
+        List<Ranked> results=new ArrayList<>(successors.size());
+        for(String word:successors) {
+            if(!word.startsWith(prefix))continue;
+            int count=get(pairs,key(a,word));
+            if(count<=0)continue;
+            double score=PersonalNextWords.score(count,countTotal,
+                recentShares.getOrDefault(word,0.0),observations);
+            if(!b.isEmpty()) {
+                // Prioritize the owner's immediate preceding *word*; a matching
+                // two-word context only resolves close scores, not the other way around.
+                int match=get(triples,key(b,a,word));
+                if(match>0)score+=0.03*Math.log1p(match);
+            }
+            results.add(new Ranked(word,score));
+        }
+        if(results.isEmpty())return Collections.emptyList();
+        results.sort((x,y)->{
+            int order=Double.compare(y.score,x.score);
+            if(order!=0)return order;
+            int lifetime=Integer.compare(get(pairs,key(a,y.word)),get(pairs,key(a,x.word)));
+            return lifetime!=0?lifetime:x.word.compareTo(y.word);
+        });
+        List<String> out=new ArrayList<>(Math.min(3,results.size()));
+        for(int i=0;i<results.size() && out.size()<3;i++) {
+            String token=results.get(i).word;
+            Word w=words.get(token);
+            // Personal next words retain their last user-confirmed spelling and case.
+            String spelling=w==null?token:w.surface==null?token:w.surface;
+            out.add(caseMatched(spelling,rawPrefix));
+        }
+        return out;
+    }
+
+    /** Whether the owner has used a matching continuation after this word. */
+    public synchronized boolean hasPersonalNext(String rawPrefix,String previous) {
+        String a=norm(previous),prefix=norm(rawPrefix);
+        Set<String> successors=nextByPrevious.get(a);
+        if(successors==null)return false;
+        for(String word:successors)
+            if(word.startsWith(prefix) && get(pairs,key(a,word))>0)return true;
+        return false;
+    }
+
     public synchronized List<String> predict(String rawPrefix,String prev,String prev2) {
         return predict(rawPrefix,prev,prev2,Collections.emptyMap());
     }
@@ -279,6 +357,10 @@ public final class PredictionModel {
     public synchronized List<String> predict(String rawPrefix,String prev,String prev2,
                                              Map<String,Double> neuralScores,String language) {
         String prefix=norm(rawPrefix),a=norm(prev),b=norm(prev2);
+        // This is the ordering rule, not another additive feature. No generic
+        // model may reorder or replace previously confirmed next-word choices.
+        List<String> known=personalNext(rawPrefix,a,b);
+        if(!known.isEmpty())return known;
         Map<String,Double> generic=new HashMap<>();
         if(baseline!=null)generic.putAll(baseline.candidates(prefix,a,b,language));
         if(neuralScores!=null)for(Map.Entry<String,Double> e:neuralScores.entrySet()) {
@@ -298,6 +380,7 @@ public final class PredictionModel {
             for(String form:next) {
                 Word word=words.get(form);
                 if(word==null)word=new Word(form);
+                if(!languageCompatible(form,word,language))continue;
                 offer(best,form,word,a,b,prefix,rawPrefix,englishBias,0,
                     generic.getOrDefault(form,0.0));
             }
@@ -306,16 +389,20 @@ public final class PredictionModel {
             Set<String> visited=new HashSet<>();
             if(prefix.length()<=3) {
                 for(String word:shortPrefixCandidates(prefix)) {
+                    Word value=words.get(word);
+                    if(!languageCompatible(word,value,language))continue;
                     exact++;visited.add(word);
-                    offer(best,word,words.get(word),a,b,prefix,rawPrefix,englishBias,0,
+                    offer(best,word,value,a,b,prefix,rawPrefix,englishBias,0,
                         generic.getOrDefault(word,0.0));
                 }
             } else {
                 for(int i=indexAtOrAfter(prefix);i<sortedKeys.size();i++) {
                     String word=sortedKeys.get(i);
                     if(!word.startsWith(prefix))break;
+                    Word value=words.get(word);
+                    if(!languageCompatible(word,value,language))continue;
                     exact++;visited.add(word);
-                    offer(best,word,words.get(word),a,b,prefix,rawPrefix,englishBias,0,
+                    offer(best,word,value,a,b,prefix,rawPrefix,englishBias,0,
                         generic.getOrDefault(word,0.0));
                 }
             }
@@ -324,19 +411,22 @@ public final class PredictionModel {
             Set<String> contextual=nextByPrevious.getOrDefault(a,Collections.emptySet());
             for(String word:contextual)if(word.startsWith(prefix)&&visited.add(word)) {
                 Word learned=words.get(word);
-                if(learned!=null)offer(best,word,learned,a,b,prefix,rawPrefix,englishBias,0,
+                if(learned!=null && languageCompatible(word,learned,language))
+                    offer(best,word,learned,a,b,prefix,rawPrefix,englishBias,0,
                     generic.getOrDefault(word,0.0));
             }
             for(String word:nextByTwoPrevious.getOrDefault(key(b,a),Collections.emptySet()))
                 if(word.startsWith(prefix)&&visited.add(word)) {
                     Word learned=words.get(word);
-                    if(learned!=null)offer(best,word,learned,a,b,prefix,rawPrefix,englishBias,0,
+                    if(learned!=null && languageCompatible(word,learned,language))
+                    offer(best,word,learned,a,b,prefix,rawPrefix,englishBias,0,
                         generic.getOrDefault(word,0.0));
                 }
             for(Map.Entry<String,Double> entry:generic.entrySet()) {
                 String word=entry.getKey();
                 if(word.startsWith(prefix)&&visited.add(word)) {
                     Word w=words.get(word);
+                    if(!languageCompatible(word,w,language))continue;
                     offer(best,word,w==null?new Word(word):w,a,b,prefix,rawPrefix,
                         englishBias,0,entry.getValue());
                 }
@@ -353,6 +443,7 @@ public final class PredictionModel {
                 if(!form.startsWith(shared))break;
                 scanned++;
                 if(form.startsWith(prefix)||form.length()<prefix.length()-1)continue;
+                if(!languageCompatible(form,words.get(form),language))continue;
                 if(oneEditFromPrefix(prefix,form)) {
                     offer(best,form,words.get(form),a,b,prefix,rawPrefix,englishBias,-14,
                         generic.getOrDefault(form,0.0));
@@ -374,6 +465,18 @@ public final class PredictionModel {
     }
     private double languageBias(String a,String b) {
         return signal(a)*1.2 + signal(b)*0.8;
+    }
+    /** Never offer dictionary-only German words in an English fallback. */
+    private static final java.util.Set<String> INTERNATIONAL=
+        java.util.Set.of("okay","ok","cool","internet","email","computer","app",
+            "online","wifi","video","smartphone","software","chat","google","youtube");
+    private boolean languageCompatible(String token,Word word,String language) {
+        if(word==null || word.typed>0 || INTERNATIONAL.contains(token))return true;
+        if("en".equals(language))
+            return word.enRank!=UNKNOWN_RANK || word.deRank==UNKNOWN_RANK;
+        if("de".equals(language))
+            return word.deRank!=UNKNOWN_RANK || word.enRank==UNKNOWN_RANK;
+        return true;
     }
     public synchronized boolean likelyEnglish(String rawPrefix,String previous,String beforePrevious) {
         String a=norm(previous),b=norm(beforePrevious);

@@ -17,7 +17,7 @@ public final class TextContext {
     }
 
     public static String normalize(String word) {
-        return word == null ? "" : word.toLowerCase(Locale.GERMAN).trim();
+        return word == null ? "" : word.toLowerCase(Locale.GERMAN).replace('’','\'').trim();
     }
 
     private static boolean wordChar(String text,int index) {
