@@ -41,6 +41,19 @@ public final class SettingsActivity extends Activity {
         caretTest.setPadding(0,dp(3),0,dp(5));
         layout.addView(caretTest,new LinearLayout.LayoutParams(-1,-2));
         input.setReadout(caretTest);
+        label("Feldtypen ausprobieren (URL / E-Mail)",15);
+        EditText urlTest=new EditText(this);
+        urlTest.setHint("https://example.com/path-name");
+        urlTest.setSingleLine(true);
+        urlTest.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_URI);
+        urlTest.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);
+        layout.addView(urlTest,new LinearLayout.LayoutParams(-1,dp(52)));
+        EditText emailTest=new EditText(this);
+        emailTest.setHint("user@example.com");
+        emailTest.setSingleLine(true);
+        emailTest.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
+        emailTest.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
+        layout.addView(emailTest,new LinearLayout.LayoutParams(-1,dp(52)));
         label("Neuronale Wortvorhersage (Deutsch und Englisch)",19);
         label("Zwei kleine Offline-Modelle analysieren mehr als die letzten zwei Wörter: das deutsche Modell von Destin Moss (4,7 MB, ODC-By und CC BY 2.0 FR) sowie Chime-SMS-2M von Luke Steuber für Englisch (2,2 MB, CC BY-SA 4.0). Sie berechnen Vorschläge im Hintergrund und ersetzen niemals Wörter automatisch. Persönliche Wortauswahl bleibt vorrangig.",14);
         action("Englisches Chime-Modell und Lizenz",() -> {
@@ -66,7 +79,7 @@ public final class SettingsActivity extends Activity {
         });
         layout.addView(neural);
         label("Lernverhalten",19);
-        label("Beim Weitertippen wird nichts übernommen. Erst Leertaste, Satzzeichen, Eingabetaste oder die Wahl eines Vorschlags bestätigt ein Wort. Das vollständige Eingabefeld und Passwörter werden nicht gespeichert. Private Felder werden automatisch ausgeschlossen.",14);
+        label("Beim Weitertippen wird nichts übernommen. Leertaste, Satzzeichen, Eingabetaste oder eine bewusst gewählte Vorhersage bestätigen Wörter bzw. Satzzeichen-Tokens. Der vollständige Text wird nicht gespeichert; nur lokale Übergangsstatistiken. Passwörter, URLs, E-Mail-Adressen und private Felder werden von der persönlichen Lernstatistik ausgeschlossen.",14);
         action("Privatmodus umschalten",() -> {
             boolean newValue=!getSharedPreferences("keyboard_settings",0).getBoolean("incognito",false);
             getSharedPreferences("keyboard_settings",0).edit().putBoolean("incognito",newValue).apply();
@@ -121,7 +134,7 @@ public final class SettingsActivity extends Activity {
         action("Gespeicherte Zwischenablage löschen",() -> new AlertDialog.Builder(this)
             .setTitle("Zwischenablage löschen?").setNegativeButton("Abbrechen",null)
             .setPositiveButton("Löschen",(dialog,which) -> new LearningDatabase(this).clearClipboard()).show());
-        label("Datenschutz: Android kann den Inhalt von Tastatur-Eingaben an das ausgewählte IME übermitteln. Diese App speichert nur bestätigte Wortstatistiken und freiwillig angeheftete Zwischenablageeinträge. Die gespeicherte Datei liegt in der privaten App-Datenbank; Android-Backups sind abgeschaltet.",13);
+        label("Datenschutz: Android kann den Inhalt von Tastatur-Eingaben an das ausgewählte IME übermitteln. Diese App speichert bestätigte Wort- und Satzzeichen-Tokens als lokale Häufigkeitsstatistiken sowie freiwillig angeheftete Zwischenablageeinträge. Die gespeicherte Datei liegt in der privaten App-Datenbank; Android-Backups sind abgeschaltet.",13);
     }
     private void label(String value,int size) {
         TextView v=new TextView(this);v.setText(value);v.setTextSize(size);

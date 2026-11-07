@@ -14,7 +14,7 @@ public final class LearningDatabase extends SQLiteOpenHelper {
     private final ExecutorService disk = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "keyboard-local-database"); t.setDaemon(true); return t;
     });
-    public LearningDatabase(Context c) { super(c, "learned.db", null, 4); }
+    public LearningDatabase(Context c) { super(c, "learned.db", null, 5); }
 
     @Override public void onCreate(SQLiteDatabase d) {
         d.execSQL("CREATE TABLE words(token TEXT PRIMARY KEY, surface TEXT NOT NULL, typed INTEGER NOT NULL DEFAULT 0, selected INTEGER NOT NULL DEFAULT 0, last_used_ms INTEGER NOT NULL DEFAULT 0)");
@@ -24,9 +24,11 @@ public final class LearningDatabase extends SQLiteOpenHelper {
         d.execSQL("CREATE TABLE clipboard(value TEXT PRIMARY KEY, inserted INTEGER NOT NULL)");
         d.execSQL("CREATE TABLE rejections(prev2 TEXT NOT NULL, prev TEXT NOT NULL, prefix TEXT NOT NULL, word TEXT NOT NULL, cnt INTEGER NOT NULL, PRIMARY KEY(prev2,prev,prefix,word))");
         d.execSQL("CREATE TABLE next_recent(prev TEXT PRIMARY KEY, history TEXT NOT NULL)");
+        d.execSQL("CREATE TABLE token_pairs(prev TEXT NOT NULL, next TEXT NOT NULL, cnt INTEGER NOT NULL, PRIMARY KEY(prev,next))");
+        d.execSQL("CREATE TABLE token_recent(prev TEXT PRIMARY KEY, history TEXT NOT NULL)");
     }
     @Override public void onUpgrade(SQLiteDatabase db, int from, int to) {
-        if (from<1 || from>4 || to!=4)
+        if (from<1 || from>5 || to!=5)
             throw new IllegalStateException("Unsupported database version; personal history unchanged");
         if (from<=1) {
             db.execSQL("CREATE TABLE IF NOT EXISTS rejections(prev2 TEXT NOT NULL, prev TEXT NOT NULL, prefix TEXT NOT NULL, word TEXT NOT NULL, cnt INTEGER NOT NULL, PRIMARY KEY(prev2,prev,prefix,word))");
@@ -41,6 +43,12 @@ public final class LearningDatabase extends SQLiteOpenHelper {
             // cannot be reconstructed; the recent window starts accumulating
             // from the user's next confirmed word transition.
             db.execSQL("CREATE TABLE IF NOT EXISTS next_recent(prev TEXT PRIMARY KEY, history TEXT NOT NULL)");
+        }
+        if (from<=4) {
+            // Additive migration: preserve every older word, pair, clipboard,
+            // rejection and personal recency record without modification.
+            db.execSQL("CREATE TABLE IF NOT EXISTS token_pairs(prev TEXT NOT NULL, next TEXT NOT NULL, cnt INTEGER NOT NULL, PRIMARY KEY(prev,next))");
+            db.execSQL("CREATE TABLE IF NOT EXISTS token_recent(prev TEXT PRIMARY KEY, history TEXT NOT NULL)");
         }
     }
 
@@ -66,6 +74,43 @@ public final class LearningDatabase extends SQLiteOpenHelper {
         }
     }
 
+    /** Restore personal punctuation/character-string history in disk order. */
+    public void restoreTokensAsync(TokenHistory target,Runnable finished) {
+        disk.execute(() -> {
+            try {
+                SQLiteDatabase db=getReadableDatabase();
+                try(Cursor c=db.rawQuery("SELECT prev,next,cnt FROM token_pairs WHERE cnt>0",null)) {
+                    while(c.moveToNext())target.restore(c.getString(0),c.getString(1),c.getInt(2));
+                }
+                try(Cursor c=db.rawQuery("SELECT prev,history FROM token_recent",null)) {
+                    while(c.moveToNext())target.restoreRecent(c.getString(0),c.getString(1));
+                }
+            } catch(Exception e) {android.util.Log.e("KontextTastatur","Token history restore failed",e);}
+            finally {finished.run();}
+        });
+    }
+    public void persistToken(TokenHistory.Event event) {
+        if(event==null)return;
+        disk.execute(() -> {
+            SQLiteDatabase db=getWritableDatabase();
+            db.beginTransaction();
+            try {
+                increment(db,"token_pairs",new String[]{"prev","next"},
+                    new String[]{event.before,event.next},1);
+                String prior="";
+                try(Cursor c=db.rawQuery("SELECT history FROM token_recent WHERE prev=?",
+                                         new String[]{event.before})) {
+                    if(c.moveToFirst())prior=c.getString(0);
+                }
+                java.util.ArrayDeque<String> history=TokenHistory.decode(prior);
+                if(history.size()>=48)history.removeFirst();
+                history.addLast(event.next);
+                db.execSQL("INSERT OR REPLACE INTO token_recent(prev,history) VALUES (?,?)",
+                    new Object[]{event.before,TokenHistory.encode(history)});
+                db.setTransactionSuccessful();
+            } finally {db.endTransaction();}
+        });
+    }
     /** Serialized behind pending writes, then restores without blocking the keyboard. */
     public void restoreAsync(PredictionModel target, Runnable finished) {
         disk.execute(() -> {
@@ -158,7 +203,7 @@ public final class LearningDatabase extends SQLiteOpenHelper {
             SQLiteDatabase db = getWritableDatabase();
             db.beginTransaction();
             try {
-                for (String table : new String[]{"words","pairs","triples","choices","rejections","next_recent"}) db.delete(table,null,null);
+                for (String table : new String[]{"words","pairs","triples","choices","rejections","next_recent","token_pairs","token_recent"}) db.delete(table,null,null);
                 db.setTransactionSuccessful();
             } finally {db.endTransaction();}
         });

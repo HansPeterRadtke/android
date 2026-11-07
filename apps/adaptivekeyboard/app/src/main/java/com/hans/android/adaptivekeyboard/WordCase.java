@@ -34,25 +34,9 @@ public final class WordCase {
 
     public static boolean sentenceStart(String beforeCursor) {
         String text=beforeCursor==null?"":beforeCursor;
-        String active=ChimeEnglish.activePrefix(text);
-        if(!active.isEmpty())text=text.substring(0,text.length()-active.length());
-        int end=text.length()-1;
-        while(end>=0 && (Character.isWhitespace(text.charAt(end)) ||
-              text.charAt(end)=='\"' || text.charAt(end)=='\u201d' || text.charAt(end)=='\u2019' ||
-              text.charAt(end)==')'))end--;
-        if(end<0)return true;
-        char ch=text.charAt(end);
-        if(ch=='.') {
-            String lower=text.substring(0,end+1).toLowerCase(Locale.GERMAN)
-                .replace(" ","");
-            for(String abbreviation:ABBREVIATIONS)
-                if(lower.endsWith(abbreviation))return false;
-            if(end>=1 && Character.isDigit(text.charAt(end-1)))return false;
-            return true;
-        }
-        if(ch=='!'||ch=='?'||ch=='\u2026')return true;
-        return text.substring(0,end+1).lastIndexOf('\n')>=0 &&
-            text.substring(text.lastIndexOf('\n')+1,end+1).trim().isEmpty();
+        String prefix=GrammarTokens.activeWord(text);
+        if(!prefix.isEmpty())text=text.substring(0,text.length()-prefix.length());
+        return GrammarTokens.isSentenceStart(text);
     }
 
     /** Inserted words obey sentence capitalization; explicit prefix wins. */

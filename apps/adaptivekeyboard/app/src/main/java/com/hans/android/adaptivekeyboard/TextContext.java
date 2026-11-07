@@ -22,7 +22,7 @@ public final class TextContext {
 
     private static boolean wordChar(String text,int index) {
         char c=text.charAt(index);
-        if (Character.isLetter(c) || Character.getType(c) == Character.NON_SPACING_MARK) return true;
+        if (Character.isLetterOrDigit(c) || Character.getType(c) == Character.NON_SPACING_MARK) return true;
         // Contractions such as don't and I'm are one word, standalone quotes aren't.
         return (c=='\'' || c=='’') && index>0 && index+1<text.length() &&
             Character.isLetter(text.charAt(index-1)) && Character.isLetter(text.charAt(index+1));
@@ -31,16 +31,9 @@ public final class TextContext {
     /** Keeps only real letters (including German umlauts and accents). */
     public static TextContext fromBeforeCursor(CharSequence before) {
         String s = before == null ? "" : before.toString();
-        // A full stop, question/exclamation mark or newline starts a new
-        // sentence. Do not carry context from an unrelated prior sentence.
-        int sentenceStart=0;
-        for(int pos=s.length()-1;pos>=0;pos--) {
-            char ch=s.charAt(pos);
-            if(ch=='.' || ch=='!' || ch=='?' || ch=='\n') {
-                sentenceStart=pos+1;
-                break;
-            }
-        }
+        // Real sentence endings only: URL dots, decimals, abbreviations,
+        // hyphens, single symbols and ellipses do not reset word context.
+        int sentenceStart=GrammarTokens.lastSentenceStart(s);
         if(sentenceStart>0)s=s.substring(sentenceStart);
         boolean endsInWord = !s.isEmpty() && wordChar(s,s.length() - 1);
         List<String> found = new ArrayList<>(3);

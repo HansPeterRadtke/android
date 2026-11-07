@@ -208,7 +208,7 @@ public class PredictionModelTest {
         m.setBaselineNgrams(b);
         assertEquals(3,m.predict("","bin","ich").size());
         assertEquals("hier",m.predict("","bin","ich").get(0));
-        assertTrue(m.predict("","","").isEmpty());
+        assertFalse(m.predict("","","").isEmpty());
     }
     @Test public void personalChoiceStillBeatsGenericContext() {
         PredictionModel m=new PredictionModel();
@@ -387,7 +387,7 @@ public class PredictionModelTest {
             },(w,p,c) -> WordCase.display(w,p,c,false),3);
         assertEquals(java.util.List.of("go home"),phrases);
     }
-    @Test public void completelyEmptyMessageNeverInventsWordOrPhrase() {
+    @Test public void emptyMessageUsesSmallNeuralOrCorpusFallbackWithoutLearningIt() {
         PredictionModel model=new PredictionModel();
         BaselineNgrams corpus=new BaselineNgrams();
         corpus.add("S","","","die",999999,"de");
@@ -395,9 +395,9 @@ public class PredictionModelTest {
         corpus.add("S","","","ich",999999,"de");
         model.addBaseWord("die",0,"de");model.addBaseWord("the",0,"en");
         model.setBaselineNgrams(corpus);
-        assertTrue("zero-prefix empty editor must be blank",model.predict("","","").isEmpty());
-        assertTrue(model.predict("","","",java.util.Map.of("invented",999999.0),"en").isEmpty());
-        assertTrue(model.predict("","","",java.util.Map.of("erfunden",999999.0),"de").isEmpty());
+        assertFalse("zero-prefix editor can use tiny local model",model.predict("","","").isEmpty());
+        assertTrue(model.predict("","","",java.util.Map.of("invented",999999.0),"en").contains("invented"));
+        assertTrue(model.predict("","","",java.util.Map.of("erfunden",999999.0),"de").contains("erfunden"));
         assertFalse(model.hasPersonalNext("",""));
     }
     @Test public void confirmedSentenceStartIsTheOnlyAvailableOpening() {
@@ -407,7 +407,7 @@ public class PredictionModelTest {
         corpus.add("S","","","der",99999,"de");
         corpus.add("S","","","the",99999,"en");
         m.setBaselineNgrams(corpus);
-        assertTrue(m.predict("","","").isEmpty());
+        assertFalse(m.predict("","","").isEmpty());
         PredictionModel.Event first=m.learnTyped("hello","","");
         assertEquals("<bos>",first.previous);
         assertEquals(java.util.List.of("hello"),m.predict("","", "",
@@ -417,7 +417,7 @@ public class PredictionModelTest {
         assertTrue(m.hasPersonalNext("",""));
         assertEquals("hello",m.predict("he","","").get(0));
         m.undo(first);
-        assertTrue(m.predict("","","").isEmpty());
+        assertFalse(m.predict("","","").isEmpty());
     }
     @Test public void observedSentenceStartsUseFrequencyAndRecentUsageOnly() {
         PredictionModel m=new PredictionModel();

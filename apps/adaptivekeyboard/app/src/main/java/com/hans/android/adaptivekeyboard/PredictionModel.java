@@ -468,8 +468,13 @@ public final class PredictionModel {
         // When the editor is empty, include previously typed words and the
         // first word of actual observed adjacent pairs from legacy history.
         // The model must not fabricate starts, but must not ignore that history.
-        if(prefix.isEmpty()&&a.isEmpty()&&b.isEmpty())
-            return personalOpeningBackfill(known);
+        if(prefix.isEmpty()&&a.isEmpty()&&b.isEmpty()) {
+            List<String> personal=personalOpeningBackfill(known);
+            if(!personal.isEmpty())return personal;
+            // With no personal opening evidence, use a LOCAL tiny neural
+            // language model or the compact generic starter corpus. These are
+            // fallbacks, never counted or labelled as learned personal text.
+        }
         if(!known.isEmpty())return known;
         Map<String,Double> generic=new HashMap<>();
         if(baseline!=null)generic.putAll(baseline.candidates(prefix,a,b,language));
