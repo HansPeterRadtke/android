@@ -65,6 +65,11 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private String mode="letters",gifQuery="";
     private TextView gifStatus;
     private LinearLayout gifResults;
+    private ScrollView gifScroll;
+    private TextView gifQueryDisplay, gifMore;
+    private String gifProvider="commons", gifRating="r";
+    private boolean gifEditing=true;
+    private int gifOffset=0, gifGridCells=0;
     private int gifPreviewsExpected, gifPreviewsLoaded, gifPreviewsFailed;
     private boolean shift=true,caps=false,sensitive=false,privateMode=false;
     private EditorInfo info;
@@ -223,7 +228,12 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(requested.equals(mode)) requested="letters";
         mode=requested;
         if(!requested.equals("gif"))searchRevision++;
-        if(requested.equals("gif"))gifQuery="";
+        if(requested.equals("gif")) {
+            gifQuery="";gifEditing=true;gifOffset=0;gifGridCells=0;
+            gifProvider=getSharedPreferences("keyboard_settings",0).getString("giphy_key","").isEmpty()
+                ?"commons":"giphy";
+            gifRating=getSharedPreferences("keyboard_settings",0).getString("giphy_rating","r");
+        }
         renderKeyboard();refreshSuggestions();
     }
     private void refreshSuggestions() {
@@ -267,6 +277,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(mode.equals("emoji")){showEmojiPanel();return;}
         if(mode.equals("clipboard")){showClipboardPanel();return;}
         if(mode.equals("gif"))showGifPanel();
+        else keys.setVisibility(View.VISIBLE);
         if(mode.equals("numbers")) {
             row(new String[]{"1","2","3"},null);
             row(new String[]{"4","5","6"},null);
@@ -558,44 +569,143 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(ic!=null)ic.performContextMenuAction(action);
         if(action==android.R.id.paste)showMode("letters");
     }
+    private void gifToolbarButton(LinearLayout row,String name,boolean selected,Runnable action) {
+        TextView button=button(name,12,selected?PRESSED:KEY,36);
+        LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,dp(36),1);
+        params.setMargins(dp(2),0,dp(2),0);
+        row.addView(button,params);
+        button.setOnClickListener(v->action.run());
+    }
     private void showGifPanel() {
-        boolean viaGiphy=!getSharedPreferences("keyboard_settings",0).getString("giphy_key","").isEmpty();
-        panelHeader(viaGiphy ? "GIF-Suche · Powered By GIPHY" :
-            "GIF-Suche · Openverse (ohne Schlüssel)",() -> showMode("letters"));
-        gifStatus=button("Suchbegriff tippen, dann ↵ drücken",14,BG,35);
-        panel.addView(gifStatus,new LinearLayout.LayoutParams(-1,dp(35)));
-        HorizontalScrollView scroll=new HorizontalScrollView(this);
-        scroll.setHorizontalScrollBarEnabled(false);
-        panel.addView(scroll,new LinearLayout.LayoutParams(-1,dp(119)));
-        gifResults=new LinearLayout(this);gifResults.setGravity(Gravity.CENTER_VERTICAL);
-        scroll.addView(gifResults,new HorizontalScrollView.LayoutParams(-2,dp(115)));
-        TextView search=button("Suchen",15,PRESSED,32);
-        panel.addView(search,new LinearLayout.LayoutParams(-1,dp(32)));
-        search.setOnClickListener(v->searchGif());
+        panelHeader(gifProvider.equals("giphy")?"GIF-Suche · Powered By GIPHY":
+            "GIF-Suche · Quellen auswählen",() -> showMode("letters"));
+        LinearLayout sources=new LinearLayout(this);
+        panel.addView(sources,new LinearLayout.LayoutParams(-1,dp(38)));
+        gifToolbarButton(sources,"GIPHY",gifProvider.equals("giphy"),() -> {
+            String api=getSharedPreferences("keyboard_settings",0).getString("giphy_key","");
+            if(api.isEmpty()) {
+                gifStatus.setText("GIPHY braucht einen kostenlosen API-Schlüssel. Einstellungen öffnen.");
+                Intent intent=new Intent(this,SettingsActivity.class);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                requestHideSelf(0);
+                startActivity(intent);
+                return;
+            }
+            setGifProvider("giphy");
+        });
+        gifToolbarButton(sources,"Wikimedia",gifProvider.equals("commons"),() -> setGifProvider("commons"));
+        gifToolbarButton(sources,"Tenor-Web",false,this::openTenorWeb);
+        LinearLayout queryRow=new LinearLayout(this);
+        panel.addView(queryRow,new LinearLayout.LayoutParams(-1,dp(34)));
+        gifQueryDisplay=button("",14,KEY,33);
+        LinearLayout.LayoutParams qp=new LinearLayout.LayoutParams(0,dp(33),1);
+        qp.setMargins(dp(2),0,dp(2),0);queryRow.addView(gifQueryDisplay,qp);
+        gifQueryDisplay.setOnClickListener(v->setGifEditing(true));
+        TextView clear=button("×",20,PRESSED,33);
+        LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(dp(36),dp(33));
+        cp.setMargins(dp(2),0,dp(2),0);queryRow.addView(clear,cp);
+        clear.setOnClickListener(v->{
+            gifQuery="";searchRevision++;gifOffset=0;gifGridCells=0;
+            gifResults.removeAllViews();
+            updateGifStatus();setGifEditing(true);
+        });
+        gifStatus=button("",12,BG,36);
+        panel.addView(gifStatus,new LinearLayout.LayoutParams(-1,dp(36)));
+        gifScroll=new ScrollView(this);
+        gifScroll.setFillViewport(false);
+        panel.addView(gifScroll,new LinearLayout.LayoutParams(-1,dp(130)));
+        gifResults=new LinearLayout(this);
+        gifResults.setOrientation(LinearLayout.VERTICAL);
+        gifScroll.addView(gifResults,new ScrollView.LayoutParams(-1,-2));
+        LinearLayout actions=new LinearLayout(this);
+        panel.addView(actions,new LinearLayout.LayoutParams(-1,dp(38)));
+        gifToolbarButton(actions,"Suchen / Trends",false,()->searchGif(false));
+        gifToolbarButton(actions,"Mehr GIFs",false,()->searchGif(true));
+        gifToolbarButton(actions,"Tastatur",false,()->setGifEditing(true));
         updateGifStatus();
+        updateGifLayout();
+    }
+    private void setGifProvider(String value) {
+        if(value.equals(gifProvider))return;
+        gifProvider=value;
+        searchRevision++;
+        gifOffset=0;gifGridCells=0;
+        gifEditing=true;
+        renderKeyboard();
+        refreshSuggestions();
+    }
+    private void openTenorWeb() {
+        String phrase=gifQuery.trim();
+        // Tenor's website search remains accessible, while its third-party
+        // programming API has been shut down. A browser, not the IME, handles it.
+        String slug=phrase.isEmpty()?"happy":phrase.replaceAll("\s+","-");
+        Uri uri=new Uri.Builder().scheme("https").authority("tenor.com")
+            .appendPath("search").appendPath(slug+"-gifs").build();
+        Intent intent=new Intent(Intent.ACTION_VIEW,uri);
+        intent.addCategory(Intent.CATEGORY_BROWSABLE);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {requestHideSelf(0);startActivity(intent);}
+        catch(Exception e) {gifStatus.setText("Tenor konnte im Browser nicht geöffnet werden.");}
+    }
+    private void setGifEditing(boolean editing) {
+        gifEditing=editing;
+        updateGifLayout();
+    }
+    private void updateGifLayout() {
+        if(keys==null || gifScroll==null || !mode.equals("gif"))return;
+        keys.setVisibility(gifEditing?View.VISIBLE:View.GONE);
+        LinearLayout.LayoutParams scrollParams=(LinearLayout.LayoutParams)gifScroll.getLayoutParams();
+        scrollParams.height=dp(gifEditing?125:315);
+        gifScroll.setLayoutParams(scrollParams);
     }
     private void updateGifStatus() {
-        if(gifStatus!=null && mode.equals("gif"))
-            gifStatus.setText(gifQuery.isEmpty()?"GIF-Suche: Stichwort tippen und ↵ drücken":"GIF-Suche: "+gifQuery);
-    }
-    private void searchGif() {
         if(!mode.equals("gif"))return;
-        String query=gifQuery.trim();
-        if(query.isEmpty()){updateGifStatus();return;}
-        String key=getSharedPreferences("keyboard_settings",0).getString("giphy_key","");
+        if(gifQueryDisplay!=null)
+            gifQueryDisplay.setText(gifQuery.isEmpty()?"Suchbegriff eingeben / Trends":"Suche: "+gifQuery);
+        if(gifStatus!=null && gifResults!=null && gifGridCells==0) {
+            String api=getSharedPreferences("keyboard_settings",0).getString("giphy_key","");
+            gifStatus.setText(gifProvider.equals("giphy")?
+                (api.isEmpty()?"GIPHY-Schlüssel fehlt":"GIPHY · Filter: "+gifRating.toUpperCase(Locale.ROOT)):
+                "Wikimedia: freie Bilder, kaum Reaktions-GIFs");
+        }
+    }
+    private void searchGif() {searchGif(false);}
+    private void searchGif(boolean more) {
+        if(!mode.equals("gif"))return;
+        final String query=gifQuery.trim();
+        final String provider=gifProvider;
+        final String key=getSharedPreferences("keyboard_settings",0).getString("giphy_key","");
+        final String rating=gifRating;
+        if(provider.equals("commons") && query.isEmpty()) {
+            gifStatus.setText("Wikimedia benötigt einen Suchbegriff. Für Reaktions-GIFs GIPHY verwenden.");
+            return;
+        }
+        if(provider.equals("giphy") && key.isEmpty()) {
+            gifStatus.setText("GIPHY: API-Schlüssel in Einstellungen eintragen.");
+            return;
+        }
+        if(more && !provider.equals("giphy")) {
+            gifStatus.setText("Weitere Seiten nur mit GIPHY verfügbar.");
+            return;
+        }
+        final int offset=more?gifOffset+24:0;
         final int request=++searchRevision;
-        gifStatus.setText("Suche läuft: "+query);
-        gifResults.removeAllViews();
+        gifStatus.setText(more?"Weitere GIFs werden geladen":"GIF-Suche läuft: "+query);
+        if(!more){gifResults.removeAllViews();gifGridCells=0;gifOffset=0;}
         gifPreviewsExpected=0;gifPreviewsLoaded=0;gifPreviewsFailed=0;
         searchWorker.execute(() -> {
             try {
-                List<GiphySearch.Gif> results=GiphySearch.search(key,query);
+                List<GiphySearch.Gif> results=provider.equals("giphy")?
+                    GiphySearch.searchGiphy(key,query,rating,offset):GiphySearch.searchOpenverse(query);
                 handler.post(() -> {
                     if(request!=searchRevision||!mode.equals("gif"))return;
+                    gifOffset=offset;
                     gifPreviewsExpected=results.size();
-                    gifStatus.setText(results.isEmpty()?"Keine passenden GIFs gefunden":
-                        ("GIFs gefunden: "+results.size()+" · Vorschau wird geladen"));
-                    for(GiphySearch.Gif gif:results) addGifPreview(gif,request);
+                    gifStatus.setText(results.isEmpty()?"Keine Treffer in "+
+                        (provider.equals("giphy")?"GIPHY":"Wikimedia"):
+                        "GIFs: "+results.size()+" geladen · Vorschau läuft");
+                    for(GiphySearch.Gif gif:results)addGifPreview(gif,request);
+                    if(!results.isEmpty())setGifEditing(false);
                 });
             } catch(Exception error) {
                 handler.post(() -> {if(request==searchRevision&&mode.equals("gif"))
@@ -609,7 +719,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         String status=gifStatus.getText().toString();
         // Image loading may continue after an explicit share/copy action;
         // it must not overwrite the more important share/copy result.
-        if(!status.startsWith("GIFs gefunden:") && !status.startsWith("Vorschau"))return;
+        if(!status.startsWith("GIFs:") && !status.startsWith("Vorschau"))return;
         int finished=gifPreviewsLoaded+gifPreviewsFailed;
         if(finished==gifPreviewsExpected && gifPreviewsLoaded==0)
             gifStatus.setText("GIFs gefunden, Vorschau nicht verfügbar. Titel antippen oder erneut suchen.");
@@ -621,9 +731,16 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         FrameLayout tile=new FrameLayout(this);
         tile.setBackground(background(KEY));
         tile.setContentDescription(gif.title+" · "+gif.attribution);
-        LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(dp(112),dp(112));
-        p.setMargins(dp(3),dp(2),dp(3),dp(2));
-        gifResults.addView(tile,p);
+        LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(105),1);
+        p.setMargins(dp(2),dp(2),dp(2),dp(2));
+        LinearLayout row;
+        if(gifGridCells%3==0) {
+            row=new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            gifResults.addView(row,new LinearLayout.LayoutParams(-1,dp(109)));
+        } else row=(LinearLayout)gifResults.getChildAt(gifResults.getChildCount()-1);
+        row.addView(tile,p);
+        gifGridCells++;
         ImageView imageView=new ImageView(this);
         imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
         imageView.setImageResource(android.R.drawable.ic_menu_gallery);

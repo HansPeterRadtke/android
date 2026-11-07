@@ -27,25 +27,60 @@ public final class GiphySearch {
     }
     private GiphySearch() { }
     public static List<Gif> search(String apiKey, String query) throws Exception {
-        // Openverse's anonymous image search is the default; GIPHY remains optional.
-        if (apiKey == null || apiKey.trim().isEmpty()) return searchOpenverse(query);
-        if (query == null || query.trim().isEmpty()) return new ArrayList<>();
-        String encoded = URLEncoder.encode(query.substring(0,Math.min(50,query.length())), "UTF-8");
-        String url = "https://api.giphy.com/v1/gifs/search?api_key="+
-            URLEncoder.encode(apiKey.trim(),"UTF-8")+"&q="+encoded+"&limit=12&rating=pg&lang=de";
-        JSONObject response = new JSONObject(new String(request(url,1_500_000),StandardCharsets.UTF_8));
-        JSONArray data = response.getJSONArray("data");
-        List<Gif> out = new ArrayList<>();
-        for (int i=0;i<data.length();i++) {
-            JSONObject obj = data.getJSONObject(i), images = obj.optJSONObject("images");
-            if (images == null) continue;
-            JSONObject small = images.optJSONObject("fixed_width_small"), full=images.optJSONObject("original");
-            if (small==null||full==null) continue;
-            String th = small.optString("url"), orig = full.optString("url"), link=obj.optString("url");
-            if (allowMedia(th) && allowMedia(orig))
-                out.add(new Gif(obj.optString("title","GIF"),th,orig,link));
+        if(apiKey == null || apiKey.trim().isEmpty())return searchOpenverse(query);
+        return searchGiphy(apiKey,query,"r",0);
+    }
+
+    /** GIPHY's reaction library requires the user's own free developer key. */
+    static String giphyUrl(String apiKey,String query,String rating,int offset) throws Exception {
+        if(apiKey==null || apiKey.trim().isEmpty())
+            throw new IllegalArgumentException("GIPHY-Schlüssel fehlt");
+        String r=("g".equals(rating) || "pg".equals(rating) ||
+            "pg-13".equals(rating) || "r".equals(rating))?rating:"r";
+        int position=Math.min(4900,Math.max(0,offset));
+        String clean=query==null?"":query.trim();
+        if(clean.length()>50)clean=clean.substring(0,50);
+        String base="https://api.giphy.com/v1/gifs/"+(clean.isEmpty()?"trending":"search")+"?api_key="+
+            URLEncoder.encode(apiKey.trim(),"UTF-8")+"&limit=24&rating="+r+"&offset="+position;
+        // Omitting lang preserves the API's relevance search across German/English
+        // rather than forcing a German-only locale for every user query.
+        if(!clean.isEmpty())base+="&q="+URLEncoder.encode(clean,"UTF-8");
+        return base;
+    }
+
+    public static List<Gif> searchGiphy(String apiKey,String query,String rating,int offset) throws Exception {
+        String json=new String(request(giphyUrl(apiKey,query,rating,offset),2_000_000),StandardCharsets.UTF_8);
+        return parseGiphyResponse(json);
+    }
+
+    static List<Gif> parseGiphyResponse(String json) throws Exception {
+        JSONObject response=new JSONObject(json);
+        JSONArray data=response.optJSONArray("data");
+        List<Gif> results=new ArrayList<>();
+        if(data==null)return results;
+        for(int i=0;i<data.length();i++) {
+            JSONObject obj=data.optJSONObject(i);
+            if(obj==null)continue;
+            JSONObject images=obj.optJSONObject("images");
+            if(images==null)continue;
+            JSONObject thumb=images.optJSONObject("fixed_width_small");
+            JSONObject medium=images.optJSONObject("fixed_width");
+            JSONObject downsized=images.optJSONObject("downsized");
+            JSONObject original=images.optJSONObject("original");
+            if(thumb==null)thumb=medium;
+            String th=thumb==null?"":thumb.optString("url");
+            // A mobile-sized GIF is usually much smaller and more likely to
+            // send within the receiving app's attachment limit than the original.
+            String media=medium!=null ? medium.optString("url") : "";
+            if(!allowMedia(media)&&downsized!=null)media=downsized.optString("url");
+            if(!allowMedia(media)&&original!=null)media=original.optString("url");
+            if(!allowMedia(th)||!allowMedia(media))continue;
+            JSONObject author=obj.optJSONObject("user");
+            String by=author==null?"":" · "+author.optString("username");
+            results.add(new Gif(obj.optString("title","Reaction GIF"),th,media,
+                obj.optString("url",""),"GIPHY"+by));
         }
-        return out;
+        return results;
     }
     /** Anonymous, documented Openverse endpoint; no API key, tracking ID or typing history. */
     static List<Gif> searchOpenverse(String query) throws Exception {
