@@ -32,9 +32,14 @@ public final class SettingsActivity extends Activity {
             if (imm!=null) imm.showInputMethodPicker();
         });
         label("Hier ausprobieren:",16);
-        EditText input=new EditText(this);input.setHint("Ich wollte heute …");
+        CaretTestEditText input=new CaretTestEditText(this);input.setHint("Ich wollte heute …");
         input.setMinLines(2);input.setGravity(Gravity.TOP);input.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE|InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         layout.addView(input,new LinearLayout.LayoutParams(-1,dp(95)));
+        TextView caretTest=new TextView(this);
+        caretTest.setTextSize(13);
+        caretTest.setPadding(0,dp(3),0,dp(5));
+        layout.addView(caretTest,new LinearLayout.LayoutParams(-1,-2));
+        input.setReadout(caretTest);
         label("Lernverhalten",19);
         label("Beim Weitertippen wird nichts übernommen. Erst Leertaste, Satzzeichen, Eingabetaste oder die Wahl eines Vorschlags bestätigt ein Wort. Das vollständige Eingabefeld und Passwörter werden nicht gespeichert. Private Felder werden automatisch ausgeschlossen.",14);
         action("Privatmodus umschalten",() -> {
@@ -96,6 +101,22 @@ public final class SettingsActivity extends Activity {
     private void label(String value,int size) {
         TextView v=new TextView(this);v.setText(value);v.setTextSize(size);
         v.setPadding(0,dp(10),0,dp(9));layout.addView(v,new LinearLayout.LayoutParams(-1,-2));
+    }
+    private static final class CaretTestEditText extends EditText {
+        private TextView readout;
+        CaretTestEditText(Context context) {super(context);}
+        void setReadout(TextView status) {readout=status;updateStatus();}
+        @Override protected void onSelectionChanged(int start,int end) {
+            super.onSelectionChanged(start,end);
+            updateStatus();
+        }
+        private void updateStatus() {
+            if(readout==null)return;
+            int start=Math.max(0,getSelectionStart()),end=Math.max(0,getSelectionEnd());
+            String caption=start==end?"Cursor: "+end+" / "+length():
+                "Markierung: "+Math.min(start,end)+" – "+Math.max(start,end);
+            readout.setText(caption);
+        }
     }
     private void action(String title,Runnable action) {
         Button b=new Button(this);b.setText(title);b.setAllCaps(false);b.setOnClickListener(v -> action.run());

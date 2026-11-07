@@ -54,6 +54,10 @@ public final class PredictionModel {
     private final Map<String,Long> choiceTimes=new HashMap<>();
     private final Map<String,Long> latestChoiceByPrefix=new HashMap<>();
     private final Map<String,Integer> rejections=new HashMap<>();
+    private BaselineNgrams baseline;
+    public synchronized void setBaselineNgrams(BaselineNgrams sharedBaseline) {
+        this.baseline=sharedBaseline;
+    }
     private static String norm(String w) {return TextContext.normalize(w);}
     private static String key(String...parts) {return String.join("\u0001",parts);}
     private static int get(Map<String,Integer> table,String k) {return table.getOrDefault(k,0);}
@@ -185,7 +189,9 @@ public final class PredictionModel {
     }
     public synchronized List<String> predict(String rawPrefix,String prev,String prev2) {
         String prefix=norm(rawPrefix),a=norm(prev),b=norm(prev2);
-        if(prefix.isEmpty()&&a.isEmpty())return Collections.emptyList();
+        Map<String,Double> generic = baseline==null ? Collections.emptyMap() :
+            baseline.candidates(prefix,a,b);
+        if(prefix.isEmpty()&&a.isEmpty()&&generic.isEmpty())return Collections.emptyList();
         Scored[] best=new Scored[3];
         double englishBias=languageBias(a,b);
         int exact=0;
@@ -193,9 +199,12 @@ public final class PredictionModel {
             // Only words actually observed after this context are candidates.
             Set<String> next=new HashSet<>(nextByPrevious.getOrDefault(a,Collections.emptySet()));
             next.addAll(nextByTwoPrevious.getOrDefault(key(b,a),Collections.emptySet()));
+            next.addAll(generic.keySet());
             for(String form:next) {
                 Word word=words.get(form);
-                if(word!=null)offer(best,form,word,a,b,prefix,rawPrefix,englishBias,0);
+                if(word==null)word=new Word(form);
+                offer(best,form,word,a,b,prefix,rawPrefix,englishBias,0,
+                    generic.getOrDefault(form,0.0));
             }
         } else {
             ensureIndex();
@@ -203,7 +212,8 @@ public final class PredictionModel {
                 String word=sortedKeys.get(i);
                 if(!word.startsWith(prefix))break;
                 exact++;
-                offer(best,word,words.get(word),a,b,prefix,rawPrefix,englishBias,0);
+                offer(best,word,words.get(word),a,b,prefix,rawPrefix,englishBias,0,
+                    generic.getOrDefault(word,0.0));
             }
         }
         // A misspelled prefix can use a typo candidate without a whole-dictionary scan.
@@ -214,8 +224,16 @@ public final class PredictionModel {
                 if(!form.startsWith(initial))break;
                 if(form.startsWith(prefix)||form.length()<prefix.length()-1)continue;
                 if(oneEditFromPrefix(prefix,form))
-                    offer(best,form,words.get(form),a,b,prefix,rawPrefix,englishBias,-14);
+                    offer(best,form,words.get(form),a,b,prefix,rawPrefix,englishBias,-14,
+                        generic.getOrDefault(form,0.0));
             }
+        }
+        // Baseline can propose valid corpus words outside the packaged unigram
+        // list; offer those too, without storing them as personal learning.
+        if(!prefix.isEmpty())for(Map.Entry<String,Double> entry:generic.entrySet()) {
+            if(words.containsKey(entry.getKey()))continue;
+            offer(best,entry.getKey(),new Word(entry.getKey()),a,b,prefix,
+                rawPrefix,englishBias,0,entry.getValue());
         }
         List<String> out=new ArrayList<>(3);
         for(Scored item:best)if(item!=null)out.add(item.output);
@@ -242,9 +260,9 @@ public final class PredictionModel {
         if(w.deRank<80 && w.enRank>600)return -0.6;
         return 0;
     }
-    private void offer(Scored[] best,String form,Word w,String a,String b,String prefix,String rawPrefix,double languageBias,double penalty) {
+    private void offer(Scored[] best,String form,Word w,String a,String b,String prefix,String rawPrefix,double languageBias,double penalty,double genericScore) {
         int pair=get(pairs,key(a,form)),triple=get(triples,key(b,a,form));
-        if(prefix.isEmpty() && pair==0 && triple==0)return;
+        if(prefix.isEmpty() && pair==0 && triple==0 && genericScore<=0)return;
         double base=w.baseRank==UNKNOWN_RANK?0:Math.max(0,13-1.2*Math.log1p(w.baseRank));
         double preference=0;
         if(w.enRank!=UNKNOWN_RANK && w.deRank==UNKNOWN_RANK)preference=1;
@@ -270,7 +288,7 @@ public final class PredictionModel {
             if(contextualLast>0 && contextualLast==latestChoiceByPrefix.getOrDefault(currentPrefix,0L))
                 latestPreference+=recencyBonus(contextualLast,9);
         }
-        double score=base+contextLanguage+6*Math.log1p(w.typed)+6*Math.log1p(w.selected)
+        double score=base+contextLanguage+genericScore+6*Math.log1p(w.typed)+6*Math.log1p(w.selected)
             +latestPreference
             +12*Math.log1p(pair)+18*Math.log1p(triple)
             +19*Math.log1p(contextualChoice)

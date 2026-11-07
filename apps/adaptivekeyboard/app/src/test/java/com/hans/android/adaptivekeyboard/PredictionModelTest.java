@@ -194,6 +194,39 @@ public class PredictionModelTest {
         restored.restoreChoice("","","hell","hello",1,latest.timestamp);
         assertEquals("hello",restored.predict("hel","","").get(0));
     }
+    @Test public void baselineMakesPredictionsBeforeAnyLetters() {
+        PredictionModel m=new PredictionModel();
+        BaselineNgrams b=new BaselineNgrams();
+        for(String word:new String[]{"nicht","sehr","gerne","hier","jetzt"})m.addBaseWord(word,30,"de");
+        b.add("B","","bin","sehr",100,"de");
+        b.add("B","","bin","nicht",60,"de");
+        b.add("B","","bin","gerne",40,"de");
+        b.add("T","ich","bin","hier",120,"de");
+        b.add("S","","","ich",60,"de");
+        b.add("S","","","wir",30,"de");
+        b.add("S","","","ich",20,"de");
+        m.setBaselineNgrams(b);
+        assertEquals(3,m.predict("","bin","ich").size());
+        assertEquals("hier",m.predict("","bin","ich").get(0));
+        assertFalse(m.predict("","","").isEmpty());
+    }
+    @Test public void personalChoiceStillBeatsGenericContext() {
+        PredictionModel m=new PredictionModel();
+        BaselineNgrams b=new BaselineNgrams();
+        b.add("T","ich","bin","nicht",2500,"de");
+        b.add("T","ich","bin","hier",100,"de");
+        m.addBaseWord("nicht",5,"de");m.addBaseWord("hier",60,"de");
+        m.setBaselineNgrams(b);
+        assertEquals("nicht",m.predict("","bin","ich").get(0));
+        for(int i=0;i<3;i++)m.learnSelection("","hier","bin","ich");
+        assertEquals("hier",m.predict("","bin","ich").get(0));
+    }
+    @Test public void sentencePunctuationResetsPreviousWords() {
+        TextContext c=TextContext.fromBeforeCursor("Ich bin hier. ");
+        assertEquals("",c.prefix);assertEquals("",c.previous);assertEquals("",c.beforePrevious);
+        c=TextContext.fromBeforeCursor("Ich war da? Hello");
+        assertEquals("Hello",c.prefix);assertEquals("",c.previous);
+    }
     @Test public void longOrBlankTokensDoNotLearn() {
         PredictionModel m=new PredictionModel();
         assertNull(m.learnTyped("", "a", "b"));

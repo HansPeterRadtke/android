@@ -20,6 +20,7 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -53,13 +54,22 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private final ExecutorService network = Executors.newFixedThreadPool(3);
     private final ExecutorService searchWorker = Executors.newSingleThreadExecutor();
     private final ExecutorService sendWorker = Executors.newSingleThreadExecutor();
+    private final ExecutorService languageWorker = Executors.newSingleThreadExecutor(r -> {
+        Thread t=new Thread(r,"keyboard-offline-language-model");t.setDaemon(true);return t;
+    });
     private final android.util.LruCache<String,byte[]> previewCache =
         new android.util.LruCache<String,byte[]>(5_000_000) {
             @Override protected int sizeOf(String key,byte[] value) {return value.length;}
         };
     private PredictionModel predictions;
+    private BaselineNgrams baselineNgrams;
     private LearningDatabase database;
     private LinearLayout root, suggestionRow, toolbar, keys, panel;
+    private TextView caretIndicator;
+    private TextView activeSpaceKey;
+    private SpaceSwipe spaceSwipe;
+    private Runnable spaceHold;
+    private float spaceDownX, spaceLatestX;
     private TextView[] suggestions = new TextView[3];
     private String[] visibleWords = new String[3];
     private String mode="letters",gifQuery="";
@@ -84,13 +94,35 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         predictions=new PredictionModel();database=new LearningDatabase(this);
         reseed();
         try {database.restore(predictions);} catch(Exception e) {android.util.Log.e("KontextTastatur","Learning DB load failed",e);}
+        // Parsing hundreds of thousands of offline ngrams can take multiple
+        // seconds on slower phones. Never block the IME's main/UI thread.
+        languageWorker.execute(() -> {
+            BaselineNgrams loaded=new BaselineNgrams();
+            for(String language:new String[]{"de","en"}) {
+                if(Thread.currentThread().isInterrupted())return;
+                try(java.io.InputStream stream=getAssets().open(language+"_next_words.ngram")) {
+                    loaded.load(stream,language);
+                } catch(Exception ex) {
+                    android.util.Log.e("KontextTastatur","Offline next-word baseline load failed "+language,ex);
+                }
+            }
+            handler.post(() -> {
+                if(active!=this)return;
+                baselineNgrams=loaded;
+                predictions.setBaselineNgrams(loaded);
+                refreshSuggestions();
+                android.util.Log.i("KontextTastatur","Offline next-word model loaded: "+loaded.size());
+            });
+        });
         refreshSettings();
     }
     @Override public void onDestroy() {
         searchRevision++; handler.removeCallbacksAndMessages(null);
+        spaceHold=null;spaceSwipe=null;
         network.shutdownNow();
         searchWorker.shutdownNow();
         sendWorker.shutdownNow();
+        languageWorker.shutdownNow();
         if(database!=null) database.close();
         if(active==this) active=null;
         super.onDestroy();
@@ -104,6 +136,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     public static void clearLearning(Context c) {
         if(active!=null) {
             active.predictions=new PredictionModel();
+            active.predictions.setBaselineNgrams(active.baselineNgrams);
             active.reseed();
             active.recentEvent=null;
             active.database.clearLearning();
@@ -151,6 +184,16 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             suggestionRow.addView(v,p);suggestions[i]=v;
             v.setOnClickListener(w -> chooseSuggestion(pos));
         }
+        caretIndicator=button("",13,0xff24313c,28);
+        caretIndicator.setGravity(Gravity.CENTER_VERTICAL|Gravity.CENTER_HORIZONTAL);
+        caretIndicator.setVisibility(View.GONE);
+        caretIndicator.setOnClickListener(v -> {
+            if(CursorNavigator.collapseToEnd(getCurrentInputConnection())) {
+                if(Build.VERSION.SDK_INT>=31)getCurrentInputConnection().setImeConsumesInput(false);
+                refreshSuggestions();
+            }
+        });
+        root.addView(caretIndicator,new LinearLayout.LayoutParams(-1,dp(28)));
         toolbar=new LinearLayout(this);toolbar.setGravity(Gravity.CENTER);
         root.addView(toolbar,new LinearLayout.LayoutParams(-1,dp(37)));
         panel=new LinearLayout(this);panel.setOrientation(LinearLayout.VERTICAL);panel.setVisibility(View.GONE);
@@ -173,11 +216,17 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         super.onStartInputView(attribute,restarting);
         info=attribute;sensitive=isPrivateField(attribute);
         if(!caps){shift=editorWantsCapitalization();renderKeyboard();}
+        InputConnection ic=getCurrentInputConnection();
+        if(Build.VERSION.SDK_INT>=31 && ic!=null)ic.setImeConsumesInput(false);
         refreshSettings();refreshSuggestions();
     }
     @Override public void onUpdateSelection(int oldStart,int oldEnd,int newStart,int newEnd,int candidatesStart,int candidatesEnd) {
         super.onUpdateSelection(oldStart,oldEnd,newStart,newEnd,candidatesStart,candidatesEnd);
-        if(root!=null && "letters".equals(mode)) refreshSuggestions();
+        if(root!=null && "letters".equals(mode)) {
+            InputConnection ic=getCurrentInputConnection();
+            if(Build.VERSION.SDK_INT>=31 && ic!=null)ic.setImeConsumesInput(false);
+            refreshSuggestions();
+        }
     }
     private boolean isPrivateField(EditorInfo e) {
         if(e==null)return true;
@@ -238,12 +287,21 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     private void refreshSuggestions() {
         if(suggestions[0]==null)return;
+        updateCaretIndicator();
         List<String> ranked=new ArrayList<>();
         if(!sensitive && !privateMode && mode.equals("letters")) {
             InputConnection ic=getCurrentInputConnection();
             if(ic!=null) {
-                TextContext c=TextContext.fromBeforeCursor(ic.getTextBeforeCursor(500,0));
-                ranked=predictions.predict(c.prefix,c.previous,c.beforePrevious);
+                CharSequence selection=ic.getSelectedText(0);
+                CharSequence after=ic.getTextAfterCursor(1,0);
+                boolean selectionActive=selection!=null && selection.length()>0;
+                boolean insideWord=after!=null && after.length()>0 &&
+                    Character.isLetter(after.charAt(0)) &&
+                    TextContext.fromBeforeCursor(ic.getTextBeforeCursor(100,0)).prefix.length()>0;
+                if(!selectionActive && !insideWord) {
+                    TextContext c=TextContext.fromBeforeCursor(ic.getTextBeforeCursor(500,0));
+                    ranked=predictions.predict(c.prefix,c.previous,c.beforePrevious);
+                }
             }
         }
         visibleWords[0]=ranked.size()>1?ranked.get(1):"";
@@ -255,6 +313,34 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             suggestions[i].setEnabled(!value.isEmpty());
         }
     }
+    private void updateCaretIndicator() {
+        if(caretIndicator==null)return;
+        if(sensitive || !"letters".equals(mode)) {
+            caretIndicator.setVisibility(View.GONE);
+            return;
+        }
+        InputConnection ic=getCurrentInputConnection();
+        if(ic==null){caretIndicator.setVisibility(View.GONE);return;}
+        CharSequence selected=ic.getSelectedText(0);
+        if(selected!=null && selected.length()>0) {
+            caretIndicator.setText("Markierung: "+selected.length()+" Zeichen · Tippen: Cursor am Ende");
+            caretIndicator.setVisibility(View.VISIBLE);
+            return;
+        }
+        CharSequence left=ic.getTextBeforeCursor(16,0);
+        CharSequence right=ic.getTextAfterCursor(16,0);
+        String a=left==null?"":left.toString(),b=right==null?"":right.toString();
+        if(a.isEmpty() && b.isEmpty()) {
+            caretIndicator.setVisibility(View.GONE);
+            return;
+        }
+        String leftExcerpt=(a.length()>=16?"…":"")+a;
+        String rightExcerpt=b+(b.length()>=16?"…":"");
+        caretIndicator.setText(leftExcerpt+"│"+rightExcerpt+
+            "   ·   Leertaste halten: Cursor bewegen");
+        caretIndicator.setVisibility(View.VISIBLE);
+    }
+
     private void chooseSuggestion(int position) {
         String chosen=visibleWords[position];
         if(chosen==null||chosen.isEmpty()||privateMode||sensitive)return;
@@ -312,6 +398,10 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(45),widths==null?1:widths[i]);
             p.setMargins(dp(2),dp(1),dp(2),dp(1));row.addView(v,p);
             v.setOnClickListener(w -> press(original));
+            if("Leerzeichen".equals(original)) {
+                v.setContentDescription("Leerzeichen. Halten und links oder rechts schieben, um den Cursor zu bewegen.");
+                v.setOnTouchListener(this::spaceTouch);
+            }
             String[] alternates=alternates(original);
             if(alternates!=null) v.setOnLongClickListener(w -> {
                 PopupMenu popup=new PopupMenu(this,v);
@@ -332,6 +422,58 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             });
         }
     }
+    /** Short tap types one space. Hold then move changes only cursor selection. */
+    private boolean spaceTouch(View view,MotionEvent event) {
+        int action=event.getActionMasked();
+        if(action==MotionEvent.ACTION_DOWN) {
+            if(spaceHold!=null)handler.removeCallbacks(spaceHold);
+            activeSpaceKey=(TextView)view;
+            spaceDownX=event.getX();spaceLatestX=event.getX();
+            spaceSwipe=new SpaceSwipe(spaceDownX);
+            spaceHold=() -> {
+                if(spaceSwipe==null || activeSpaceKey!=view || spaceSwipe.active())return;
+                spaceSwipe.activate(spaceLatestX);
+                activeSpaceKey.setText("◀ Cursor ▶");
+                view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+            };
+            handler.postDelayed(spaceHold,330);
+            return true;
+        }
+        if(spaceSwipe==null)return true;
+        if(action==MotionEvent.ACTION_MOVE) {
+            spaceLatestX=event.getX();
+            if(!spaceSwipe.active() && Math.abs(spaceLatestX-spaceDownX)>dp(22)) {
+                if(spaceHold!=null)handler.removeCallbacks(spaceHold);
+                spaceSwipe.activate(spaceDownX);
+                activeSpaceKey.setText("◀ Cursor ▶");
+                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+            }
+            if(spaceSwipe.active()) {
+                int delta=spaceSwipe.move(spaceLatestX,dp(12));
+                if(delta!=0) {
+                    InputConnection ic=getCurrentInputConnection();
+                    if(CursorNavigator.move(ic,delta)) {
+                        if(Build.VERSION.SDK_INT>=31)ic.setImeConsumesInput(false);
+                        recentEvent=null;
+                        refreshSuggestions();
+                    }
+                }
+            }
+            return true;
+        }
+        if(action==MotionEvent.ACTION_UP || action==MotionEvent.ACTION_CANCEL) {
+            if(spaceHold!=null)handler.removeCallbacks(spaceHold);
+            boolean dragging=spaceSwipe.active();
+            spaceSwipe=null;spaceHold=null;
+            if(activeSpaceKey!=null)activeSpaceKey.setText("Leerzeichen");
+            activeSpaceKey=null;
+            if(!dragging && action==MotionEvent.ACTION_UP)enterDelimiter(" ");
+            else refreshSuggestions();
+            return true;
+        }
+        return true;
+    }
+
     private String[] alternates(String c) {
         switch(c) {
             case "a": return new String[]{"ä","á","à","â","ã","å","æ"};
@@ -466,8 +608,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     private void arrow(int keycode) {
         InputConnection ic=getCurrentInputConnection();if(ic==null)return;
-        ic.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN,keycode));
-        ic.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_UP,keycode));
+        int by=keycode==KeyEvent.KEYCODE_DPAD_LEFT?-1:1;
+        CursorNavigator.move(ic,by);
+        if(Build.VERSION.SDK_INT>=31)ic.setImeConsumesInput(false);
         recentEvent=null;refreshSuggestions();
     }
     private void toast(String text) {Toast.makeText(this,text,Toast.LENGTH_SHORT).show();}

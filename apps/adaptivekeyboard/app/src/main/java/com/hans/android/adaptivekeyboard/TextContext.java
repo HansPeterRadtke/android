@@ -31,6 +31,17 @@ public final class TextContext {
     /** Keeps only real letters (including German umlauts and accents). */
     public static TextContext fromBeforeCursor(CharSequence before) {
         String s = before == null ? "" : before.toString();
+        // A full stop, question/exclamation mark or newline starts a new
+        // sentence. Do not carry context from an unrelated prior sentence.
+        int sentenceStart=0;
+        for(int pos=s.length()-1;pos>=0;pos--) {
+            char ch=s.charAt(pos);
+            if(ch=='.' || ch=='!' || ch=='?' || ch=='\n') {
+                sentenceStart=pos+1;
+                break;
+            }
+        }
+        if(sentenceStart>0)s=s.substring(sentenceStart);
         boolean endsInWord = !s.isEmpty() && wordChar(s,s.length() - 1);
         List<String> found = new ArrayList<>(3);
         int i = s.length() - 1;
