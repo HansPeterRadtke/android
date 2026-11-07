@@ -194,7 +194,7 @@ public class PredictionModelTest {
         restored.restoreChoice("","","hell","hello",1,latest.timestamp);
         assertEquals("hello",restored.predict("hel","","").get(0));
     }
-    @Test public void baselineMakesPredictionsBeforeAnyLetters() {
+    @Test public void baselineSuggestsWithinSentenceButNeverInventsMessageOpenings() {
         PredictionModel m=new PredictionModel();
         BaselineNgrams b=new BaselineNgrams();
         for(String word:new String[]{"nicht","sehr","gerne","hier","jetzt"})m.addBaseWord(word,30,"de");
@@ -208,7 +208,7 @@ public class PredictionModelTest {
         m.setBaselineNgrams(b);
         assertEquals(3,m.predict("","bin","ich").size());
         assertEquals("hier",m.predict("","bin","ich").get(0));
-        assertFalse(m.predict("","","").isEmpty());
+        assertTrue(m.predict("","","").isEmpty());
     }
     @Test public void personalChoiceStillBeatsGenericContext() {
         PredictionModel m=new PredictionModel();
@@ -249,8 +249,7 @@ public class PredictionModelTest {
         model.learnTyped("Haus","das","");
         assertEquals("haus",model.predict("hau","im","").get(0));
         assertEquals("Haus",model.predict("","im","").get(0));
-        assertEquals("ich",model.predict("","","").isEmpty()?"ich":
-            WordCase.display("ich","","wir sagen ",false));
+        assertEquals("Ich",model.predict("","","").get(0));
     }
     @Test public void zeroPrefixNeverRepeatsTheSameCandidate() {
         PredictionModel m=new PredictionModel();
@@ -387,6 +386,90 @@ public class PredictionModelTest {
                 return java.util.List.of("random");
             },(w,p,c) -> WordCase.display(w,p,c,false),3);
         assertEquals(java.util.List.of("go home"),phrases);
+    }
+    @Test public void completelyEmptyMessageNeverInventsWordOrPhrase() {
+        PredictionModel model=new PredictionModel();
+        BaselineNgrams corpus=new BaselineNgrams();
+        corpus.add("S","","","die",999999,"de");
+        corpus.add("S","","","the",999999,"en");
+        corpus.add("S","","","ich",999999,"de");
+        model.addBaseWord("die",0,"de");model.addBaseWord("the",0,"en");
+        model.setBaselineNgrams(corpus);
+        assertTrue("zero-prefix empty editor must be blank",model.predict("","","").isEmpty());
+        assertTrue(model.predict("","","",java.util.Map.of("invented",999999.0),"en").isEmpty());
+        assertTrue(model.predict("","","",java.util.Map.of("erfunden",999999.0),"de").isEmpty());
+        assertFalse(model.hasPersonalNext("",""));
+    }
+    @Test public void confirmedSentenceStartIsTheOnlyAvailableOpening() {
+        PredictionModel m=new PredictionModel();
+        m.addBaseWord("The",0,"en");m.addBaseWord("der",0,"de");
+        BaselineNgrams corpus=new BaselineNgrams();
+        corpus.add("S","","","der",99999,"de");
+        corpus.add("S","","","the",99999,"en");
+        m.setBaselineNgrams(corpus);
+        assertTrue(m.predict("","","").isEmpty());
+        PredictionModel.Event first=m.learnTyped("hello","","");
+        assertEquals("<bos>",first.previous);
+        assertEquals(java.util.List.of("hello"),m.predict("","", "",
+            java.util.Map.of("der",999999.0,"the",999999.0),"de"));
+        assertEquals(java.util.List.of("hello"),m.predict("","", "",
+            java.util.Map.of("der",999999.0,"the",999999.0),"en"));
+        assertTrue(m.hasPersonalNext("",""));
+        assertEquals("hello",m.predict("he","","").get(0));
+        m.undo(first);
+        assertTrue(m.predict("","","").isEmpty());
+    }
+    @Test public void observedSentenceStartsUseFrequencyAndRecentUsageOnly() {
+        PredictionModel m=new PredictionModel();
+        for(int i=0;i<10;i++)m.learnTyped("Hallo","","");
+        m.learnTyped("Guten","","");
+        assertEquals("Hallo",m.predict("","","").get(0));
+        for(int i=0;i<8;i++)m.learnTyped("Guten","","");
+        assertEquals("Guten",m.predict("","","").get(0));
+        assertEquals(2,m.predict("","","").size());
+    }
+    @Test public void actualOpeningPhraseOnlyWhenBothWordsWereObserved() {
+        PredictionModel m=new PredictionModel();
+        m.learnTyped("Hello","","");
+        java.util.List<String> beginnings=m.predict("","","");
+        assertEquals(java.util.List.of("Hello"),beginnings);
+        PhrasePredictor.Continuations follow=(seed,limit)->{
+            TextContext next=TextContext.fromBeforeCursor(seed);
+            if(!m.hasPersonalNext("",next.previous))return java.util.Collections.emptyList();
+            return m.predict("",next.previous,next.beforePrevious);
+        };
+        PhrasePredictor.Casing casing=(word,prefix,before)->
+            WordCase.display(word,prefix,before,false);
+        assertTrue(PhrasePredictor.complete("",beginnings,follow,casing,3).isEmpty());
+        m.learnTyped("there","Hello","");
+        assertEquals(java.util.List.of("Hello there"),
+            PhrasePredictor.complete("",beginnings,follow,casing,3));
+    }
+    @Test public void observedEnglishIAmCanBeSuggestedAtEmptyGermanDefaultField() {
+        PredictionModel model=new PredictionModel();
+        model.learnTyped("I","","");
+        model.learnTyped("am","I","");
+        java.util.List<String> starts=model.predict("","", "");
+        assertEquals(java.util.List.of("I"),starts);
+        PhrasePredictor.Continuations personalOnly=(seed,limit)->{
+            TextContext c=TextContext.fromBeforeCursor(seed);
+            return model.hasPersonalNext("",c.previous)?
+                model.predict("",c.previous,c.beforePrevious):java.util.List.of();
+        };
+        assertEquals(java.util.List.of("I am"),PhrasePredictor.complete("",starts,
+            personalOnly,(word,prefix,before)->WordCase.display(word,prefix,before,false),3));
+    }
+    @Test public void restoringPersonalOpeningUsesExistingPairsSchema() {
+        PredictionModel old=new PredictionModel();
+        PredictionModel.Event first=old.learnSelection("he","Hello","","");
+        old.learnTyped("there","Hello","");
+        PredictionModel restored=new PredictionModel();
+        restored.restoreWord("Hello",1,1);
+        restored.restorePair(first.previous,first.word,1);
+        restored.restoreRecent(first.previous,"hello");
+        restored.restorePair("hello","there",1);
+        assertEquals(java.util.List.of("Hello"),restored.predict("","", ""));
+        assertEquals(java.util.List.of("there"),restored.predict("","Hello",""));
     }
     @Test public void longOrBlankTokensDoNotLearn() {
         PredictionModel m=new PredictionModel();

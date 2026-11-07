@@ -13,6 +13,9 @@ import java.util.Set;
 /** Private on-device learning model: user's selections override German/English defaults. */
 public final class PredictionModel {
     private static final int UNKNOWN_RANK=999999;
+    // Not a real word; cannot be returned by TextContext.fromBeforeCursor().
+    // This represents only CONFIRMED words typed at the start of a sentence.
+    private static final String SENTENCE_START="<bos>";
     private static final class Word {
         String surface;
         String lexicalSurface;
@@ -103,6 +106,9 @@ public final class PredictionModel {
     private Event learn(String raw,String prev,String prev2,String pref,boolean selected) {
         String word=norm(raw),a=norm(prev),b=norm(prev2),prefix=norm(pref);
         if(word.isEmpty()||word.length()>60)return null;
+        // At a real sentence start no previous word is present. Record the
+        // confirmed first word explicitly; never infer it from a dictionary.
+        if(a.isEmpty()&&b.isEmpty())a=SENTENCE_START;
         Word w=words.get(word);
         if(w==null){w=new Word(raw);words.put(word,w);indexDirty=true;}
         // Explicit user confirmation wins over dictionary spelling and noun casing.
@@ -288,6 +294,7 @@ public final class PredictionModel {
      */
     private List<String> personalNext(String rawPrefix,String previous,String beforePrevious) {
         String a=norm(previous),b=norm(beforePrevious),prefix=norm(rawPrefix);
+        if(a.isEmpty()&&b.isEmpty())a=SENTENCE_START;
         if(a.isEmpty())return Collections.emptyList();
         Set<String> successors=nextByPrevious.get(a);
         if(successors==null||successors.isEmpty())return Collections.emptyList();
@@ -318,10 +325,11 @@ public final class PredictionModel {
             results.add(new Ranked(word,score));
         }
         if(results.isEmpty())return Collections.emptyList();
+        final String contextKey=a;
         results.sort((x,y)->{
             int order=Double.compare(y.score,x.score);
             if(order!=0)return order;
-            int lifetime=Integer.compare(get(pairs,key(a,y.word)),get(pairs,key(a,x.word)));
+            int lifetime=Integer.compare(get(pairs,key(contextKey,y.word)),get(pairs,key(contextKey,x.word)));
             return lifetime!=0?lifetime:x.word.compareTo(y.word);
         });
         List<String> out=new ArrayList<>(Math.min(3,results.size()));
@@ -338,6 +346,7 @@ public final class PredictionModel {
     /** Whether the owner has used a matching continuation after this word. */
     public synchronized boolean hasPersonalNext(String rawPrefix,String previous) {
         String a=norm(previous),prefix=norm(rawPrefix);
+        if(a.isEmpty())a=SENTENCE_START;
         Set<String> successors=nextByPrevious.get(a);
         if(successors==null)return false;
         for(String word:successors)
@@ -361,6 +370,11 @@ public final class PredictionModel {
         // model may reorder or replace previously confirmed next-word choices.
         List<String> known=personalNext(rawPrefix,a,b);
         if(!known.isEmpty())return known;
+        // Absolutely no corpus, dictionary or neural guesses in an untouched
+        // text field or after sentence-ending punctuation. Until a real first
+        // word has been CONFIRMED, the starting suggestion row is empty.
+        if(prefix.isEmpty()&&a.isEmpty()&&b.isEmpty())
+            return Collections.emptyList();
         Map<String,Double> generic=new HashMap<>();
         if(baseline!=null)generic.putAll(baseline.candidates(prefix,a,b,language));
         if(neuralScores!=null)for(Map.Entry<String,Double> e:neuralScores.entrySet()) {

@@ -400,6 +400,12 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         searchRevision++;predictionRevision++;recentEvent=null;
         lastPhraseRevision=-1;phraseSource="";
         clearPhrases();
+        // No suggestion from the previous editor may flash on a fresh field.
+        lastCandidateRevision=-1;lastNeuralRevision=-1;
+        for(int i=0;i<3;i++) {
+            visibleWords[i]="";
+            if(suggestions[i]!=null){suggestions[i].setText("");suggestions[i].setEnabled(false);}
+        }
         if(root!=null){renderToolbar();renderKeyboard();refreshSuggestions();}
     }
     @Override public void onStartInputView(EditorInfo attribute, boolean restarting) {
@@ -558,6 +564,10 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 Character.isLetter(before.charAt(before.length()-1)) &&
                 Character.isLetter(snapshot.after.charAt(0));
             TextContext context=TextContext.fromBeforeCursor(before);
+            // A sentence opening has no previous word. Only real observed
+            // first words and their confirmed continuations may be shown.
+            final boolean opening=context.prefix.isEmpty() &&
+                context.previous.isEmpty() && context.beforePrevious.isEmpty();
             String language=LanguageContext.detect(before);
             List<String> ranked=(snapshot.selection||insideWord)?Collections.emptyList():
                 predictions.predict(context.prefix,context.previous,context.beforePrevious,
@@ -580,6 +590,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                     (seed,limit) -> {
                         if(revision!=predictionRevision)return Collections.emptyList();
                         TextContext following=TextContext.fromBeforeCursor(seed);
+                        if(opening && !predictions.hasPersonalNext("",following.previous))
+                            return Collections.emptyList();
                         return predictions.predict("",following.previous,following.beforePrevious,
                             Collections.emptyMap(),lang);
                     },(word,prefix,seed) -> formatCandidate(word,prefix,seed,lang),3);
@@ -595,7 +607,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             }
             // Never spend cycles asking a model to overrule previously confirmed
             // continuations. User usage always takes precedence.
-            if(snapshot.selection||insideWord||!neuralEnabled() ||
+            if(snapshot.selection||insideWord||opening||!neuralEnabled() ||
                 predictions.hasPersonalNext(context.prefix,context.previous))return;
             ChimeEnglish en=neuralModel;
             GermanNextWord de=germanNeuralModel;
@@ -707,9 +719,13 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 visibleWords[position]="";continue;
             }
             String candidate=ranked.get(rankedPosition);
-            visibleWords[position]="de".equals(language)&&casing!=null && !confirmedNext?
-                casing.apply(candidate,prefix,before,false):
-                WordCase.display(candidate,prefix,before,capital);
+            // Personal history is evidence of exactly what the user wrote.
+            // Preserve its recorded casing at sentence starts; do not apply
+            // sentence-cap heuristics to rewrite a confirmed observation.
+            visibleWords[position]=confirmedNext && prefix.isEmpty()?candidate:
+                "de".equals(language)&&casing!=null && !confirmedNext?
+                    casing.apply(candidate,prefix,before,false):
+                    WordCase.display(candidate,prefix,before,capital);
         }
         for(int i=0;i<3;i++) {
             String value=visibleWords[i];

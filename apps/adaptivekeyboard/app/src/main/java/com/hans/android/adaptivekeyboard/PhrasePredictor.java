@@ -24,7 +24,10 @@ public final class PhrasePredictor {
         String previousContext=beforeCursor.substring(0,beforeCursor.length()-typedPrefix.length());
         List<String> out=new ArrayList<>(Math.min(3,maxPhrases));
         Set<String> seen=new HashSet<>();
-        boolean german="de".equals(LanguageContext.detect(beforeCursor));
+        TextContext context=TextContext.fromBeforeCursor(beforeCursor);
+        boolean opening=context.prefix.isEmpty() && context.previous.isEmpty() &&
+            context.beforePrevious.isEmpty();
+        boolean german=!opening && "de".equals(LanguageContext.detect(beforeCursor));
         for(String word:firstWords) {
             if(out.size()>=maxPhrases)break;
             if(!validWord(word))continue;
