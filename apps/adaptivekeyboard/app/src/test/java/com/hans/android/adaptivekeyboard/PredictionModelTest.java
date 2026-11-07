@@ -270,6 +270,31 @@ public class PredictionModelTest {
         assertEquals(3,new java.util.HashSet<>(ranked).size());
         assertEquals("wissen",ranked.get(0));
     }
+    @Test public void shortPrefixCacheDoesNotHideRarePersonalContext() {
+        PredictionModel m=new PredictionModel();
+        for(int i=0;i<1800;i++)m.addBaseWord("ab"+i,100+i,"de");
+        m.addBaseWord("aber",1,"de");
+        assertEquals("aber",m.predict("ab","","").get(0));
+        m.learnTyped("abgeordnetenhaus","bitte","das");
+        assertEquals("abgeordnetenhaus",m.predict("ab","bitte","das").get(0));
+        assertEquals("abgeordnetenhaus",m.predict("abg","bitte","das").get(0));
+    }
+    @Test public void clearingPrivateHistoryDoesNotDropBundledDictionary() {
+        PredictionModel m=new PredictionModel();
+        m.addBaseWord("Haus",2,"de");
+        m.learnSelection("hau","Haustier","mein","das");
+        m.learnTyped("Geheimwort","das","mein");
+        assertEquals("haustier",m.predict("hau","mein","das").get(0));
+        m.clearLearningData();
+        assertEquals("haus",m.predict("hau","mein","das").get(0));
+        assertTrue(m.predict("geheimw","das","mein").isEmpty());
+        assertEquals(1,m.size());
+    }
+    @Test(timeout=15000) public void longNonsensePrefixCannotTriggerUnboundedTypoScan() {
+        PredictionModel m=new PredictionModel();
+        for(int i=0;i<1600;i++)m.addBaseWord("aaaa"+i,300+i,"de");
+        for(int i=0;i<60;i++)m.predict("aaaaaaaaaaaaaaaaaaaaaaa","ich","bin");
+    }
     @Test public void longOrBlankTokensDoNotLearn() {
         PredictionModel m=new PredictionModel();
         assertNull(m.learnTyped("", "a", "b"));

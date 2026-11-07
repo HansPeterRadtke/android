@@ -26,6 +26,15 @@ public final class WordCaseTest {
         assertEquals("i",WordCase.display("i","i","",true));
         assertEquals("I",WordCase.display("i","","you and ",false));
     }
+    @Test public void abbreviationsAndDecimalsDoNotTriggerSpuriousCapitals() {
+        assertFalse(WordCase.sentenceStart("z. B. "));
+        assertFalse(WordCase.sentenceStart("Das ist z.B. "));
+        assertFalse(WordCase.sentenceStart("Etwas bzw. "));
+        assertFalse(WordCase.sentenceStart("Dr. "));
+        assertFalse(WordCase.sentenceStart("3.5 "));
+        assertTrue(WordCase.sentenceStart("Das ist richtig. "));
+        assertTrue(WordCase.sentenceStart("Wirklich? "));
+    }
     @Test public void germanCanonicalNounsRetainTheirCapitalWhenUnprefixed() {
         assertEquals("Haus",WordCase.display("Haus","","ich sehe ein ",false));
         assertEquals("schön",WordCase.display("schön","","das ist ",false));

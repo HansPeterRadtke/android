@@ -1,10 +1,14 @@
 package com.hans.android.adaptivekeyboard;
 
 import java.util.Locale;
+import java.util.Set;
 
 /** Predict word spelling separately from how the user entered its prefix. */
 public final class WordCase {
     private WordCase() { }
+    private static final Set<String> ABBREVIATIONS=Set.of(
+        "z.b.","u.a.","d.h.","bzw.","usw.","z.t.","ca.","etc.","dr.","prof.",
+        "mr.","mrs.","ms.","e.g.","i.e.","vs.","approx.");
 
     /** The part already typed is never re-cased or replaced by predictions. */
     public static String matchPrefix(String dictionaryWord,String typedPrefix) {
@@ -38,7 +42,15 @@ public final class WordCase {
               text.charAt(end)==')'))end--;
         if(end<0)return true;
         char ch=text.charAt(end);
-        if(ch=='.'||ch=='!'||ch=='?'||ch=='\u2026')return true;
+        if(ch=='.') {
+            String lower=text.substring(0,end+1).toLowerCase(Locale.GERMAN)
+                .replace(" ","");
+            for(String abbreviation:ABBREVIATIONS)
+                if(lower.endsWith(abbreviation))return false;
+            if(end>=1 && Character.isDigit(text.charAt(end-1)))return false;
+            return true;
+        }
+        if(ch=='!'||ch=='?'||ch=='\u2026')return true;
         return text.substring(0,end+1).lastIndexOf('\n')>=0 &&
             text.substring(text.lastIndexOf('\n')+1,end+1).trim().isEmpty();
     }

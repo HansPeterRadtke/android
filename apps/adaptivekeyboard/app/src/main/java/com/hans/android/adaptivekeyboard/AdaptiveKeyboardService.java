@@ -25,6 +25,7 @@ import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputContentInfo;
+import android.view.inputmethod.SurroundingText;
 import android.widget.GridLayout;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
@@ -49,6 +50,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.Map;
 import java.util.HashMap;
+import java.util.Collections;
 
 /** A stand-alone German QWERTZ IME. No network use outside the explicit GIF panel. */
 public final class AdaptiveKeyboardService extends InputMethodService {
@@ -67,20 +69,43 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(1),r -> {
             Thread t=new Thread(r,"keyboard-neural-predict");t.setDaemon(true);return t;
         },new ThreadPoolExecutor.DiscardOldestPolicy());
+    // Cheap word ranking must never run on the UI/input thread either.
+    private final ThreadPoolExecutor fastPredictWorker=new ThreadPoolExecutor(1,1,0L,
+        TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(1),r -> {
+            Thread t=new Thread(r,"keyboard-personal-predict");t.setDaemon(true);return t;
+        },new ThreadPoolExecutor.DiscardOldestPolicy());
+    private Runnable scheduledSnapshot,scheduledNeural;
+    private final java.util.ArrayList<TextView> letterViews=new java.util.ArrayList<>(40);
+    private final java.util.ArrayList<String> letterNames=new java.util.ArrayList<>(40);
+    private volatile int observedRevision=0;
+    private long uiKeyTotalNs,uiKeyMaxNs,uiCommitTotalNs,uiCommitMaxNs;
+    private int uiKeyCount,uiSelectionUpdates,uiSnapshotCount;
+    private int lastCandidateRevision=-1,lastNeuralRevision=-1;
+    private long uiSnapshotTotalNs,uiSnapshotMaxNs;
+    private static final int REFRESH_DELAY_MS=55,NEURAL_DELAY_MS=140;
     private volatile ChimeEnglish neuralModel;
     private volatile GermanNextWord germanNeuralModel;
     private volatile GermanCaseModel germanCaseModel;
-    private int predictionRevision=0;
+    private volatile int predictionRevision=0;
     private boolean manualShiftPending=false;
     private final android.util.LruCache<String,byte[]> previewCache =
         new android.util.LruCache<String,byte[]>(5_000_000) {
             @Override protected int sizeOf(String key,byte[] value) {return value.length;}
         };
-    private PredictionModel predictions;
+    private volatile PredictionModel predictions;
     private BaselineNgrams baselineNgrams;
+    // Preserve user events occurring while the private DB snapshot is loading.
+    private boolean modelCatchupEnabled=false;
+    private final java.util.ArrayList<java.util.function.Consumer<PredictionModel>>
+        modelCatchup=new java.util.ArrayList<>();
     private LearningDatabase database;
-    private LinearLayout root, suggestionRow, toolbar, keys, panel;
+    private LinearLayout root, suggestionRow, toolbar, keys, panel, phraseRow;
+    private FrameLayout detailFrame;
     private TextView caretIndicator;
+    private final TextView[] phraseViews=new TextView[3];
+    private final String[] visiblePhrases=new String[3];
+    private int lastPhraseRevision=-1;
+    private String phraseSource="";
     private TextView activeSpaceKey;
     private SpaceSwipe spaceSwipe;
     private Runnable spaceHold;
@@ -107,11 +132,13 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     @Override public void onCreate() {
         super.onCreate();active=this;
         predictions=new PredictionModel();database=new LearningDatabase(this);
-        reseed();
-        try {database.restore(predictions);} catch(Exception e) {android.util.Log.e("KontextTastatur","Learning DB load failed",e);}
-        // Parsing hundreds of thousands of offline ngrams can take multiple
-        // seconds on slower phones. Never block the IME's main/UI thread.
+        // Start the keyboard immediately; dictionary and personal history are
+        // staged in the background. Typing never waits for language preparation.
         languageWorker.execute(() -> {
+            PredictionModel readyPredictor=new PredictionModel();
+            loadLexicon(readyPredictor,"de_lexicon.json","de");
+            loadLexicon(readyPredictor,"en_lexicon.json","en");
+            readyPredictor.prepareForUse();
             BaselineNgrams loaded=new BaselineNgrams();
             for(String language:new String[]{"de","en"}) {
                 if(Thread.currentThread().isInterrupted())return;
@@ -142,21 +169,33 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             final ChimeEnglish ready=englishModel;
             final GermanNextWord germanReady=germanModel;
             final GermanCaseModel caseReady=caseModel;
+            readyPredictor.setBaselineNgrams(loaded);
             handler.post(() -> {
                 if(active!=this)return;
-                baselineNgrams=loaded;
-                predictions.setBaselineNgrams(loaded);
-                neuralModel=ready;
-                germanNeuralModel=germanReady;
-                germanCaseModel=caseReady;
-                refreshSuggestions();
-                android.util.Log.i("KontextTastatur","Offline ngram model loaded: "+loaded.size());
-                if(ready!=null)android.util.Log.i("KontextTastatur",
-                    "Offline English Chime neural model ready: "+ready.vocabularySize());
-                if(germanReady!=null)android.util.Log.i("KontextTastatur",
-                    "Offline German neural model ready: "+germanReady.vocabularySize());
-                if(caseReady!=null)android.util.Log.i("KontextTastatur",
-                    "Offline German context casing ready: "+caseReady.wordCount());
+                // All earlier writes precede this read on the disk executor.
+                // Events occurring after this marker are replayed on publish.
+                modelCatchupEnabled=true;
+                modelCatchup.clear();
+                database.restoreAsync(readyPredictor,() -> handler.post(() -> {
+                    if(active!=this)return;
+                    for(java.util.function.Consumer<PredictionModel> action:modelCatchup)
+                        action.accept(readyPredictor);
+                    modelCatchup.clear();modelCatchupEnabled=false;
+                    predictions=readyPredictor;
+                    baselineNgrams=loaded;
+                    neuralModel=ready;
+                    germanNeuralModel=germanReady;
+                    germanCaseModel=caseReady;
+                    refreshSuggestions();
+                    android.util.Log.i("KontextTastatur","Offline language model ready: "+
+                        loaded.size()+" ngrams, "+readyPredictor.size()+" words");
+                    if(ready!=null)android.util.Log.i("KontextTastatur",
+                        "Offline English Chime neural model ready: "+ready.vocabularySize());
+                    if(germanReady!=null)android.util.Log.i("KontextTastatur",
+                        "Offline German neural model ready: "+germanReady.vocabularySize());
+                    if(caseReady!=null)android.util.Log.i("KontextTastatur",
+                        "Offline German context casing ready: "+caseReady.wordCount());
+                }));
             });
         });
         refreshSettings();
@@ -169,7 +208,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         sendWorker.shutdownNow();
         languageWorker.shutdownNow();
         neuralWorker.shutdownNow();
+        fastPredictWorker.shutdownNow();
         neuralModel=null;germanNeuralModel=null;germanCaseModel=null;
+        modelCatchup.clear();modelCatchupEnabled=false;
         if(database!=null) database.close();
         if(active==this) active=null;
         super.onDestroy();
@@ -182,9 +223,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     public static void clearLearning(Context c) {
         if(active!=null) {
-            active.predictions=new PredictionModel();
-            active.predictions.setBaselineNgrams(active.baselineNgrams);
-            active.reseed();
+            active.predictions.clearLearningData();
+            if(active.modelCatchupEnabled)
+                active.modelCatchup.add(PredictionModel::clearLearningData);
             active.recentEvent=null;
             active.database.clearLearning();
             active.refreshSuggestions();
@@ -192,17 +233,13 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             new LearningDatabase(c).clearLearning();
         }
     }
-    private void reseed() {
-        loadLexicon("de_lexicon.json","de");
-        loadLexicon("en_lexicon.json","en");
-    }
-    private void loadLexicon(String name,String language) {
+    private void loadLexicon(PredictionModel target,String name,String language) {
         try (java.io.InputStream in=getAssets().open(name)) {
             java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream();
             byte[] b=new byte[8192];int n;
             while((n=in.read(b))!=-1)out.write(b,0,n);
             JSONArray ws=new JSONObject(out.toString("UTF-8")).getJSONArray("words");
-            for(int i=0;i<ws.length();i++)predictions.addBaseWord(ws.getString(i),i,language);
+            for(int i=0;i<ws.length();i++)target.addBaseWord(ws.getString(i),i,language);
         } catch(Exception e) {android.util.Log.e("KontextTastatur","Lexicon load failed: "+language,e);}
     }
     private boolean editorWantsCapitalization() {
@@ -213,19 +250,25 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         InputConnection ic=getCurrentInputConnection();
         return ic!=null && ic.getCursorCapsMode(flags)!=0;
     }
-    /** Re-evaluate sentence auto-capitalization after an edit or cursor move. */
-    private void updateAutoShift() {
-        if(caps || manualShiftPending || !"letters".equals(mode) || info==null)return;
-        InputConnection ic=getCurrentInputConnection();
-        if(ic==null)return;
-        CharSequence previous=ic.getTextBeforeCursor(200,0);
-        if(previous==null)return;
-        if(!TextContext.fromBeforeCursor(previous).prefix.isEmpty())return;
-        boolean desired=editorWantsCapitalization() || WordCase.sentenceStart(previous.toString());
-        if(desired!=shift) {
-            shift=desired;
-            if(keys!=null)renderKeyboard();
+    /** Update only letter labels, never rebuild the complete keyboard on shift. */
+    private void updateShiftLabels() {
+        for(int i=0;i<letterViews.size();i++) {
+            String original=letterNames.get(i);
+            String label=(shift||caps)?(original.equals("ß")?"ẞ":
+                original.toUpperCase(Locale.GERMAN)):original;
+            TextView key=letterViews.get(i);
+            if(!label.contentEquals(key.getText()))key.setText(label);
+            String favorite=KeyPriority.favorite(original,shift||caps);
+            if(favorite!=null)key.setContentDescription(label+
+                "; lange halten für "+favorite+"; nach oben für weitere Sonderzeichen");
         }
+    }
+    /** Uses already available surrounding text; no editor IPC round trip. */
+    private void updateAutoShiftFromText(String before) {
+        if(caps||manualShiftPending||!"letters".equals(mode))return;
+        if(!TextContext.fromBeforeCursor(before).prefix.isEmpty())return;
+        boolean desired=WordCase.sentenceStart(before);
+        if(desired!=shift){shift=desired;updateShiftLabels();}
     }
     private boolean neuralEnabled() {
         return getSharedPreferences("keyboard_settings",0).getBoolean("neural_predictions",true);
@@ -267,16 +310,35 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             suggestionRow.addView(v,p);suggestions[i]=v;
             v.setOnClickListener(w -> chooseSuggestion(pos));
         }
-        caretIndicator=button("",13,0xff24313c,28);
-        caretIndicator.setGravity(Gravity.CENTER_VERTICAL|Gravity.CENTER_HORIZONTAL);
-        caretIndicator.setVisibility(View.GONE);
+        // The second prediction row shows actual multiword completions.
+        // A compact caret preview replaces it only when editing *inside* a word.
+        detailFrame=new FrameLayout(this);
+        phraseRow=new LinearLayout(this);
+        phraseRow.setGravity(Gravity.CENTER_VERTICAL);
+        detailFrame.addView(phraseRow,new FrameLayout.LayoutParams(-1,dp(38)));
+        for(int index=0;index<3;index++) {
+            final int slot=index;
+            TextView choice=button("",13,0xff24313c,36);
+            choice.setSingleLine(true);
+            choice.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,dp(36),1);
+            params.setMargins(dp(2),0,dp(2),0);
+            phraseRow.addView(choice,params);
+            phraseViews[index]=choice;
+            choice.setOnClickListener(v -> choosePhrase(slot));
+        }
+        caretIndicator=button("",13,0xff24313c,38);
+        caretIndicator.setSingleLine(true);
+        caretIndicator.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        caretIndicator.setVisibility(View.INVISIBLE);
+        detailFrame.addView(caretIndicator,new FrameLayout.LayoutParams(-1,dp(38)));
         caretIndicator.setOnClickListener(v -> {
             if(CursorNavigator.collapseToEnd(getCurrentInputConnection())) {
                 if(Build.VERSION.SDK_INT>=31)getCurrentInputConnection().setImeConsumesInput(false);
                 refreshSuggestions();
             }
         });
-        root.addView(caretIndicator,new LinearLayout.LayoutParams(-1,dp(28)));
+        root.addView(detailFrame,new LinearLayout.LayoutParams(-1,dp(38)));
         toolbar=new LinearLayout(this);toolbar.setGravity(Gravity.CENTER);
         root.addView(toolbar,new LinearLayout.LayoutParams(-1,dp(37)));
         panel=new LinearLayout(this);panel.setOrientation(LinearLayout.VERTICAL);panel.setVisibility(View.GONE);
@@ -294,12 +356,14 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             cls == InputType.TYPE_CLASS_DATETIME) ? "numbers" : "letters";
         shift=false;caps=false;manualShiftPending=false;gifQuery="";
         searchRevision++;predictionRevision++;recentEvent=null;
+        lastPhraseRevision=-1;phraseSource="";
+        clearPhrases();
         if(root!=null){renderToolbar();renderKeyboard();refreshSuggestions();}
     }
     @Override public void onStartInputView(EditorInfo attribute, boolean restarting) {
         super.onStartInputView(attribute,restarting);
         info=attribute;sensitive=isPrivateField(attribute);
-        if(!caps){manualShiftPending=false;updateAutoShift();}
+        if(!caps)manualShiftPending=false;
         InputConnection ic=getCurrentInputConnection();
         if(Build.VERSION.SDK_INT>=31 && ic!=null)ic.setImeConsumesInput(false);
         refreshSettings();refreshSuggestions();
@@ -307,9 +371,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     @Override public void onUpdateSelection(int oldStart,int oldEnd,int newStart,int newEnd,int candidatesStart,int candidatesEnd) {
         super.onUpdateSelection(oldStart,oldEnd,newStart,newEnd,candidatesStart,candidatesEnd);
         if(root!=null && "letters".equals(mode)) {
-            InputConnection ic=getCurrentInputConnection();
-            if(Build.VERSION.SDK_INT>=31 && ic!=null)ic.setImeConsumesInput(false);
-            updateAutoShift();
+            uiSelectionUpdates++;
+            // Selection notifications arrive after our own commits. Collapse
+            // them with the pending keypress update; do not query editor here.
             refreshSuggestions();
         }
     }
@@ -368,67 +432,206 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 ?"commons":"giphy";
             gifRating=getSharedPreferences("keyboard_settings",0).getString("giphy_rating","r");
         }
+        if(!"letters".equals(mode))clearPhrases();
         renderKeyboard();refreshSuggestions();
     }
+    private static final class EditorSnapshot {
+        final String before,after;
+        final boolean selection;
+        EditorSnapshot(String before,String after,boolean selection) {
+            this.before=before;this.after=after;this.selection=selection;
+        }
+    }
+
+    /** Single editor transaction instead of three to seven IPC calls. */
+    private EditorSnapshot captureEditor(InputConnection ic) {
+        if(Build.VERSION.SDK_INT>=31) {
+            SurroundingText s=ic.getSurroundingText(350,24,0);
+            if(s!=null && s.getText()!=null) {
+                String content=s.getText().toString();
+                int start=Math.max(0,Math.min(content.length(),s.getSelectionStart()));
+                int end=Math.max(0,Math.min(content.length(),s.getSelectionEnd()));
+                return new EditorSnapshot(content.substring(0,Math.min(start,end)),
+                    content.substring(Math.max(start,end)),start!=end);
+            }
+        }
+        // Compatibility with old or custom InputConnections.
+        CharSequence b=ic.getTextBeforeCursor(350,0);
+        CharSequence a=ic.getTextAfterCursor(24,0);
+        CharSequence selected=ic.getSelectedText(0);
+        return new EditorSnapshot(b==null?"":b.toString(),a==null?"":a.toString(),
+            selected!=null && selected.length()>0);
+    }
+
+    /** Debounced scheduling only: never rank words or query editor on keypress. */
     private void refreshSuggestions() {
         final int revision=++predictionRevision;
-        if(suggestions[0]==null)return;
-        updateCaretIndicator();
-        List<String> ranked=new ArrayList<>();
-        String rawBefore=null,rawPrefix="",prev="",prev2="",language="de";
-        boolean canPredict=!sensitive && !privateMode && "letters".equals(mode);
-        if(canPredict) {
-            InputConnection ic=getCurrentInputConnection();
-            if(ic!=null) {
-                CharSequence selection=ic.getSelectedText(0);
-                CharSequence after=ic.getTextAfterCursor(1,0);
-                boolean selectionActive=selection!=null && selection.length()>0;
-                CharSequence before=ic.getTextBeforeCursor(350,0);
-                String beforeStr=before==null?"":before.toString();
-                boolean insideWord=after!=null && after.length()>0 &&
-                    Character.isLetter(after.charAt(0)) &&
-                    !TextContext.fromBeforeCursor(beforeStr).prefix.isEmpty();
-                if(!selectionActive && !insideWord) {
-                    TextContext c=TextContext.fromBeforeCursor(beforeStr);
-                    rawBefore=beforeStr;rawPrefix=c.prefix;prev=c.previous;prev2=c.beforePrevious;
-                    language=LanguageContext.detect(beforeStr);
-                    ranked=predictions.predict(rawPrefix,prev,prev2,
-                        java.util.Collections.emptyMap(),language);
-                    updateSuggestionButtons(ranked,rawPrefix,rawBefore,editorWantsCapitalization());
-                } else {
-                    updateSuggestionButtons(ranked,"",beforeStr,false);
-                }
-            } else updateSuggestionButtons(ranked,"","",false);
-        } else updateSuggestionButtons(ranked,"","",false);
-        if(rawBefore==null || !neuralEnabled())return;
-        final boolean english="en".equals(language);
-        final ChimeEnglish englishModel=neuralModel;
-        final GermanNextWord germanModel=germanNeuralModel;
-        if((english && englishModel==null)||(!english && germanModel==null))return;
-        final String snapshot=rawBefore;
-        final String prefix=rawPrefix, a=prev, b=prev2, lang=language;
-        final boolean capital=editorWantsCapitalization();
-        neuralWorker.execute(() -> {
-            if(revision!=predictionRevision || Thread.currentThread().isInterrupted())return;
-            Map<String,Double> hints;
-            try {
-                if(english) hints=neuralScores(englishModel.predict(snapshot,10));
-                else hints=germanNeuralScores(germanModel.predict(snapshot,15));
-            } catch(Exception ex) {
-                android.util.Log.w("KontextTastatur","Offline neural inference unavailable",ex);
+        if(scheduledSnapshot!=null)handler.removeCallbacks(scheduledSnapshot);
+        if(scheduledNeural!=null)handler.removeCallbacks(scheduledNeural);
+        scheduledSnapshot=() -> calculateSuggestions(revision);
+        handler.postDelayed(scheduledSnapshot,REFRESH_DELAY_MS);
+    }
+
+    /** No blocking editor IPC is allowed on the keyboard input/UI thread. */
+    private void calculateSuggestions(int revision) {
+        if(revision!=predictionRevision || active!=this || suggestions[0]==null)return;
+        if(sensitive || privateMode || !"letters".equals(mode)) {
+            if(caretIndicator!=null)caretIndicator.setVisibility(View.INVISIBLE);
+            clearPhrases();
+            updateSuggestionButtons(Collections.emptyList(),"","",false,revision);
+            return;
+        }
+        // Capture the connection reference on the UI thread, then read its
+        // surrounding text on a dedicated worker. Remote editors can stall a
+        // read for hundreds of milliseconds; never make typing wait for it.
+        final InputConnection ic=getCurrentInputConnection();
+        if(ic==null)return;
+        fastPredictWorker.execute(() -> {
+            if(revision!=predictionRevision)return;
+            long started=android.os.SystemClock.elapsedRealtimeNanos();
+            EditorSnapshot snapshot;
+            try {snapshot=captureEditor(ic);}
+            catch(Exception ex) {
+                android.util.Log.w("KontextTastatur","Editor snapshot unavailable",ex);
                 return;
             }
+            long took=android.os.SystemClock.elapsedRealtimeNanos()-started;
             if(revision!=predictionRevision)return;
-            List<String> mixed=predictions.predict(prefix,a,b,hints,lang);
+            String before=snapshot.before;
+            boolean insideWord=!before.isEmpty()&&!snapshot.after.isEmpty() &&
+                Character.isLetter(before.charAt(before.length()-1)) &&
+                Character.isLetter(snapshot.after.charAt(0));
+            TextContext context=TextContext.fromBeforeCursor(before);
+            String language=LanguageContext.detect(before);
+            List<String> ranked=(snapshot.selection||insideWord)?Collections.emptyList():
+                predictions.predict(context.prefix,context.previous,context.beforePrevious,
+                    Collections.emptyMap(),language);
+            // Paint the single-word results before doing any phrase generation.
+            // Phrase predictions must never delay either typing or the top row.
             handler.post(() -> {
-                if(active==this && revision==predictionRevision && !sensitive && !privateMode &&
-                    "letters".equals(mode))updateSuggestionButtons(mixed,prefix,snapshot,capital);
+                if(active!=this || revision!=predictionRevision)return;
+                uiSnapshotCount++;uiSnapshotTotalNs+=took;
+                uiSnapshotMaxNs=Math.max(uiSnapshotMaxNs,took);
+                updateCaretIndicator(snapshot.before,snapshot.after,snapshot.selection);
+                updateAutoShiftFromText(snapshot.before);
+                updateSuggestionButtons(ranked,context.prefix,before,false,revision);
+                if(snapshot.selection||insideWord)
+                    updatePhraseButtons(Collections.emptyList(),before,revision);
+            });
+            if(!snapshot.selection && !insideWord && !ranked.isEmpty()) {
+                final String lang=language;
+                List<String> quickPhrases=PhrasePredictor.complete(before,ranked,
+                    (seed,limit) -> {
+                        if(revision!=predictionRevision)return Collections.emptyList();
+                        TextContext following=TextContext.fromBeforeCursor(seed);
+                        return predictions.predict("",following.previous,following.beforePrevious,
+                            Collections.emptyMap(),lang);
+                    },(word,prefix,seed) -> formatCandidate(word,prefix,seed,lang),3);
+                handler.post(() -> {
+                    if(active==this && revision==predictionRevision && lastNeuralRevision!=revision)
+                        updatePhraseButtons(quickPhrases,before,revision);
+                });
+            } else if(!snapshot.selection && !insideWord) {
+                handler.post(() -> {
+                    if(active==this && revision==predictionRevision && lastNeuralRevision!=revision)
+                        updatePhraseButtons(Collections.emptyList(),before,revision);
+                });
+            }
+            if(snapshot.selection||insideWord||!neuralEnabled())return;
+            ChimeEnglish en=neuralModel;
+            GermanNextWord de=germanNeuralModel;
+            if(("en".equals(language)&&en==null)||("de".equals(language)&&de==null))return;
+            handler.post(() -> {
+                if(revision!=predictionRevision)return;
+                scheduledNeural=() -> {
+                    if(revision!=predictionRevision)return;
+                    neuralWorker.execute(() -> {
+                        if(revision!=predictionRevision)return;
+                        Map<String,Double> scores;
+                        try {
+                            scores="en".equals(language)?neuralScores(en.predict(before,10)):
+                                germanNeuralScores(de.predict(before,15));
+                        } catch(Exception error) {
+                            android.util.Log.w("KontextTastatur","Neural inference unavailable",error);
+                            return;
+                        }
+                        if(revision!=predictionRevision)return;
+                        List<String> mixed=predictions.predict(context.prefix,context.previous,
+                            context.beforePrevious,scores,language);
+                        handler.post(() -> {
+                            if(active==this&&revision==predictionRevision&&!sensitive&&!privateMode &&
+                                "letters".equals(mode)) {
+                                lastNeuralRevision=revision;
+                                updateSuggestionButtons(mixed,context.prefix,before,false,revision);
+                            }
+                        });
+                        if(revision!=predictionRevision)return;
+                        PhrasePredictor.Continuations follow=(seed,limit) -> {
+                            if(revision!=predictionRevision)return Collections.emptyList();
+                            try {
+                                List<String> words=new ArrayList<>(limit);
+                                if("en".equals(language)) {
+                                    for(ChimeEnglish.Candidate candidate:en.predict(seed,limit))
+                                        words.add(candidate.word);
+                                } else {
+                                    for(GermanNextWord.Candidate candidate:de.predict(seed,limit))
+                                        words.add(candidate.word);
+                                }
+                                return words;
+                            } catch(Exception e) {return Collections.emptyList();}
+                        };
+                        List<String> multi=PhrasePredictor.complete(before,mixed,follow,
+                            (word,prefix,seed)->formatCandidate(word,prefix,seed,language),3);
+                        if(revision!=predictionRevision)return;
+                        handler.post(() -> {
+                            if(active==this && revision==predictionRevision && !sensitive && !privateMode)
+                                updatePhraseButtons(multi,before,revision);
+                        });
+                    });
+                };
+                handler.postDelayed(scheduledNeural,
+                    context.prefix.isEmpty()?65:NEURAL_DELAY_MS);
             });
         });
     }
 
+    /** Casing is resolved for each word against the exact preceding phrase. */
+    private String formatCandidate(String word,String typedPrefix,String before,String language) {
+        GermanCaseModel casing=germanCaseModel;
+        return "de".equals(language)&&casing!=null ?
+            casing.apply(word,typedPrefix,before,false):
+            WordCase.display(word,typedPrefix,before,false);
+    }
+    private void updatePhraseButtons(List<String> phrases,String before,int revision) {
+        if(phraseRow==null||revision!=predictionRevision)return;
+        lastPhraseRevision=revision;
+        phraseSource=before;
+        for(int i=0;i<3;i++) {
+            String phrase=phrases!=null&&i<phrases.size()?phrases.get(i):"";
+            visiblePhrases[i]=phrase;
+            TextView view=phraseViews[i];
+            if(view!=null) {
+                view.setText(phrase);
+                view.setContentDescription(phrase);
+                view.setEnabled(!phrase.isEmpty());
+            }
+        }
+    }
+    private void clearPhrases() {
+        lastPhraseRevision=-1;
+        phraseSource="";
+        for(int i=0;i<3;i++) {
+            visiblePhrases[i]="";
+            if(phraseViews[i]!=null) {
+                phraseViews[i].setText("");phraseViews[i].setEnabled(false);
+            }
+        }
+    }
+
     /** The middle slot remains highest ranked; apply case only at display time. */
-    private void updateSuggestionButtons(List<String> ranked,String prefix,String before,boolean capital) {
+    private void updateSuggestionButtons(List<String> ranked,String prefix,String before,
+                                         boolean capital,int revision) {
+        lastCandidateRevision=revision;
         if(suggestions[0]==null)return;
         String language=LanguageContext.detect(before);
         GermanCaseModel casing=germanCaseModel;
@@ -449,37 +652,33 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             suggestions[i].setEnabled(!value.isEmpty());
         }
     }
-    private void updateCaretIndicator() {
+    /** Display a caret only for midword editing or selected text. */
+    private void updateCaretIndicator(String before,String after,boolean selected) {
         if(caretIndicator==null)return;
-        if(sensitive || !"letters".equals(mode)) {
-            caretIndicator.setVisibility(View.GONE);
+        boolean inside=!before.isEmpty() && !after.isEmpty() &&
+            Character.isLetter(before.charAt(before.length()-1)) &&
+            Character.isLetter(after.charAt(0));
+        if(sensitive || !"letters".equals(mode) || (!selected && !inside)) {
+            caretIndicator.setVisibility(View.INVISIBLE);
+            if(phraseRow!=null)phraseRow.setVisibility(View.VISIBLE);
             return;
         }
-        InputConnection ic=getCurrentInputConnection();
-        if(ic==null){caretIndicator.setVisibility(View.GONE);return;}
-        CharSequence selected=ic.getSelectedText(0);
-        if(selected!=null && selected.length()>0) {
-            caretIndicator.setText("Markierung: "+selected.length()+" Zeichen · Tippen: Cursor am Ende");
-            caretIndicator.setVisibility(View.VISIBLE);
-            return;
+        if(selected)caretIndicator.setText("Markierter Text │ Cursor setzen");
+        else {
+            String a=before.substring(Math.max(0,before.length()-16));
+            String b=after.substring(0,Math.min(after.length(),16));
+            caretIndicator.setText((before.length()>16?"…":"")+a+"│"+b+
+                (after.length()>16?"…":""));
         }
-        CharSequence left=ic.getTextBeforeCursor(16,0);
-        CharSequence right=ic.getTextAfterCursor(16,0);
-        String a=left==null?"":left.toString(),b=right==null?"":right.toString();
-        if(a.isEmpty() && b.isEmpty()) {
-            caretIndicator.setVisibility(View.GONE);
-            return;
-        }
-        String leftExcerpt=(a.length()>=16?"…":"")+a;
-        String rightExcerpt=b+(b.length()>=16?"…":"");
-        caretIndicator.setText(leftExcerpt+"│"+rightExcerpt+
-            "   ·   Leertaste halten: Cursor bewegen");
+        if(phraseRow!=null)phraseRow.setVisibility(View.INVISIBLE);
         caretIndicator.setVisibility(View.VISIBLE);
     }
 
     private void chooseSuggestion(int position) {
         String chosen=visibleWords[position];
-        if(chosen==null||chosen.isEmpty()||privateMode||sensitive)return;
+        // Never commit a suggestion from an obsolete cursor or word prefix.
+        if(chosen==null||chosen.isEmpty()||privateMode||sensitive ||
+            lastCandidateRevision!=predictionRevision)return;
         InputConnection ic=getCurrentInputConnection();if(ic==null)return;
         TextContext ctx=TextContext.fromBeforeCursor(ic.getTextBeforeCursor(500,0));
         CharSequence selection=ic.getSelectedText(0);
@@ -489,14 +688,54 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         ic.endBatchEdit();
         PredictionModel.Event e=predictions.learnSelection(ctx.prefix,chosen,ctx.previous,ctx.beforePrevious);
         database.persist(e,chosen,1);
+        catchupChoice(e,chosen);
         recentEvent=e;recentSurface=chosen;recentAt=System.currentTimeMillis();
         manualShiftPending=false;
-        shift=false;updateAutoShift();refreshSuggestions();
+        shift=false;updateAutoShiftFromText(chosen+" ");refreshSuggestions();
+    }
+    private void choosePhrase(int position) {
+        if(position<0 || position>=visiblePhrases.length ||
+            privateMode||sensitive ||lastPhraseRevision!=predictionRevision)return;
+        String selected=visiblePhrases[position];
+        String[] parts=PhrasePredictor.words(selected);
+        if(parts.length<2)return;
+        InputConnection ic=getCurrentInputConnection();if(ic==null)return;
+        CharSequence beforeChars=ic.getTextBeforeCursor(350,0);
+        String before=beforeChars==null?"":beforeChars.toString();
+        // A phrase must come from the actual current cursor context.
+        if(!before.equals(phraseSource))return;
+        CharSequence selection=ic.getSelectedText(0);
+        if(selection!=null && selection.length()>0)return;
+        CharSequence after=ic.getTextAfterCursor(1,0);
+        TextContext context=TextContext.fromBeforeCursor(before);
+        if(after!=null && after.length()>0 && Character.isLetter(after.charAt(0)) &&
+            !context.prefix.isEmpty())return;
+        ic.beginBatchEdit();
+        if(!context.prefix.isEmpty())ic.deleteSurroundingText(context.prefix.length(),0);
+        ic.commitText(selected+" ",1);
+        ic.endBatchEdit();
+        String prev=context.previous,prev2=context.beforePrevious;
+        PredictionModel.Event last=null;
+        for(int index=0;index<parts.length;index++) {
+            String word=parts[index];
+            PredictionModel.Event event=predictions.learnSelection(
+                index==0?context.prefix:"",word,prev,prev2);
+            database.persist(event,word,1);
+            catchupChoice(event,word);
+            prev2=prev;prev=word;
+            last=event;
+        }
+        recentEvent=last;recentSurface=parts[parts.length-1];
+        recentAt=System.currentTimeMillis();
+        manualShiftPending=false;shift=false;
+        updateAutoShiftFromText(before+selected+" ");
+        refreshSuggestions();
     }
     private long lastShiftAt=0;
     private void renderKeyboard() {
         if(keys==null || panel==null)return;
-        keys.removeAllViews();panel.removeAllViews();panel.setVisibility(View.GONE);
+        keys.removeAllViews();letterViews.clear();letterNames.clear();
+        panel.removeAllViews();panel.setVisibility(View.GONE);
         if(mode.equals("emoji")){showEmojiPanel();return;}
         if(mode.equals("clipboard")){showClipboardPanel();return;}
         if(mode.equals("gif"))showGifPanel();
@@ -536,14 +775,14 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 original.equals("⌫")||original.equals("⇧")||original.equals("↵")?PRESSED:KEY,45);
             LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(45),widths==null?1:widths[i]);
             p.setMargins(dp(2),dp(1),dp(2),dp(1));row.addView(v,p);
+            if(character) {letterViews.add(v);letterNames.add(original);}
             v.setOnClickListener(w -> press(original));
             if("Leerzeichen".equals(original)) {
                 v.setContentDescription("Leerzeichen. Halten und links oder rechts schieben, um den Cursor zu bewegen.");
                 v.setOnTouchListener(this::spaceTouch);
             }
-            String favorite=KeyPriority.favorite(original,shift||caps);
+            String favorite=KeyPriority.favorite(original,false);
             if(favorite!=null) {
-                String[] choices=KeyPriority.alternatives(original,shift||caps);
                 // Release after an extended hold inserts the preferred umlaut.
                 // Drag UP while holding to access the less frequently used popup.
                 v.setContentDescription(output+"; lange halten für "+favorite+
@@ -562,7 +801,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                                 if(!submenu && downY-event.getY()>dp(36)) {
                                     submenu=true;
                                     PopupMenu popup=new PopupMenu(AdaptiveKeyboardService.this,v);
-                                    for(String choice:choices)popup.getMenu().add(choice);
+                                    for(String choice:KeyPriority.alternatives(original,shift||caps))
+                                        popup.getMenu().add(choice);
                                     popup.setOnMenuItemClickListener(item -> {
                                         enterLetter(item.getTitle().toString());return true;
                                     });
@@ -682,7 +922,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 if(System.currentTimeMillis()-lastShiftAt<420) {caps=!caps;shift=caps;}
                 else {shift=!shift;caps=false;}
                 manualShiftPending=true;
-                lastShiftAt=System.currentTimeMillis();renderKeyboard();break;
+                lastShiftAt=System.currentTimeMillis();updateShiftLabels();break;
             case "⌫":backspace();break;
             case "?123":mode="symbols";renderKeyboard();refreshSuggestions();break;
             case "ABC":mode="letters";renderKeyboard();refreshSuggestions();break;
@@ -695,37 +935,48 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 else enterLetter((shift||caps)?(key.equals("ß")?"ẞ":key.toUpperCase(Locale.GERMAN)):key);
         }
     }
+    /** The input path commits a character immediately; prediction is deferred. */
     private void enterLetter(String letter) {
         if(mode.equals("gif")) {
             gifQuery+=letter.toLowerCase(Locale.GERMAN);
             updateGifStatus();return;
         }
+        long startedNs=android.os.SystemClock.elapsedRealtimeNanos();
         InputConnection ic=getCurrentInputConnection();if(ic==null)return;
-        // A visible completion that the next character contradicts is a weak
-        // negative signal. Continuing to type NEVER counts as a selection.
-        if(!privateMode&&!sensitive && mode.equals("letters") && letter.length()==1 &&
-            (Character.isLetter(letter.charAt(0)) || letter.equals("'"))) {
-            CharSequence before=ic.getTextBeforeCursor(400,0);
-            TextContext context=TextContext.fromBeforeCursor(before);
-            String newPrefix=TextContext.normalize(context.prefix+letter);
-            if(context.prefix.length()>=2 &&
-                (ic.getSelectedText(0)==null||ic.getSelectedText(0).length()==0)) {
-                for(String suggestion:visibleWords) {
-                    if(suggestion==null||suggestion.isEmpty())continue;
-                    String old=TextContext.normalize(suggestion);
-                    if(old.startsWith(TextContext.normalize(context.prefix)) && !old.startsWith(newPrefix)) {
-                        PredictionModel.Rejection r=predictions.learnRejection(
-                            context.prefix,suggestion,context.previous,context.beforePrevious);
-                        database.persistRejection(r);
-                    }
-                }
-            }
-        }
         ic.commitText(letter,1);
+        long committedNs=android.os.SystemClock.elapsedRealtimeNanos()-startedNs;
+        uiCommitTotalNs+=committedNs;uiCommitMaxNs=Math.max(uiCommitMaxNs,committedNs);
         manualShiftPending=false;
         recentEvent=null;
-        if(shift&&!caps && !letter.equals("'")) {shift=false;renderKeyboard();}
+        if(shift&&!caps && !letter.equals("'")) {shift=false;updateShiftLabels();}
         refreshSuggestions();
+        recordInputTime(startedNs);
+    }
+    private void catchupTyped(PredictionModel.Event event,String surface) {
+        if(modelCatchupEnabled && event!=null)
+            modelCatchup.add(model -> model.learnTyped(surface,event.previous,event.beforePrevious));
+    }
+    private void catchupChoice(PredictionModel.Event event,String surface) {
+        if(modelCatchupEnabled && event!=null)
+            modelCatchup.add(model -> model.learnSelection(event.prefix,surface,
+                event.previous,event.beforePrevious));
+    }
+    private void catchupUndo(PredictionModel.Event event) {
+        if(modelCatchupEnabled && event!=null)
+            modelCatchup.add(model -> model.undo(event));
+    }
+    private void recordInputTime(long startedNs) {
+        long nanos=android.os.SystemClock.elapsedRealtimeNanos()-startedNs;
+        uiKeyTotalNs+=nanos;uiKeyMaxNs=Math.max(uiKeyMaxNs,nanos);uiKeyCount++;
+        if(uiKeyCount%25==0)android.util.Log.i("KeyboardPerf",
+            "keys="+uiKeyCount+" mean_input_ms="+
+                (uiKeyTotalNs/uiKeyCount/1_000_000.0)+" max_input_ms="+
+                (uiKeyMaxNs/1_000_000.0)+" mean_commit_ms="+
+                (uiCommitTotalNs/uiKeyCount/1_000_000.0)+" max_commit_ms="+
+                (uiCommitMaxNs/1_000_000.0)+" selection_events="+uiSelectionUpdates+
+                " snapshots="+uiSnapshotCount+" mean_snapshot_ms="+
+                (uiSnapshotCount==0?0:uiSnapshotTotalNs/uiSnapshotCount/1_000_000.0)+
+                " max_snapshot_ms="+(uiSnapshotMaxNs/1_000_000.0));
     }
     private void enterDelimiter(String symbol) {
         if(mode.equals("gif")) {
@@ -740,6 +991,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             (ic.getSelectedText(0)==null || ic.getSelectedText(0).length()==0)) {
             PredictionModel.Event e=predictions.learnTyped(c.prefix,c.previous,c.beforePrevious);
             database.persist(e,c.prefix,1);
+            catchupTyped(e,c.prefix);
             recentEvent=e;recentSurface=c.prefix;recentAt=System.currentTimeMillis();
         }
         if(symbol.equals("\n")) {
@@ -749,7 +1001,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 ic.performEditorAction(action);
             } else ic.commitText("\n",1);
             manualShiftPending=false;
-            updateAutoShift();
+            updateAutoShiftFromText((before==null?"":before.toString())+"\n");
         } else {
             if(symbol.equals(" ") && before!=null && before.length()>0 && before.charAt(before.length()-1)==' ') {
                 // No unexpected duplicate spaces after accepting a suggestion.
@@ -760,9 +1012,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             }
             manualShiftPending=false;
             // Use the newly committed editor contents, not the old cursor mode.
-            updateAutoShift();
+            updateAutoShiftFromText((before==null?"":before.toString())+symbol);
         }
-        if(shift&&!caps)renderKeyboard();
         refreshSuggestions();
     }
     private boolean isAtWordEnd(InputConnection ic) {
@@ -788,6 +1039,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 !recentSurface.isEmpty() && before.toString().endsWith(recentSurface);
             if(deletingFromConfirmedWord) {
                 predictions.undo(recentEvent);
+                catchupUndo(recentEvent);
                 database.persist(recentEvent,recentSurface,-1);
             }
             if (deletingFromConfirmedWord) recentEvent=null;

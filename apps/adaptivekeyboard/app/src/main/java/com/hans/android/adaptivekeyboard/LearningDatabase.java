@@ -56,6 +56,20 @@ public final class LearningDatabase extends SQLiteOpenHelper {
         }
     }
 
+    /** Serialized behind pending writes, then restores without blocking the keyboard. */
+    public void restoreAsync(PredictionModel target, Runnable finished) {
+        disk.execute(() -> {
+            try {
+                restore(target);
+                target.prepareForUse();
+            } catch(Exception error) {
+                android.util.Log.e("KontextTastatur","Private learning restore failed",error);
+            } finally {
+                finished.run();
+            }
+        });
+    }
+
     public void persist(PredictionModel.Event e, String surface, int delta) {
         if (e == null) return;
         disk.execute(() -> {
@@ -145,5 +159,13 @@ public final class LearningDatabase extends SQLiteOpenHelper {
     public void clearClipboard() {
         disk.execute(() -> getWritableDatabase().delete("clipboard",null,null));
     }
-    @Override public synchronized void close() { disk.shutdown(); super.close(); }
+    private final java.util.concurrent.atomic.AtomicBoolean closed=
+        new java.util.concurrent.atomic.AtomicBoolean(false);
+    @Override public void close() {
+        if(!closed.compareAndSet(false,true))return;
+        // Do not close SQLite while queued learning writes or an async restore
+        // are still executing. This also keeps service teardown non-blocking.
+        disk.execute(() -> LearningDatabase.super.close());
+        disk.shutdown();
+    }
 }

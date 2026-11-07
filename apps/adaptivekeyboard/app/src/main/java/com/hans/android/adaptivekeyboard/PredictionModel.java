@@ -3,6 +3,7 @@ package com.hans.android.adaptivekeyboard;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.PriorityQueue;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -47,6 +48,10 @@ public final class PredictionModel {
     private final Map<String,Word> words = new HashMap<>();
     private List<String> sortedKeys=Collections.emptyList();
     private boolean indexDirty=true;
+    // Prefixes of one or two characters can match thousands of words. Only
+    // a bounded, relevance-ranked shortlist is needed for three suggestions.
+    private final Map<String,List<String>> commonPrefixCache=new HashMap<>();
+    private static final int SHORTLIST_SIZE=160;
     private final Map<String,Set<String>> nextByPrevious=new HashMap<>();
     private final Map<String,Set<String>> nextByTwoPrevious=new HashMap<>();
     private final Map<String,Integer> pairs=new HashMap<>();
@@ -56,6 +61,7 @@ public final class PredictionModel {
     private final Map<String,Long> latestChoiceByPrefix=new HashMap<>();
     private final Map<String,Integer> rejections=new HashMap<>();
     private BaselineNgrams baseline;
+    public synchronized int size() {return words.size();}
     public synchronized void setBaselineNgrams(BaselineNgrams sharedBaseline) {
         this.baseline=sharedBaseline;
     }
@@ -71,11 +77,13 @@ public final class PredictionModel {
         String k=norm(value);
         if(k.isEmpty())return;
         Word w=words.get(k);
-        if(w==null){w=new Word(value);words.put(k,w);indexDirty=true;}
+        if(w==null){w=new Word(value);words.put(k,w);indexDirty=true;
+            commonPrefixCache.clear();}
         int r=Math.max(0,rank);
         if("en".equals(language))w.enRank=Math.min(w.enRank,r);
         else w.deRank=Math.min(w.deRank,r);
         if(r<w.baseRank){
+            commonPrefixCache.clear();
             w.baseRank=r;
             w.lexicalSurface=value; // canonical noun/name case, not last sentence case
             if(w.typed==0)w.surface=value;
@@ -94,6 +102,7 @@ public final class PredictionModel {
         if(w==null){w=new Word(raw);words.put(word,w);indexDirty=true;}
         // Explicit user confirmation wins over dictionary spelling and noun casing.
         w.surface=raw;
+        commonPrefixCache.clear();
         long now=System.currentTimeMillis();
         w.lastUsedMs=now;
         w.typed++;
@@ -136,15 +145,27 @@ public final class PredictionModel {
     public synchronized void undo(Event e) {
         if(e==null)return;
         Word w=words.get(e.word);
+        commonPrefixCache.clear();
         if(w!=null){
             w.typed=Math.max(0,w.typed-1);
             if(e.selected)w.selected=Math.max(0,w.selected-1);
             w.lastUsedMs=0;
             if(w.typed==0 && w.baseRank==UNKNOWN_RANK){words.remove(e.word);indexDirty=true;}
         }
-        if(!e.previous.isEmpty())adjust(pairs,key(e.previous,e.word),-1);
-        if(!e.beforePrevious.isEmpty()&&!e.previous.isEmpty())
+        if(!e.previous.isEmpty()) {
+            adjust(pairs,key(e.previous,e.word),-1);
+            if(get(pairs,key(e.previous,e.word))==0) {
+                Set<String> after=nextByPrevious.get(e.previous);
+                if(after!=null)after.remove(e.word);
+            }
+        }
+        if(!e.beforePrevious.isEmpty()&&!e.previous.isEmpty()) {
             adjust(triples,key(e.beforePrevious,e.previous,e.word),-1);
+            if(get(triples,key(e.beforePrevious,e.previous,e.word))==0) {
+                Set<String> after=nextByTwoPrevious.get(key(e.beforePrevious,e.previous));
+                if(after!=null)after.remove(e.word);
+            }
+        }
         if(e.selected&&!e.prefix.isEmpty())updateChoices(e.beforePrevious,e.previous,e.prefix,e.word,-1,0);
     }
     public synchronized void restoreWord(String surface,int typed,int selected) {
@@ -154,6 +175,7 @@ public final class PredictionModel {
         String k=norm(surface);if(k.isEmpty())return;
         Word w=words.get(k);
         if(w==null){w=new Word(surface);words.put(k,w);indexDirty=true;}
+        commonPrefixCache.clear();
         w.surface=surface;w.typed=Math.max(0,typed);w.selected=Math.max(0,selected);
         w.lastUsedMs=Math.max(0,lastUsedMs);
     }
@@ -183,12 +205,68 @@ public final class PredictionModel {
         if(!indexDirty)return;
         sortedKeys=new ArrayList<>(words.keySet());
         Collections.sort(sortedKeys);
+        commonPrefixCache.clear();
         indexDirty=false;
+    }
+    /** Build expensive dictionary and short-prefix indexes off the UI thread. */
+    public synchronized void prepareForUse() {
+        ensureIndex();
+        for(String common:new String[]{"a","i","h","w","s","d","t","e","m","g","b",
+            "sch","ha","ich","wo","ge","he","un"})shortPrefixCandidates(common);
+    }
+
+    /** Reset private learning without dropping the bundled base dictionary. */
+    public synchronized void clearLearningData() {
+        java.util.Iterator<Map.Entry<String,Word>> iter=words.entrySet().iterator();
+        while(iter.hasNext()) {
+            Word w=iter.next().getValue();
+            if(w.baseRank==UNKNOWN_RANK)iter.remove();
+            else {w.typed=0;w.selected=0;w.lastUsedMs=0;
+                if(w.lexicalSurface!=null)w.surface=w.lexicalSurface;}
+        }
+        pairs.clear();triples.clear();choices.clear();choiceTimes.clear();
+        latestChoiceByPrefix.clear();rejections.clear();nextByPrevious.clear();
+        nextByTwoPrevious.clear();commonPrefixCache.clear();indexDirty=true;
     }
     private int indexAtOrAfter(String word) {
         int position=Collections.binarySearch(sortedKeys,word);
         return position>=0?position:-position-1;
     }
+    private double shortcutPriority(String word) {
+        Word w=words.get(word);
+        if(w==null)return -1000;
+        double base=w.baseRank==UNKNOWN_RANK?-10:18-1.9*Math.log1p(w.baseRank);
+        return base+7*Math.log1p(w.typed)+9*Math.log1p(w.selected);
+    }
+    private List<String> shortPrefixCandidates(String prefix) {
+        List<String> cached=commonPrefixCache.get(prefix);
+        if(cached!=null)return cached;
+        PriorityQueue<String> heap=new PriorityQueue<>(SHORTLIST_SIZE+1,
+            (a,b)->{
+                int c=Double.compare(shortcutPriority(a),shortcutPriority(b));
+                return c!=0?c:b.compareTo(a);
+            });
+        for(int i=indexAtOrAfter(prefix);i<sortedKeys.size();i++) {
+            String word=sortedKeys.get(i);
+            if(!word.startsWith(prefix))break;
+            if(heap.size()<SHORTLIST_SIZE)heap.add(word);
+            else {
+                String weakest=heap.peek();
+                if(shortcutPriority(word)>shortcutPriority(weakest)){
+                    heap.poll();heap.add(word);
+                }
+            }
+        }
+        List<String> best=new ArrayList<>(heap);
+        best.sort((a,b)->{
+            int c=Double.compare(shortcutPriority(b),shortcutPriority(a));
+            return c!=0?c:a.compareTo(b);
+        });
+        if(commonPrefixCache.size()>=128)commonPrefixCache.clear();
+        commonPrefixCache.put(prefix,best);
+        return best;
+    }
+
     public synchronized List<String> predict(String rawPrefix,String prev,String prev2) {
         return predict(rawPrefix,prev,prev2,Collections.emptyMap());
     }
@@ -225,34 +303,62 @@ public final class PredictionModel {
             }
         } else {
             ensureIndex();
-            for(int i=indexAtOrAfter(prefix);i<sortedKeys.size();i++) {
-                String word=sortedKeys.get(i);
-                if(!word.startsWith(prefix))break;
-                exact++;
-                offer(best,word,words.get(word),a,b,prefix,rawPrefix,englishBias,0,
+            Set<String> visited=new HashSet<>();
+            if(prefix.length()<=3) {
+                for(String word:shortPrefixCandidates(prefix)) {
+                    exact++;visited.add(word);
+                    offer(best,word,words.get(word),a,b,prefix,rawPrefix,englishBias,0,
+                        generic.getOrDefault(word,0.0));
+                }
+            } else {
+                for(int i=indexAtOrAfter(prefix);i<sortedKeys.size();i++) {
+                    String word=sortedKeys.get(i);
+                    if(!word.startsWith(prefix))break;
+                    exact++;visited.add(word);
+                    offer(best,word,words.get(word),a,b,prefix,rawPrefix,englishBias,0,
+                        generic.getOrDefault(word,0.0));
+                }
+            }
+            // Always include words used in this personal context even if they
+            // are too rare to reach the global short-prefix shortlist.
+            Set<String> contextual=nextByPrevious.getOrDefault(a,Collections.emptySet());
+            for(String word:contextual)if(word.startsWith(prefix)&&visited.add(word)) {
+                Word learned=words.get(word);
+                if(learned!=null)offer(best,word,learned,a,b,prefix,rawPrefix,englishBias,0,
                     generic.getOrDefault(word,0.0));
             }
-        }
-        // A misspelled prefix can use a typo candidate without a whole-dictionary scan.
-        if(exact<3&&prefix.length()>=3) {
-            String initial=prefix.substring(0,1);
-            for(int i=indexAtOrAfter(initial);i<sortedKeys.size();i++) {
-                String form=sortedKeys.get(i);
-                if(!form.startsWith(initial))break;
-                if(form.startsWith(prefix)||form.length()<prefix.length()-1)continue;
-                if(oneEditFromPrefix(prefix,form))
-                    offer(best,form,words.get(form),a,b,prefix,rawPrefix,englishBias,-14,
-                        generic.getOrDefault(form,0.0));
+            for(String word:nextByTwoPrevious.getOrDefault(key(b,a),Collections.emptySet()))
+                if(word.startsWith(prefix)&&visited.add(word)) {
+                    Word learned=words.get(word);
+                    if(learned!=null)offer(best,word,learned,a,b,prefix,rawPrefix,englishBias,0,
+                        generic.getOrDefault(word,0.0));
+                }
+            for(Map.Entry<String,Double> entry:generic.entrySet()) {
+                String word=entry.getKey();
+                if(word.startsWith(prefix)&&visited.add(word)) {
+                    Word w=words.get(word);
+                    offer(best,word,w==null?new Word(word):w,a,b,prefix,rawPrefix,
+                        englishBias,0,entry.getValue());
+                }
             }
         }
-        // Baseline can propose valid corpus words outside the packaged unigram
-        // list; offer those too, without storing them as personal learning.
-        if(!prefix.isEmpty())for(Map.Entry<String,Double> entry:generic.entrySet()) {
-            // Empty-prefix generic words were already offered in the exact
-            // context loop above; scoring them twice duplicated UI slots.
-            if(words.containsKey(entry.getKey()))continue;
-            offer(best,entry.getKey(),new Word(entry.getKey()),a,b,prefix,
-                rawPrefix,englishBias,0,entry.getValue());
+        // Typo recovery uses a nearby common prefix and a hard candidate cap.
+        // Long gibberish prefixes must not cause unbounded allocations or GC.
+        if(exact<3 && prefix.length()>=3 && prefix.length()<=13) {
+            int common=prefix.length()>=5?prefix.length()-3:Math.min(2,prefix.length()-1);
+            String shared=prefix.substring(0,common);
+            int scanned=0,offered=0;
+            for(int i=indexAtOrAfter(shared);i<sortedKeys.size() && scanned<500;i++) {
+                String form=sortedKeys.get(i);
+                if(!form.startsWith(shared))break;
+                scanned++;
+                if(form.startsWith(prefix)||form.length()<prefix.length()-1)continue;
+                if(oneEditFromPrefix(prefix,form)) {
+                    offer(best,form,words.get(form),a,b,prefix,rawPrefix,englishBias,-14,
+                        generic.getOrDefault(form,0.0));
+                    if(++offered>=12)break;
+                }
+            }
         }
         List<String> out=new ArrayList<>(3);
         for(Scored item:best)if(item!=null)out.add(item.output);
