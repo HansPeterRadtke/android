@@ -247,7 +247,9 @@ public final class PredictionModel {
         }
         // Baseline can propose valid corpus words outside the packaged unigram
         // list; offer those too, without storing them as personal learning.
-        for(Map.Entry<String,Double> entry:generic.entrySet()) {
+        if(!prefix.isEmpty())for(Map.Entry<String,Double> entry:generic.entrySet()) {
+            // Empty-prefix generic words were already offered in the exact
+            // context loop above; scoring them twice duplicated UI slots.
             if(words.containsKey(entry.getKey()))continue;
             offer(best,entry.getKey(),new Word(entry.getKey()),a,b,prefix,
                 rawPrefix,englishBias,0,entry.getValue());

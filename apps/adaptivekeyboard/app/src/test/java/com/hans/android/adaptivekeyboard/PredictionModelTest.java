@@ -252,6 +252,24 @@ public class PredictionModelTest {
         assertEquals("ich",model.predict("","","").isEmpty()?"ich":
             WordCase.display("ich","","wir sagen ",false));
     }
+    @Test public void zeroPrefixNeverRepeatsTheSameCandidate() {
+        PredictionModel m=new PredictionModel();
+        BaselineNgrams b=new BaselineNgrams();
+        b.add("B","","bin","nicht",50,"de");
+        b.add("B","","bin","ein",30,"de");
+        b.add("B","","bin","hier",20,"de");
+        m.setBaselineNgrams(b);
+        java.util.List<String> ranked=m.predict("","bin","ich",java.util.Collections.emptyMap(),"de");
+        assertEquals(3,ranked.size());
+        assertEquals(3,new java.util.HashSet<>(ranked).size());
+    }
+    @Test public void neuralCandidatesAreNotScoredTwiceWithoutPrefix() {
+        PredictionModel m=new PredictionModel();
+        java.util.Map<String,Double> neural=java.util.Map.of("wissen",60.0,"gehen",57.0,"machen",54.0);
+        java.util.List<String> ranked=m.predict("","gerne","würde",neural,"de");
+        assertEquals(3,new java.util.HashSet<>(ranked).size());
+        assertEquals("wissen",ranked.get(0));
+    }
     @Test public void longOrBlankTokensDoNotLearn() {
         PredictionModel m=new PredictionModel();
         assertNull(m.learnTyped("", "a", "b"));

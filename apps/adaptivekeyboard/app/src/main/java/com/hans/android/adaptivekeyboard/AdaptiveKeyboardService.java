@@ -68,6 +68,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             Thread t=new Thread(r,"keyboard-neural-predict");t.setDaemon(true);return t;
         },new ThreadPoolExecutor.DiscardOldestPolicy());
     private volatile ChimeEnglish neuralModel;
+    private volatile GermanNextWord germanNeuralModel;
+    private volatile GermanCaseModel germanCaseModel;
     private int predictionRevision=0;
     private boolean manualShiftPending=false;
     private final android.util.LruCache<String,byte[]> previewCache =
@@ -120,21 +122,41 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 }
             }
             ChimeEnglish englishModel=null;
+            GermanNextWord germanModel=null;
+            GermanCaseModel caseModel=null;
             try(java.io.InputStream modelStream=getAssets().open("chime_en.ltc")) {
                 englishModel=new ChimeEnglish(modelStream);
             } catch(Exception ex) {
-                android.util.Log.e("KontextTastatur","Optional offline neural model not available",ex);
+                android.util.Log.e("KontextTastatur","Optional offline English neural model not available",ex);
+            }
+            try(java.io.InputStream modelStream=getAssets().open("german_next_word.nwp")) {
+                germanModel=new GermanNextWord(modelStream);
+            } catch(Exception ex) {
+                android.util.Log.e("KontextTastatur","Optional offline German neural model not available",ex);
+            }
+            try(java.io.InputStream caseStream=getAssets().open("de_word_case.gcase")) {
+                caseModel=new GermanCaseModel(caseStream);
+            } catch(Exception ex) {
+                android.util.Log.e("KontextTastatur","German corpus capitalization unavailable",ex);
             }
             final ChimeEnglish ready=englishModel;
+            final GermanNextWord germanReady=germanModel;
+            final GermanCaseModel caseReady=caseModel;
             handler.post(() -> {
                 if(active!=this)return;
                 baselineNgrams=loaded;
                 predictions.setBaselineNgrams(loaded);
                 neuralModel=ready;
+                germanNeuralModel=germanReady;
+                germanCaseModel=caseReady;
                 refreshSuggestions();
                 android.util.Log.i("KontextTastatur","Offline ngram model loaded: "+loaded.size());
                 if(ready!=null)android.util.Log.i("KontextTastatur",
                     "Offline English Chime neural model ready: "+ready.vocabularySize());
+                if(germanReady!=null)android.util.Log.i("KontextTastatur",
+                    "Offline German neural model ready: "+germanReady.vocabularySize());
+                if(caseReady!=null)android.util.Log.i("KontextTastatur",
+                    "Offline German context casing ready: "+caseReady.wordCount());
             });
         });
         refreshSettings();
@@ -147,7 +169,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         sendWorker.shutdownNow();
         languageWorker.shutdownNow();
         neuralWorker.shutdownNow();
-        neuralModel=null;
+        neuralModel=null;germanNeuralModel=null;germanCaseModel=null;
         if(database!=null) database.close();
         if(active==this) active=null;
         super.onDestroy();
@@ -207,6 +229,16 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     private boolean neuralEnabled() {
         return getSharedPreferences("keyboard_settings",0).getBoolean("neural_predictions",true);
+    }
+    private Map<String,Double> germanNeuralScores(List<GermanNextWord.Candidate> candidates) {
+        Map<String,Double> result=new HashMap<>();
+        int limit=Math.min(15,candidates.size());
+        for(int i=0;i<limit;i++) {
+            String word=TextContext.normalize(candidates.get(i).word);
+            if(!word.isEmpty() && Character.isLetter(word.charAt(0)))
+                result.put(word,Math.max(1,60.0-3.2*i));
+        }
+        return result;
     }
     private Map<String,Double> neuralScores(List<ChimeEnglish.Candidate> candidates) {
         Map<String,Double> result=new HashMap<>();
@@ -368,21 +400,25 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 }
             } else updateSuggestionButtons(ranked,"","",false);
         } else updateSuggestionButtons(ranked,"","",false);
-        if(rawBefore==null || neuralModel==null || !neuralEnabled() ||
-            !"en".equals(language))return;
+        if(rawBefore==null || !neuralEnabled())return;
+        final boolean english="en".equals(language);
+        final ChimeEnglish englishModel=neuralModel;
+        final GermanNextWord germanModel=germanNeuralModel;
+        if((english && englishModel==null)||(!english && germanModel==null))return;
         final String snapshot=rawBefore;
         final String prefix=rawPrefix, a=prev, b=prev2, lang=language;
         final boolean capital=editorWantsCapitalization();
         neuralWorker.execute(() -> {
             if(revision!=predictionRevision || Thread.currentThread().isInterrupted())return;
-            List<ChimeEnglish.Candidate> neural;
-            try {neural=neuralModel.predict(snapshot,10);}
-            catch(Exception ex) {
-                android.util.Log.w("KontextTastatur","Neural inference unavailable",ex);
+            Map<String,Double> hints;
+            try {
+                if(english) hints=neuralScores(englishModel.predict(snapshot,10));
+                else hints=germanNeuralScores(germanModel.predict(snapshot,15));
+            } catch(Exception ex) {
+                android.util.Log.w("KontextTastatur","Offline neural inference unavailable",ex);
                 return;
             }
             if(revision!=predictionRevision)return;
-            Map<String,Double> hints=neuralScores(neural);
             List<String> mixed=predictions.predict(prefix,a,b,hints,lang);
             handler.post(() -> {
                 if(active==this && revision==predictionRevision && !sensitive && !privateMode &&
@@ -394,9 +430,18 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     /** The middle slot remains highest ranked; apply case only at display time. */
     private void updateSuggestionButtons(List<String> ranked,String prefix,String before,boolean capital) {
         if(suggestions[0]==null)return;
-        visibleWords[0]=ranked.size()>1?WordCase.display(ranked.get(1),prefix,before,capital):"";
-        visibleWords[1]=ranked.size()>0?WordCase.display(ranked.get(0),prefix,before,capital):"";
-        visibleWords[2]=ranked.size()>2?WordCase.display(ranked.get(2),prefix,before,capital):"";
+        String language=LanguageContext.detect(before);
+        GermanCaseModel casing=germanCaseModel;
+        for(int position=0;position<3;position++) {
+            int rankedPosition=position==1?0:position==0?1:2;
+            if(rankedPosition>=ranked.size()) {
+                visibleWords[position]="";continue;
+            }
+            String candidate=ranked.get(rankedPosition);
+            visibleWords[position]="de".equals(language)&&casing!=null?
+                casing.apply(candidate,prefix,before,false):
+                WordCase.display(candidate,prefix,before,capital);
+        }
         for(int i=0;i<3;i++) {
             String value=visibleWords[i];
             suggestions[i].setText(!value.isEmpty()?value:

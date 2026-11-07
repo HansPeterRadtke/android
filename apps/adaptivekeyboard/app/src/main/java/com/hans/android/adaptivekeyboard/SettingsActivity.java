@@ -41,17 +41,24 @@ public final class SettingsActivity extends Activity {
         caretTest.setPadding(0,dp(3),0,dp(5));
         layout.addView(caretTest,new LinearLayout.LayoutParams(-1,-2));
         input.setReadout(caretTest);
-        label("Neuronale Wortvorhersage",19);
-        label("Chime-SMS-2M von Luke Steuber (Modellgewichte CC BY-SA 4.0, Referenzcode Apache 2.0). Der englische Sprachprädiktor benötigt etwa zwei Megabyte, läuft offline im Hintergrund und ersetzt niemals Wörter automatisch. Deutsche Vorhersagen und persönliche Wortauswahl bleiben aktiv.",14);
-        action("Modellquelle und Lizenz öffnen",() -> {
+        label("Neuronale Wortvorhersage (Deutsch und Englisch)",19);
+        label("Zwei kleine Offline-Modelle analysieren mehr als die letzten zwei Wörter: das deutsche Modell von Destin Moss (4,7 MB, ODC-By und CC BY 2.0 FR) sowie Chime-SMS-2M von Luke Steuber für Englisch (2,2 MB, CC BY-SA 4.0). Sie berechnen Vorschläge im Hintergrund und ersetzen niemals Wörter automatisch. Persönliche Wortauswahl bleibt vorrangig.",14);
+        action("Englisches Chime-Modell und Lizenz",() -> {
             Intent i=new Intent(Intent.ACTION_VIEW,
                 android.net.Uri.parse("https://huggingface.co/lukeslp/chime-sms-2m"));
             try{startActivity(i);}catch(Exception e){new AlertDialog.Builder(this)
                 .setMessage("https://huggingface.co/lukeslp/chime-sms-2m")
                 .setPositiveButton("OK",null).show();}
         });
+        action("Deutsches neuronales Modell und Lizenz",() -> {
+            Intent i=new Intent(Intent.ACTION_VIEW,
+                android.net.Uri.parse("https://huggingface.co/youcoded/next-word-german"));
+            try{startActivity(i);}catch(Exception e){new AlertDialog.Builder(this)
+                .setMessage("https://huggingface.co/youcoded/next-word-german")
+                .setPositiveButton("OK",null).show();}
+        });
         CheckBox neural=new CheckBox(this);
-        neural.setText("Englische neuronale Vorschläge verwenden");
+        neural.setText("Neuronale Vorschläge für Deutsch und Englisch verwenden");
         neural.setChecked(getSharedPreferences("keyboard_settings",0).getBoolean("neural_predictions",true));
         neural.setOnCheckedChangeListener((button,checked)-> {
             getSharedPreferences("keyboard_settings",0).edit().putBoolean("neural_predictions",checked).apply();
