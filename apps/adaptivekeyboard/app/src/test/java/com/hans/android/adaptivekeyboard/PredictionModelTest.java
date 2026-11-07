@@ -519,6 +519,37 @@ public class PredictionModelTest {
         assertTrue(starts.contains("wuerde"));
         assertFalse(starts.contains("invented"));
     }
+    @Test public void sentenceInitialNowIsLowercaseWhenSuggestedMidSentence() {
+        PredictionModel model=new PredictionModel();
+        model.addBaseWord("now",71,"en");
+        model.learnTyped("Now","let's","");
+        java.util.List<String> ranked=model.predict("","let's","",
+            java.util.Collections.emptyMap(),"en");
+        assertEquals(java.util.List.of("now"),ranked);
+        assertEquals("now",WordCase.display(ranked.get(0),"","I think ",false));
+        assertEquals("Now",WordCase.display(ranked.get(0),"","I think. ",false));
+        assertEquals("Now",WordCase.display(ranked.get(0),"","",false));
+        assertEquals("NOW",model.predict("NOW","let's","",
+            java.util.Collections.emptyMap(),"en").get(0));
+        assertEquals("Now",model.predict("No","let's","",
+            java.util.Collections.emptyMap(),"en").get(0));
+    }
+    @Test public void casingOfPersonalVocabularyUsesCorrectLanguageLexicon() {
+        PredictionModel model=new PredictionModel();
+        model.addBaseWord("die",57,"en");
+        model.addBaseWord("die",2,"de");
+        model.learnTyped("Die","can","");
+        assertEquals("die",model.predict("","can","",
+            java.util.Collections.emptyMap(),"en").get(0));
+        model.addBaseWord("Haus",20,"de");
+        model.learnTyped("haus","das","");
+        assertEquals("Haus",model.predict("","das","",
+            java.util.Collections.emptyMap(),"de").get(0));
+        // A name not in the base vocabulary preserves personally chosen case.
+        model.learnTyped("Alice","with","I");
+        assertEquals("Alice",model.predict("","with","I",
+            java.util.Collections.emptyMap(),"en").get(0));
+    }
     @Test public void longOrBlankTokensDoNotLearn() {
         PredictionModel m=new PredictionModel();
         assertNull(m.learnTyped("", "a", "b"));

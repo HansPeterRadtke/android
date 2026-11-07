@@ -19,6 +19,8 @@ public final class PredictionModel {
     private static final class Word {
         String surface;
         String lexicalSurface;
+        String englishSurface;
+        String germanSurface;
         int baseRank=UNKNOWN_RANK;
         int deRank=UNKNOWN_RANK;
         int enRank=UNKNOWN_RANK;
@@ -89,8 +91,13 @@ public final class PredictionModel {
         if(w==null){w=new Word(value);words.put(k,w);indexDirty=true;
             commonPrefixCache.clear();}
         int r=Math.max(0,rank);
-        if("en".equals(language))w.enRank=Math.min(w.enRank,r);
-        else w.deRank=Math.min(w.deRank,r);
+        if("en".equals(language)) {
+            if(r<w.enRank)w.englishSurface=value;
+            w.enRank=Math.min(w.enRank,r);
+        } else {
+            if(r<w.deRank)w.germanSurface=value;
+            w.deRank=Math.min(w.deRank,r);
+        }
         if(r<w.baseRank){
             commonPrefixCache.clear();
             w.baseRank=r;
@@ -299,7 +306,8 @@ public final class PredictionModel {
      * continuations matching the user's typed prefix, use ONLY those words.
      * Generic corpora and neural output are not allowed to overrule them.
      */
-    private List<String> personalNext(String rawPrefix,String previous,String beforePrevious) {
+    private List<String> personalNext(String rawPrefix,String previous,
+                                      String beforePrevious,String language) {
         String a=norm(previous),b=norm(beforePrevious),prefix=norm(rawPrefix);
         if(a.isEmpty()&&b.isEmpty())a=SENTENCE_START;
         if(a.isEmpty())return Collections.emptyList();
@@ -343,8 +351,18 @@ public final class PredictionModel {
         for(int i=0;i<results.size() && out.size()<3;i++) {
             String token=results.get(i).word;
             Word w=words.get(token);
-            // Personal next words retain their last user-confirmed spelling and case.
-            String spelling=w==null?token:w.surface==null?token:w.surface;
+            // Store the exact form the user typed for personal history, but
+            // never reuse sentence-initial case as the spelling of a common
+            // word in the middle of an unrelated sentence. The language's
+            // baseline lexicon supplies canonical case for known vocabulary.
+            String spelling=token;
+            if(w!=null) {
+                spelling=w.surface==null?token:w.surface;
+                if("en".equals(language) && w.englishSurface!=null)
+                    spelling=w.englishSurface;
+                else if("de".equals(language) && w.germanSurface!=null)
+                    spelling=w.germanSurface;
+            }
             out.add(caseMatched(spelling,rawPrefix));
         }
         return out;
@@ -446,7 +464,7 @@ public final class PredictionModel {
         String prefix=norm(rawPrefix),a=norm(prev),b=norm(prev2);
         // This is the ordering rule, not another additive feature. No generic
         // model may reorder or replace previously confirmed next-word choices.
-        List<String> known=personalNext(rawPrefix,a,b);
+        List<String> known=personalNext(rawPrefix,a,b,language);
         // When the editor is empty, include previously typed words and the
         // first word of actual observed adjacent pairs from legacy history.
         // The model must not fabricate starts, but must not ignore that history.

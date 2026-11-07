@@ -719,17 +719,14 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 visibleWords[position]="";continue;
             }
             String candidate=ranked.get(rankedPosition);
-            // Personal history is evidence of exactly what the user wrote.
-            // Preserve its recorded casing at sentence starts; do not apply
-            // sentence-cap heuristics to rewrite a confirmed observation.
-            // At the empty editor preserve the exact historical surface, even
-            // if it was learned by an old app version outside sentence starts.
-            visibleWords[position]=(confirmedNext ||
-                (context.previous.isEmpty() && context.beforePrevious.isEmpty()))
-                && prefix.isEmpty()?candidate:
-                "de".equals(language)&&casing!=null && !confirmedNext?
-                    casing.apply(candidate,prefix,before,false):
-                    WordCase.display(candidate,prefix,before,capital);
+            // Personal frequency decides WHICH word, not HOW the word is
+            // capitalized in the current sentence. The user's manually typed
+            // prefix still wins; otherwise use language and sentence context.
+            // German noun/verb spelling uses the contextual casing corpus.
+            // Unknown proper nouns retain their observed capitalization.
+            visibleWords[position]="de".equals(language)&&casing!=null?
+                casing.apply(candidate,prefix,before,false):
+                WordCase.display(candidate,prefix,before,capital);
         }
         for(int i=0;i<3;i++) {
             String value=visibleWords[i];

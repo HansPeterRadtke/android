@@ -63,7 +63,13 @@ public final class WordCase {
         // The English pronoun 'I' is always capitalized, not just sentence-initial.
         if("i".equals(value))return "I";
         if(capMode||sentenceStart(beforeCursor))
-            value=value.substring(0,1).toUpperCase(Locale.GERMAN)+value.substring(1);
+            return value.substring(0,1).toUpperCase(Locale.GERMAN)+value.substring(1);
+        // The full English dictionary loads in the background. Until then,
+        // last-used personal spelling may still be sentence-initial ("Now").
+        // The small built-in case prior avoids reusing that capital mid-sentence.
+        if("en".equals(LanguageContext.detect(beforeCursor)) &&
+            EnglishCommonCase.shouldLowercase(value))
+            return value.toLowerCase(Locale.ROOT);
         return value;
     }
 }
