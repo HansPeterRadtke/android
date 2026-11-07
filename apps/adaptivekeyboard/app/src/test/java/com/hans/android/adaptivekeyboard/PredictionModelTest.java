@@ -450,7 +450,8 @@ public class PredictionModelTest {
         model.learnTyped("I","","");
         model.learnTyped("am","I","");
         java.util.List<String> starts=model.predict("","", "");
-        assertEquals(java.util.List.of("I"),starts);
+        assertEquals("I",starts.get(0));
+        assertTrue(starts.contains("am"));
         PhrasePredictor.Continuations personalOnly=(seed,limit)->{
             TextContext c=TextContext.fromBeforeCursor(seed);
             return model.hasPersonalNext("",c.previous)?
@@ -470,6 +471,53 @@ public class PredictionModelTest {
         restored.restorePair("hello","there",1);
         assertEquals(java.util.List.of("Hello"),restored.predict("","", ""));
         assertEquals(java.util.List.of("there"),restored.predict("","Hello",""));
+    }
+    @Test public void oldDatabaseWordPairsProduceActualSuggestionsBeforeFirstLetter() {
+        PredictionModel model=new PredictionModel();
+        model.restoreWord("Let's",12,0,0);
+        model.restoreWord("go",12,0,0);
+        model.restoreWord("Hello",7,2,0);
+        model.restoreWord("world",7,0,0);
+        model.restorePair("let's","go",11);
+        model.restorePair("hello","world",7);
+        BaselineNgrams corpus=new BaselineNgrams();
+        corpus.add("S","","","invented",900000,"en");
+        model.setBaselineNgrams(corpus);
+        java.util.List<String> starts=model.predict("","", "",
+            java.util.Map.of("invented",9999999.0),"en");
+        assertFalse(starts.isEmpty());
+        assertTrue(starts.contains("Let's"));
+        assertTrue(starts.contains("Hello"));
+        assertFalse(starts.contains("invented"));
+        PhrasePredictor.Continuations observed=(seed,limit)->{
+            TextContext c=TextContext.fromBeforeCursor(seed);
+            return model.hasPersonalNext("",c.previous)?model.predict("",c.previous,c.beforePrevious):
+                java.util.List.of();
+        };
+        java.util.List<String> phrases=PhrasePredictor.complete("",starts,observed,
+            (word,prefix,context)->WordCase.display(word,prefix,context,false),3);
+        assertTrue(phrases.contains("Let's go"));
+        assertTrue(phrases.contains("Hello world"));
+    }
+    @Test public void oldDatabaseSingleWordsAlsoDisplayButNeverInventPhrases() {
+        PredictionModel model=new PredictionModel();
+        model.addBaseWord("Einmal",0,"de");
+        model.addBaseWord("invented",1,"en");
+        model.restoreWord("Einmal",6,0,0);
+        assertEquals(java.util.List.of("Einmal"),model.predict("","", ""));
+        model.clearLearningData();
+        assertTrue(model.predict("","","").isEmpty());
+    }
+    @Test public void trueSentenceStartsTakePriorityOverLegacyPairs() {
+        PredictionModel model=new PredictionModel();
+        model.restoreWord("wuerde",100,0,0);
+        model.restoreWord("gerne",100,0,0);
+        model.restorePair("wuerde","gerne",200);
+        model.learnTyped("Hallo","","");
+        java.util.List<String> starts=model.predict("","", "");
+        assertEquals("Hallo",starts.get(0));
+        assertTrue(starts.contains("wuerde"));
+        assertFalse(starts.contains("invented"));
     }
     @Test public void longOrBlankTokensDoNotLearn() {
         PredictionModel m=new PredictionModel();

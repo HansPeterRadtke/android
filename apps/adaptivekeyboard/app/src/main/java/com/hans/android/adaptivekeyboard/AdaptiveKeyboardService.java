@@ -722,7 +722,11 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             // Personal history is evidence of exactly what the user wrote.
             // Preserve its recorded casing at sentence starts; do not apply
             // sentence-cap heuristics to rewrite a confirmed observation.
-            visibleWords[position]=confirmedNext && prefix.isEmpty()?candidate:
+            // At the empty editor preserve the exact historical surface, even
+            // if it was learned by an old app version outside sentence starts.
+            visibleWords[position]=(confirmedNext ||
+                (context.previous.isEmpty() && context.beforePrevious.isEmpty()))
+                && prefix.isEmpty()?candidate:
                 "de".equals(language)&&casing!=null && !confirmedNext?
                     casing.apply(candidate,prefix,before,false):
                     WordCase.display(candidate,prefix,before,capital);

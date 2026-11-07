@@ -63,6 +63,7 @@ public final class PredictionModel {
     // Explicitly confirmed next words, newest observations last, per context.
     // This history never contains mere displayed model guesses.
     private final Map<String,java.util.ArrayDeque<String>> recentByPrevious=new HashMap<>();
+    private List<String> cachedLegacyOpenings=null;
     private final Map<String,Integer> triples=new HashMap<>();
     private final Map<String,Integer> choices=new HashMap<>();
     private final Map<String,Long> choiceTimes=new HashMap<>();
@@ -104,6 +105,7 @@ public final class PredictionModel {
         return learn(chosen,prev,prev2,typedPrefix,true);
     }
     private Event learn(String raw,String prev,String prev2,String pref,boolean selected) {
+        cachedLegacyOpenings=null;
         String word=norm(raw),a=norm(prev),b=norm(prev2),prefix=norm(pref);
         if(word.isEmpty()||word.length()>60)return null;
         // At a real sentence start no previous word is present. Record the
@@ -158,6 +160,7 @@ public final class PredictionModel {
     }
     public synchronized void undo(Event e) {
         if(e==null)return;
+        cachedLegacyOpenings=null;
         Word w=words.get(e.word);
         commonPrefixCache.clear();
         if(w!=null){
@@ -187,6 +190,7 @@ public final class PredictionModel {
         restoreWord(surface,typed,selected,0);
     }
     public synchronized void restoreWord(String surface,int typed,int selected,long lastUsedMs) {
+        cachedLegacyOpenings=null;
         String k=norm(surface);if(k.isEmpty())return;
         Word w=words.get(k);
         if(w==null){w=new Word(surface);words.put(k,w);indexDirty=true;}
@@ -195,9 +199,11 @@ public final class PredictionModel {
         w.lastUsedMs=Math.max(0,lastUsedMs);
     }
     public synchronized void restorePair(String a,String word,int count) {
+        cachedLegacyOpenings=null;
         if(count>0){pairs.put(key(a,word),count);rememberNext(a,"",word);}
     }
     public synchronized void restoreRecent(String previous,String serialized) {
+        cachedLegacyOpenings=null;
         if(previous==null||previous.isEmpty())return;
         java.util.ArrayDeque<String> tokens=PersonalNextWords.decode(serialized);
         if(!tokens.isEmpty())recentByPrevious.put(norm(previous),tokens);
@@ -237,6 +243,7 @@ public final class PredictionModel {
 
     /** Reset private learning without dropping the bundled base dictionary. */
     public synchronized void clearLearningData() {
+        cachedLegacyOpenings=null;
         java.util.Iterator<Map.Entry<String,Word>> iter=words.entrySet().iterator();
         while(iter.hasNext()) {
             Word w=iter.next().getValue();
@@ -343,6 +350,77 @@ public final class PredictionModel {
         return out;
     }
 
+    /**
+     * Earlier app versions recorded personal words and adjacent word pairs,
+     * but never marked which ones began a sentence. Reuse that REAL historical
+     * material at an untouched field rather than generating corpus phrases or
+     * leaving the suggestion bar empty. Each candidate must have been typed,
+     * selected, or observed as the first word of an actual adjacent pair.
+     */
+    private List<String> personalOpeningBackfill(List<String> confirmedStarts) {
+        // Explicitly observed starts rank first. Earlier recorded words and
+        // adjacent pairs can fill remaining slots, but can never outrank a
+        // confirmed sentence beginning or fabricate an unobserved phrase.
+        if(confirmedStarts.size()>=3)return confirmedStarts;
+        if(cachedLegacyOpenings!=null)return cachedLegacyOpenings;
+        Map<String,Integer> outgoing=new HashMap<>();
+        for(Map.Entry<String,Integer> item:pairs.entrySet()) {
+            String path=item.getKey();
+            int divider=path.indexOf('\u0001');
+            if(divider<=0 || item.getValue()<=0)continue;
+            String preceding=path.substring(0,divider);
+            if(preceding.equals(SENTENCE_START) || !PersonalNextWords.valid(preceding))continue;
+            outgoing.merge(preceding,item.getValue(),Integer::sum);
+        }
+        class PersonalCandidate {
+            final String normalized,display;
+            final double score;
+            PersonalCandidate(String normalized,String display,double score) {
+                this.normalized=normalized;this.display=display;this.score=score;
+            }
+        }
+        java.util.List<PersonalCandidate> choices=new ArrayList<>();
+        long now=System.currentTimeMillis();
+        for(Map.Entry<String,Word> item:words.entrySet()) {
+            String token=item.getKey();
+            Word record=item.getValue();
+            int transitions=outgoing.getOrDefault(token,0);
+            if(!PersonalNextWords.valid(token))continue;
+            if(record.typed<=0 && record.selected<=0 && transitions<=0)continue;
+            String surface=record.surface==null?token:record.surface;
+            double frequency=record.typed+2.0*record.selected;
+            // Personal observations, NOT dictionary rank or neural scores.
+            double score=10*Math.log1p(frequency)+7*Math.log1p(transitions);
+            if(record.lastUsedMs>0 && record.lastUsedMs<=now) {
+                long elapsed=now-record.lastUsedMs;
+                score+=8.0*Math.exp(-elapsed/(12.0*3600.0*1000.0));
+            }
+            choices.add(new PersonalCandidate(token,surface,score));
+        }
+        // A legacy pair is itself a confirmed observation even if the old
+        // word table has no entry for the preceding word.
+        for(Map.Entry<String,Integer> entry:outgoing.entrySet()) {
+            if(words.containsKey(entry.getKey()))continue;
+            String token=entry.getKey();
+            choices.add(new PersonalCandidate(token,token,7*Math.log1p(entry.getValue())));
+        }
+        choices.sort((left,right) -> {
+            int order=Double.compare(right.score,left.score);
+            return order!=0?order:left.normalized.compareTo(right.normalized);
+        });
+        java.util.List<String> result=new ArrayList<>(3);
+        java.util.Set<String> seen=new HashSet<>();
+        for(String entry:confirmedStarts) {
+            if(seen.add(norm(entry)))result.add(entry);
+        }
+        for(PersonalCandidate entry:choices) {
+            if(result.size()>=3)break;
+            if(seen.add(entry.normalized))result.add(entry.display);
+        }
+        cachedLegacyOpenings=Collections.unmodifiableList(result);
+        return cachedLegacyOpenings;
+    }
+
     /** Whether the owner has used a matching continuation after this word. */
     public synchronized boolean hasPersonalNext(String rawPrefix,String previous) {
         String a=norm(previous),prefix=norm(rawPrefix);
@@ -369,12 +447,12 @@ public final class PredictionModel {
         // This is the ordering rule, not another additive feature. No generic
         // model may reorder or replace previously confirmed next-word choices.
         List<String> known=personalNext(rawPrefix,a,b);
-        if(!known.isEmpty())return known;
-        // Absolutely no corpus, dictionary or neural guesses in an untouched
-        // text field or after sentence-ending punctuation. Until a real first
-        // word has been CONFIRMED, the starting suggestion row is empty.
+        // When the editor is empty, include previously typed words and the
+        // first word of actual observed adjacent pairs from legacy history.
+        // The model must not fabricate starts, but must not ignore that history.
         if(prefix.isEmpty()&&a.isEmpty()&&b.isEmpty())
-            return Collections.emptyList();
+            return personalOpeningBackfill(known);
+        if(!known.isEmpty())return known;
         Map<String,Double> generic=new HashMap<>();
         if(baseline!=null)generic.putAll(baseline.candidates(prefix,a,b,language));
         if(neuralScores!=null)for(Map.Entry<String,Double> e:neuralScores.entrySet()) {
