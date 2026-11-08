@@ -88,6 +88,12 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private volatile GermanCaseModel germanCaseModel;
     private volatile int predictionRevision=0;
     private boolean manualShiftPending=false;
+    private final ShiftController shiftController=new ShiftController();
+    private TextView shiftKeyView;
+    private List<String> lastRankedSuggestionWords=Collections.emptyList();
+    private String lastSuggestionPrefix="",lastSuggestionBefore="";
+    private List<String> lastRawPhraseCandidates=Collections.emptyList();
+    private String lastPhraseBefore="";
     private final android.util.LruCache<String,byte[]> previewCache =
         new android.util.LruCache<String,byte[]>(5_000_000) {
             @Override protected int sizeOf(String key,byte[] value) {return value.length;}
@@ -128,7 +134,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private LinearLayout gifResults;
     private ScrollView gifScroll;
     private TextView gifQueryDisplay, gifMore;
-    private String gifProvider="commons", gifRating="r";
+    private String gifProvider="tenorweb", gifRating="r";
     private boolean gifEditing=true;
     private int gifOffset=0, gifGridCells=0;
     private int gifPreviewsExpected, gifPreviewsLoaded, gifPreviewsFailed;
@@ -319,6 +325,11 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         InputConnection ic=getCurrentInputConnection();
         return ic!=null && ic.getCursorCapsMode(flags)!=0;
     }
+    private void synchronizeShift() {
+        shift=shiftController.active();caps=shiftController.locked();
+        manualShiftPending=shiftController.manual();
+        updateShiftLabels();
+    }
     /** Update only letter labels, never rebuild the complete keyboard on shift. */
     private void updateShiftLabels() {
         for(int i=0;i<letterViews.size();i++) {
@@ -331,14 +342,39 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             if(favorite!=null)key.setContentDescription(label+
                 "; lange halten für "+favorite+"; nach oben für weitere Sonderzeichen");
         }
+        if(shiftKeyView!=null) {
+            shiftKeyView.setText(caps?"⇪":"⇧");
+            shiftKeyView.setBackground(background(shift?PRESSED:KEY));
+            shiftKeyView.setContentDescription(caps?"Feststelltaste an; erneut tippen zum Ausschalten":
+                shift?"Umschalttaste aktiv; nächstes Wort groß":"Umschalttaste; zweimal für Feststelltaste");
+        }
+    }
+    private void restyleCurrentPredictions() {
+        if(!"letters".equals(mode))return;
+        int rev=predictionRevision;
+        if(lastCandidateRevision==rev)
+            updateSuggestionButtons(lastRankedSuggestionWords,lastSuggestionPrefix,
+                lastSuggestionBefore,false,rev);
+        if(lastPhraseRevision==rev)
+            updatePhraseButtons(lastRawPhraseCandidates,lastPhraseBefore,rev);
     }
     /** Uses already available surrounding text; no editor IPC round trip. */
     private void updateAutoShiftFromText(String before) {
-        if(caps||manualShiftPending||!"letters".equals(mode) ||
-            !EditorPolicy.allowsAutoShift(editorKind))return;
-        if(!TextContext.fromBeforeCursor(before).prefix.isEmpty())return;
-        boolean desired=WordCase.sentenceStart(before);
-        if(desired!=shift){shift=desired;updateShiftLabels();}
+        if(!"letters".equals(mode))return;
+        int flags=info==null?0:info.inputType;
+        boolean charCaps=(flags & InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS)!=0;
+        boolean wordCaps=(flags & InputType.TYPE_TEXT_FLAG_CAP_WORDS)!=0 &&
+            (before.isEmpty() || Character.isWhitespace(before.charAt(before.length()-1)));
+        boolean sentenceCaps=TextContext.fromBeforeCursor(before).prefix.isEmpty() &&
+            WordCase.sentenceStart(before);
+        boolean desired=EditorPolicy.allowsAutoShift(editorKind) &&
+            (charCaps || wordCaps || sentenceCaps);
+        ShiftController.Mode old=shiftController.mode();
+        shiftController.automatic(desired);
+        if(old!=shiftController.mode()) {
+            synchronizeShift();
+            restyleCurrentPredictions();
+        }
     }
     private boolean neuralEnabled() {
         return getSharedPreferences("keyboard_settings",0).getBoolean("neural_predictions",true);
@@ -433,7 +469,10 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         int cls = attribute == null ? 0 : attribute.inputType & InputType.TYPE_MASK_CLASS;
         mode = (cls == InputType.TYPE_CLASS_NUMBER || cls == InputType.TYPE_CLASS_PHONE ||
             cls == InputType.TYPE_CLASS_DATETIME) ? "numbers" : "letters";
+        shiftController.reset(false);
         shift=false;caps=false;manualShiftPending=false;gifQuery="";
+        lastRankedSuggestionWords=Collections.emptyList();
+        lastRawPhraseCandidates=Collections.emptyList();
         searchRevision++;predictionRevision++;recentEvent=null;
         lastPhraseRevision=-1;phraseSource="";
         clearPhrases();
@@ -462,7 +501,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         info=attribute;sensitive=isPrivateField(attribute);
         editorKind=EditorPolicy.classify(attribute==null?0:attribute.inputType,
             attribute==null?0:attribute.imeOptions);
-        if(!caps)manualShiftPending=false;
+        // EditorInfo and the snapshot determine automatic Shift. Do not erase
+        // explicit one-time Shift while the keyboard view is reopened.
         InputConnection ic=getCurrentInputConnection();
         if(Build.VERSION.SDK_INT>=31 && ic!=null)ic.setImeConsumesInput(false);
         refreshSettings();refreshSuggestions();
@@ -549,8 +589,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(!requested.equals("gif"))searchRevision++;
         if(requested.equals("gif")) {
             gifQuery="";gifEditing=true;gifOffset=0;gifGridCells=0;
-            gifProvider=getSharedPreferences("keyboard_settings",0).getString("giphy_key","").isEmpty()
-                ?"commons":"giphy";
+            gifProvider=GifSources.initialProvider(!getSharedPreferences("keyboard_settings",0)
+                .getString("giphy_key","").isEmpty());
             gifRating=getSharedPreferences("keyboard_settings",0).getString("giphy_rating","r");
         }
         if(!"letters".equals(mode))clearPhrases();
@@ -835,14 +875,17 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     /** Casing is resolved for each word against the exact preceding phrase. */
     private String formatCandidate(String word,String typedPrefix,String before,String language) {
         GermanCaseModel casing=germanCaseModel;
+        String spelling=CommonLexiconCase.canonical(word,language);
         return "de".equals(language)&&casing!=null ?
-            casing.apply(word,typedPrefix,before,false):
-            WordCase.display(word,typedPrefix,before,false);
+            casing.apply(spelling,typedPrefix,before,false):
+            WordCase.display(spelling,typedPrefix,before,false);
     }
     private void updatePhraseButtons(List<String> phrases,String before,int revision) {
         if(phraseRow==null||revision!=predictionRevision)return;
         lastPhraseRevision=revision;
         phraseSource=before;
+        lastRawPhraseCandidates=phrases==null?Collections.emptyList():new ArrayList<>(phrases);
+        lastPhraseBefore=before;
         // Where no genuine phrase can be generated, useful keyboard functions
         // occupy the vacant surfaces. They are clearly actions, not fake text.
         String[] actionKeys={"clipboard","emoji","gif"};
@@ -850,6 +893,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         int actionIndex=0;
         for(int i=0;i<3;i++) {
             String phrase=phrases!=null&&i<phrases.size()?phrases.get(i):"";
+            if(!phrase.isEmpty())phrase=shiftController.applyPhrase(phrase);
             TextView view=phraseViews[i];
             if(!phrase.isEmpty()) {
                 visiblePhrases[i]=phrase;
@@ -888,6 +932,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                                          boolean capital,int revision) {
         lastCandidateRevision=revision;
         if(suggestions[0]==null)return;
+        lastRankedSuggestionWords=new ArrayList<>(ranked);
+        lastSuggestionPrefix=prefix;lastSuggestionBefore=before;
         String language=LanguageContext.detect(before);
         GermanCaseModel casing=germanCaseModel;
         TextContext context=TextContext.fromBeforeCursor(before);
@@ -897,15 +943,19 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             if(rankedPosition>=ranked.size()) {
                 visibleWords[position]="";continue;
             }
-            String candidate=ranked.get(rankedPosition);
+            String candidate=CommonLexiconCase.canonical(ranked.get(rankedPosition),language);
             // Personal frequency decides WHICH word, not HOW the word is
             // capitalized in the current sentence. The user's manually typed
             // prefix still wins; otherwise use language and sentence context.
             // German noun/verb spelling uses the contextual casing corpus.
             // Unknown proper nouns retain their observed capitalization.
-            visibleWords[position]="de".equals(language)&&casing!=null?
+            String natural="de".equals(language)&&casing!=null?
                 casing.apply(candidate,prefix,before,false):
                 WordCase.display(candidate,prefix,before,capital);
+            // Manually tapping Shift overrides the displayed initial, even
+            // if a lowercase prefix had already been typed. Caps Lock applies
+            // to the entire suggestion. Never change the stored word counts.
+            visibleWords[position]=shiftController.applyWord(natural);
         }
         for(int i=0;i<3;i++) {
             String value=visibleWords[i];
@@ -990,8 +1040,10 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(EditorPolicy.learns(editorKind))rememberToken(personalPreviousToken(beforeText),chosen);
         tokenObserver.reset();
         recentEvent=e;recentSurface=chosen;recentAt=System.currentTimeMillis();
-        manualShiftPending=false;
-        shift=false;updateAutoShiftFromText(chosen+" ");refreshSuggestions();
+        shiftController.consumeSuggestion();
+        synchronizeShift();
+        updateAutoShiftFromText(beforeText+chosen+" ");
+        refreshSuggestions();
     }
     private void choosePhrase(int position) {
         if(position<0 || position>=visiblePhrases.length ||
@@ -1032,16 +1084,17 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         }
         recentEvent=last;recentSurface=parts[parts.length-1];
         recentAt=System.currentTimeMillis();
-        manualShiftPending=false;shift=false;
+        shiftController.consumeSuggestion();
+        synchronizeShift();
         updateAutoShiftFromText(before+selected+" ");
         refreshSuggestions();
     }
-    private long lastShiftAt=0;
     private void renderKeyboard() {
         if(keys==null || panel==null)return;
         updatePredictionRowVisibility();
         cancelSpaceGesture();
         keys.removeAllViews();letterViews.clear();letterNames.clear();
+        shiftKeyView=null;
         panel.removeAllViews();panel.setVisibility(View.GONE);
         if(mode.equals("emoji")){showEmojiPanel();return;}
         if(mode.equals("clipboard")){showClipboardPanel();return;}
@@ -1069,6 +1122,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         }
         row(new String[]{mode.equals("symbols")?"ABC":"?123",",","☻","Leerzeichen",".","↵"},
             new float[]{1.45f,0.8f,0.8f,4.2f,0.8f,1.35f});
+        updateShiftLabels();
     }
     private void row(String[] captions,float[] widths) {
         LinearLayout row=new LinearLayout(this);row.setGravity(Gravity.CENTER);
@@ -1083,6 +1137,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(45),widths==null?1:widths[i]);
             p.setMargins(dp(2),dp(1),dp(2),dp(1));row.addView(v,p);
             if(character) {letterViews.add(v);letterNames.add(original);}
+            if("⇧".equals(original))shiftKeyView=v;
             v.setOnClickListener(w -> press(original));
             if("Leerzeichen".equals(original)) {
                 v.setContentDescription("Leerzeichen. Halten und links oder rechts schieben, um den Cursor zu bewegen.");
@@ -1260,10 +1315,10 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private void press(String key) {
         switch(key) {
             case "⇧":
-                if(System.currentTimeMillis()-lastShiftAt<420) {caps=!caps;shift=caps;}
-                else {shift=!shift;caps=false;}
-                manualShiftPending=true;
-                lastShiftAt=System.currentTimeMillis();updateShiftLabels();break;
+                shiftController.press(android.os.SystemClock.uptimeMillis());
+                synchronizeShift();
+                restyleCurrentPredictions();
+                break;
             case "⌫":backspace();break;
             case "?123":mode="symbols";renderKeyboard();refreshSuggestions();break;
             case "ABC":mode="letters";renderKeyboard();refreshSuggestions();break;
@@ -1287,9 +1342,11 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         ic.commitText(letter,1);
         long committedNs=android.os.SystemClock.elapsedRealtimeNanos()-startedNs;
         uiCommitTotalNs+=committedNs;uiCommitMaxNs=Math.max(uiCommitMaxNs,committedNs);
-        manualShiftPending=false;
         recentEvent=null;
-        if(shift&&!caps && !letter.equals("'")) {shift=false;updateShiftLabels();}
+        if(!letter.equals("'")&&!letter.equals("’")) {
+            shiftController.consumeLetter();
+            synchronizeShift();
+        }
         refreshSuggestions();
         recordInputTime(startedNs);
     }
@@ -1350,7 +1407,6 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             if(action!=EditorInfo.IME_ACTION_NONE && action!=EditorInfo.IME_ACTION_UNSPECIFIED && !multiline) {
                 ic.performEditorAction(action);
             } else ic.commitText("\n",1);
-            manualShiftPending=false;
             updateAutoShiftFromText((before==null?"":before.toString())+"\n");
         } else {
             if(symbol.equals(" ") && before!=null && before.length()>0 && before.charAt(before.length()-1)==' ') {
@@ -1360,7 +1416,6 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                     ic.deleteSurroundingText(1,0);
                 ic.commitText(symbol,1);
             }
-            manualShiftPending=false;
             // Use the newly committed editor contents, not the old cursor mode.
             updateAutoShiftFromText((before==null?"":before.toString())+symbol);
         }
@@ -1514,7 +1569,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     private void showGifPanel() {
         panelHeader(gifProvider.equals("giphy")?"GIF-Suche · Powered By GIPHY":
-            "GIF-Suche · Quellen auswählen",() -> showMode("letters"));
+            gifProvider.equals("commons")?"Wikimedia · GIF-Archiv (keine Reaktionen)":
+            "GIF-Reaktionen · Websuche ohne API-Schlüssel",() -> showMode("letters"));
         LinearLayout sources=new LinearLayout(this);
         panel.addView(sources,new LinearLayout.LayoutParams(-1,dp(38)));
         gifToolbarButton(sources,"GIPHY",gifProvider.equals("giphy"),() -> {
@@ -1529,8 +1585,12 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             }
             setGifProvider("giphy");
         });
-        gifToolbarButton(sources,"Wikimedia",gifProvider.equals("commons"),() -> setGifProvider("commons"));
-        gifToolbarButton(sources,"Tenor-Web",false,this::openTenorWeb);
+        gifToolbarButton(sources,"Tenor-Web",gifProvider.equals("tenorweb"),() -> {
+            setGifProvider("tenorweb");
+            openTenorWeb();
+        });
+        gifToolbarButton(sources,"GIPHY-Web",false,this::openGiphyWeb);
+        gifToolbarButton(sources,"Archiv",gifProvider.equals("commons"),() -> setGifProvider("commons"));
         LinearLayout queryRow=new LinearLayout(this);
         panel.addView(queryRow,new LinearLayout.LayoutParams(-1,dp(34)));
         gifQueryDisplay=button("",14,KEY,33);
@@ -1555,8 +1615,15 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         gifScroll.addView(gifResults,new ScrollView.LayoutParams(-1,-2));
         LinearLayout actions=new LinearLayout(this);
         panel.addView(actions,new LinearLayout.LayoutParams(-1,dp(38)));
-        gifToolbarButton(actions,"Suchen / Trends",false,()->searchGif(false));
-        gifToolbarButton(actions,"Mehr GIFs",false,()->searchGif(true));
+        gifToolbarButton(actions,gifProvider.equals("giphy")?"Suchen / Trends":
+            gifProvider.equals("commons")?"Archiv durchsuchen":"Im Browser suchen",
+            false,()->searchGif(false));
+        gifToolbarButton(actions,gifProvider.equals("giphy")?"Mehr GIFs":
+            gifProvider.equals("tenorweb")?"GIPHY-Web":"Tenor-Web",false,()-> {
+                if(gifProvider.equals("giphy"))searchGif(true);
+                else if(gifProvider.equals("tenorweb"))openGiphyWeb();
+                else openTenorWeb();
+            });
         gifToolbarButton(actions,"Tastatur",false,()->setGifEditing(true));
         updateGifStatus();
         updateGifLayout();
@@ -1570,18 +1637,20 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         renderKeyboard();
         refreshSuggestions();
     }
-    private void openTenorWeb() {
-        String phrase=gifQuery.trim();
-        // Tenor's website search remains accessible, while its third-party
-        // programming API has been shut down. A browser, not the IME, handles it.
-        String slug=phrase.isEmpty()?"happy":phrase.replaceAll("\s+","-");
-        Uri uri=new Uri.Builder().scheme("https").authority("tenor.com")
-            .appendPath("search").appendPath(slug+"-gifs").build();
-        Intent intent=new Intent(Intent.ACTION_VIEW,uri);
+    private void openTenorWeb() {openGifWebsite("tenorweb");}
+    private void openGiphyWeb() {openGifWebsite("giphyweb");}
+    private void openGifWebsite(String provider) {
+        // No API key or scraping. Explicitly open the provider's normal public
+        // search page; media selection and browser sharing happen on the site.
+        String slug=GifSources.slug(gifQuery);
+        Uri.Builder uri=new Uri.Builder().scheme("https")
+            .authority(GifSources.websiteHost(provider)).appendPath("search");
+        uri.appendPath(provider.equals("giphyweb")?slug:slug+"-gifs");
+        Intent intent=new Intent(Intent.ACTION_VIEW,uri.build());
         intent.addCategory(Intent.CATEGORY_BROWSABLE);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         try {requestHideSelf(0);startActivity(intent);}
-        catch(Exception e) {gifStatus.setText("Tenor konnte im Browser nicht geöffnet werden.");}
+        catch(Exception e) {gifStatus.setText("GIF-Website konnte im Browser nicht geöffnet werden.");}
     }
     private void setGifEditing(boolean editing) {
         gifEditing=editing;
@@ -1602,7 +1671,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             String api=getSharedPreferences("keyboard_settings",0).getString("giphy_key","");
             gifStatus.setText(gifProvider.equals("giphy")?
                 (api.isEmpty()?"GIPHY-Schlüssel fehlt":"GIPHY · Filter: "+gifRating.toUpperCase(Locale.ROOT)):
-                "Wikimedia: freie Bilder, kaum Reaktions-GIFs");
+                gifProvider.equals("commons")?
+                    "Wikimedia ist ein Sacharchiv, keine gute Reaktions-GIF-Suche":
+                    "Ohne API-Schlüssel: Reaktions-GIFs im Browser auf Tenor/GIPHY suchen");
         }
     }
     private void searchGif() {searchGif(false);}
@@ -1610,6 +1681,16 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(!mode.equals("gif"))return;
         final String query=gifQuery.trim();
         final String provider=gifProvider;
+        if(provider.equals("tenorweb")) {
+            if(more)gifStatus.setText("Mehr Ergebnisse gibt es auf der Tenor-Webseite.");
+            else openTenorWeb();
+            return;
+        }
+        if(provider.equals("giphyweb")) {
+            if(more)gifStatus.setText("Mehr Ergebnisse gibt es auf der GIPHY-Webseite.");
+            else openGiphyWeb();
+            return;
+        }
         final String key=getSharedPreferences("keyboard_settings",0).getString("giphy_key","");
         final String rating=gifRating;
         if(provider.equals("commons") && query.isEmpty()) {

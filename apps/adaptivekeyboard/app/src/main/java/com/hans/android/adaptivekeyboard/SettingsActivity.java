@@ -87,7 +87,7 @@ public final class SettingsActivity extends Activity {
             new AlertDialog.Builder(this).setMessage(newValue?"Privatmodus an. Es wird nichts gelernt.":"Privatmodus aus. Lernen bei bestätigten Wörtern aktiv.").setPositiveButton("OK",null).show();
         });
         label("GIF-Suche: Reaktionen statt Wikimedia-Animationen",19);
-        label("Für Reaktions-GIFs, Memes und derben Humor ist GIPHY wesentlich geeigneter. Ein kostenloser Entwicklerschlüssel wird einmalig benötigt. GIPHY vergibt Testschlüssel mit etwa hundert Anfragen pro Stunde. Ohne Schlüssel bleibt Wikimedia als kleinere, meist sachliche GIF-Sammlung; Tenor kann ohne Schlüssel im Browser geöffnet werden. Nur ausdrücklich gestartete GIF-Suchbegriffe werden an den gewählten Dienst gesendet, niemals normaler Tastaturtext.",14);
+        label("Für echte Reaktions-GIFs und Memes ist GIPHY geeignet. Direkt in der Tastatur funktioniert die GIPHY-Suche nur mit deinem kostenlosen API-Schlüssel (Beta: 100 Anfragen pro Stunde). Ohne Schlüssel öffnen Suchanfragen jetzt standardmäßig die öffentliche Tenor-Webseite; GIPHY-Web ist ebenfalls verfügbar. Wikimedia bleibt nur als bewusst wählbares Archiv für freie Sachanimationen. Der Browserweg ist keine integrierte GIF-Übertragung: GIFs werden dort über die Webseite geteilt. Nur ausdrücklich gestartete GIF-Suchbegriffe verlassen das Gerät, niemals normaler Tastaturtext.",14);
         action("Kostenlosen GIPHY-Schlüssel erstellen",() -> {
             Intent browser=new Intent(Intent.ACTION_VIEW,
                 android.net.Uri.parse("https://developers.giphy.com/"));
@@ -103,9 +103,9 @@ public final class SettingsActivity extends Activity {
             getSharedPreferences("keyboard_settings",0).edit().putString("giphy_key",key.getText().toString().trim()).apply();
             key.setText("");new AlertDialog.Builder(this).setMessage("Schlüssel lokal gespeichert. Die GIF-Suche verwendet jetzt GIPHY.").setPositiveButton("OK",null).show();
         });
-        action("GIPHY-Schlüssel entfernen (zurück zu Wikimedia)",() -> {
+        action("GIPHY-Schlüssel entfernen (zurück zu Tenor-Web)",() -> {
             getSharedPreferences("keyboard_settings",0).edit().remove("giphy_key").apply();
-            new AlertDialog.Builder(this).setMessage("GIPHY-Schlüssel gelöscht. Wikimedia bleibt verfügbar.").setPositiveButton("OK",null).show();
+            new AlertDialog.Builder(this).setMessage("GIPHY-Schlüssel gelöscht. Ohne Schlüssel nutzt die GIF-Suche Tenor-Web im Browser.").setPositiveButton("OK",null).show();
         });
         final String[] ratings={"g","pg","pg-13","r"};
         final String[] labels={"G: familienfreundlich","PG: milde Sprache", "PG-13: kräftige Sprache", "R: derber Humor und starke Sprache"};
