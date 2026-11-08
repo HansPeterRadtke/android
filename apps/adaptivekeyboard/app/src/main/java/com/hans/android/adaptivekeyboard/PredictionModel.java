@@ -450,6 +450,14 @@ public final class PredictionModel {
         return false;
     }
 
+    /** Precisely observed personal ranking, without model or generic filler. */
+    public synchronized List<String> predictPersonal(String rawPrefix,String prev,String prev2,
+                                                     String language) {
+        List<String> personal=personalNext(rawPrefix,prev,prev2,language);
+        if(norm(rawPrefix).isEmpty() && norm(prev).isEmpty() && norm(prev2).isEmpty())
+            return personalOpeningBackfill(personal);
+        return personal;
+    }
     public synchronized List<String> predict(String rawPrefix,String prev,String prev2) {
         return predict(rawPrefix,prev,prev2,Collections.emptyMap());
     }
@@ -464,18 +472,11 @@ public final class PredictionModel {
         String prefix=norm(rawPrefix),a=norm(prev),b=norm(prev2);
         // This is the ordering rule, not another additive feature. No generic
         // model may reorder or replace previously confirmed next-word choices.
-        List<String> known=personalNext(rawPrefix,a,b,language);
-        // When the editor is empty, include previously typed words and the
-        // first word of actual observed adjacent pairs from legacy history.
-        // The model must not fabricate starts, but must not ignore that history.
-        if(prefix.isEmpty()&&a.isEmpty()&&b.isEmpty()) {
-            List<String> personal=personalOpeningBackfill(known);
-            if(!personal.isEmpty())return personal;
-            // With no personal opening evidence, use a LOCAL tiny neural
-            // language model or the compact generic starter corpus. These are
-            // fallbacks, never counted or labelled as learned personal text.
-        }
-        if(!known.isEmpty())return known;
+        List<String> personal=predictPersonal(rawPrefix,a,b,language);
+        // Real user history always occupies the earliest positions, but does
+        // not force the other two buttons to remain blank. Contextual model
+        // candidates fill those gaps; they are NOT learned unless selected.
+        if(personal.size()>=3)return personal;
         Map<String,Double> generic=new HashMap<>();
         if(baseline!=null)generic.putAll(baseline.candidates(prefix,a,b,language));
         if(neuralScores!=null)for(Map.Entry<String,Double> e:neuralScores.entrySet()) {
@@ -483,7 +484,9 @@ public final class PredictionModel {
             if(word.startsWith(prefix) && e.getValue()!=null && e.getValue()>0)
                 generic.merge(word,e.getValue(),Double::sum);
         }
-        if(prefix.isEmpty()&&a.isEmpty()&&generic.isEmpty())return Collections.emptyList();
+        if(prefix.isEmpty()&&a.isEmpty()&&generic.isEmpty())
+            return SuggestionMixer.merge(personal,
+                SuggestionMixer.coldStart(rawPrefix,language,true),3,rawPrefix);
         Scored[] best=new Scored[3];
         double englishBias=languageBias(a,b);
         int exact=0;
@@ -568,7 +571,12 @@ public final class PredictionModel {
         }
         List<String> out=new ArrayList<>(3);
         for(Scored item:best)if(item!=null)out.add(item.output);
-        return out;
+        boolean sentenceStart=prefix.isEmpty()&&a.isEmpty()&&b.isEmpty();
+        // Generic words are a last resort while models are loading, or when
+        // the context provides too few distinct candidates for three slots.
+        List<String> supplement=SuggestionMixer.merge(out,
+            SuggestionMixer.coldStart(rawPrefix,language,sentenceStart),3,rawPrefix);
+        return SuggestionMixer.merge(personal,supplement,3,rawPrefix);
     }
     private static double recencyBonus(long lastSeenMs,double strength) {
         if(lastSeenMs<=0)return 0;

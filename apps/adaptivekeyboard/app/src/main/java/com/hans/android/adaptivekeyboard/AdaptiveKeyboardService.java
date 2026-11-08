@@ -74,7 +74,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(1),r -> {
             Thread t=new Thread(r,"keyboard-personal-predict");t.setDaemon(true);return t;
         },new ThreadPoolExecutor.DiscardOldestPolicy());
-    private Runnable scheduledSnapshot,scheduledNeural;
+    private Runnable scheduledSnapshot,scheduledNeural,scheduledPendingControls;
     private final java.util.ArrayList<TextView> letterViews=new java.util.ArrayList<>(40);
     private final java.util.ArrayList<String> letterNames=new java.util.ArrayList<>(40);
     private volatile int observedRevision=0;
@@ -108,6 +108,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private TextView caretIndicator;
     private final TextView[] phraseViews=new TextView[3];
     private final String[] visiblePhrases=new String[3];
+    private final String[] phraseActions=new String[3];
     private int lastPhraseRevision=-1;
     private String phraseSource="";
     private TextView activeSpaceKey;
@@ -121,6 +122,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private int spaceMoveCount;
     private TextView[] suggestions = new TextView[3];
     private String[] visibleWords = new String[3];
+    private final String[] wordActions=new String[3];
     private String mode="letters",gifQuery="";
     private TextView gifStatus;
     private LinearLayout gifResults;
@@ -376,7 +378,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             v.setTextColor(i==1?0xffffd57b:TEXT); v.setGravity(Gravity.CENTER);
             LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(42),1);p.setMargins(dp(2),0,dp(2),0);
             suggestionRow.addView(v,p);suggestions[i]=v;
-            v.setOnClickListener(w -> chooseSuggestion(pos));
+            v.setOnClickListener(w -> clickWordSlot(pos));
         }
         // The second prediction row shows actual multiword completions.
         // A compact caret preview replaces it only when editing *inside* a word.
@@ -393,7 +395,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             params.setMargins(dp(2),0,dp(2),0);
             phraseRow.addView(choice,params);
             phraseViews[index]=choice;
-            choice.setOnClickListener(v -> choosePhrase(slot));
+            choice.setOnClickListener(v -> clickPhraseSlot(slot));
         }
         caretIndicator=button("",13,0xff24313c,38);
         caretIndicator.setSingleLine(true);
@@ -413,7 +415,12 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         root.addView(panel,new LinearLayout.LayoutParams(-1,-2));
         keys=new LinearLayout(this);keys.setOrientation(LinearLayout.VERTICAL);
         root.addView(keys,new LinearLayout.LayoutParams(-1,-2));
-        renderToolbar();renderKeyboard();refreshSuggestions();
+        renderToolbar();renderKeyboard();
+        if(!sensitive && !privateMode) {
+            updateSuggestionButtons(Collections.emptyList(),"","",false,predictionRevision);
+            updatePhraseButtons(Collections.emptyList(),"",predictionRevision);
+        }
+        refreshSuggestions();
         return root;
     }
     @Override public void onStartInput(EditorInfo attribute, boolean restarting) {
@@ -433,10 +440,22 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         // No suggestion from the previous editor may flash on a fresh field.
         lastCandidateRevision=-1;lastNeuralRevision=-1;
         for(int i=0;i<3;i++) {
-            visibleWords[i]="";
+            visibleWords[i]="";wordActions[i]=null;
             if(suggestions[i]!=null){suggestions[i].setText("");suggestions[i].setEnabled(false);}
         }
-        if(root!=null){renderToolbar();renderKeyboard();refreshSuggestions();}
+        if(root!=null){
+            renderToolbar();renderKeyboard();
+            if(!sensitive && !privateMode) {
+                updateSuggestionButtons(Collections.emptyList(),"","",false,predictionRevision);
+                if(editorKind==EditorPolicy.Kind.URI || editorKind==EditorPolicy.Kind.EMAIL)
+                    showEditorShortcuts(predictionRevision);
+                else {
+                    restorePhraseClicks();
+                    updatePhraseButtons(Collections.emptyList(),"",predictionRevision);
+                }
+            }
+            refreshSuggestions();
+        }
     }
     @Override public void onStartInputView(EditorInfo attribute, boolean restarting) {
         super.onStartInputView(attribute,restarting);
@@ -494,6 +513,12 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         v.setMinHeight(dp(h));v.setContentDescription(text);
         return v;
     }
+    /** Prediction surfaces have no place in clipboard/GIF/emoji or private panels. */
+    private void updatePredictionRowVisibility() {
+        boolean enabled="letters".equals(mode) && !sensitive && !privateMode;
+        if(suggestionRow!=null)suggestionRow.setVisibility(enabled?View.VISIBLE:View.GONE);
+        if(detailFrame!=null)detailFrame.setVisibility(enabled?View.VISIBLE:View.GONE);
+    }
     private void renderToolbar() {
         if(toolbar==null)return;
         toolbar.removeAllViews();
@@ -505,7 +530,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         toolbarAction(privateMode?"🔒":"◉","Privatmodus",() -> {
             privateMode=!privateMode;
             getSharedPreferences("keyboard_settings",0).edit().putBoolean("incognito",privateMode).apply();
-            renderToolbar();refreshSuggestions();toast(privateMode?"Privatmodus an":"Privatmodus aus");
+            renderToolbar();updatePredictionRowVisibility();refreshSuggestions();
+            toast(privateMode?"Privatmodus an":"Privatmodus aus");
         });
         toolbarAction("⚙","Einstellungen",() -> {
             Intent i=new Intent(this,SettingsActivity.class);i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -594,15 +620,52 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private void restorePhraseClicks() {
         for(int i=0;i<phraseViews.length;i++)if(phraseViews[i]!=null) {
             final int idx=i;
-            phraseViews[i].setOnClickListener(v -> choosePhrase(idx));
+            phraseViews[i].setOnClickListener(v -> clickPhraseSlot(idx));
         }
+    }
+    private void clickPhraseSlot(int position) {
+        if(position<0 || position>=phraseActions.length)return;
+        String action=phraseActions[position];
+        if("clipboard".equals(action) || "emoji".equals(action) || "gif".equals(action)) {
+            showMode(action);
+            return;
+        }
+        choosePhrase(position);
     }
     private void refreshSuggestions() {
         final int revision=++predictionRevision;
         if(scheduledSnapshot!=null)handler.removeCallbacks(scheduledSnapshot);
         if(scheduledNeural!=null)handler.removeCallbacks(scheduledNeural);
+        if(scheduledPendingControls!=null)handler.removeCallbacks(scheduledPendingControls);
         scheduledSnapshot=() -> calculateSuggestions(revision);
         handler.postDelayed(scheduledSnapshot,REFRESH_DELAY_MS);
+        // Slow editors and neural inference can take seconds. Never leave
+        // clickable suggestions that belong to the previous cursor context.
+        // Show genuine controls after a short grace period instead of flicker
+        // on every fast keystroke. No editor text or model IPC is required.
+        scheduledPendingControls=() -> {
+            if(revision!=predictionRevision || !"letters".equals(mode) ||
+                sensitive || privateMode ||
+                editorKind==EditorPolicy.Kind.URI || editorKind==EditorPolicy.Kind.EMAIL)return;
+            if(lastCandidateRevision!=revision)showPendingWordControls(revision);
+            if(lastPhraseRevision!=revision)
+                updatePhraseButtons(Collections.emptyList(),"",revision);
+        };
+        handler.postDelayed(scheduledPendingControls,105);
+    }
+    private void showPendingWordControls(int revision) {
+        if(revision!=predictionRevision)return;
+        lastCandidateRevision=revision;
+        for(int i=0;i<3;i++) {
+            visibleWords[i]="";
+            wordActions[i]=i==0?"left":i==1?"clipboard":"right";
+            TextView button=suggestions[i];
+            if(button==null)continue;
+            button.setText(i==0?"←":i==1?"📋":"→");
+            button.setContentDescription(i==0?"Cursor nach links":
+                i==1?"Zwischenablage":"Cursor nach rechts");
+            button.setEnabled(true);
+        }
     }
 
     /** No blocking editor IPC is allowed on the keyboard input/UI thread. */
@@ -650,10 +713,15 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             String tokenPrefix=GrammarTokens.activeWord(before);
             String tokenPrev=personalPreviousToken(before);
             List<String> tokens=tokenHistory.predict(tokenPrev,tokenPrefix,3);
-            final boolean observedTokens=!tokens.isEmpty();
+            final int personalCount=SuggestionMixer.merge(tokens,
+                predictions.predictPersonal(context.prefix,context.previous,
+                    context.beforePrevious,language),3,context.prefix).size();
+            // An observed punctuation token occupies a high-priority slot, not
+            // the *entire* row. Use model words for the other positions.
             List<String> ranked=(snapshot.selection||insideWord)?Collections.emptyList():
-                observedTokens?tokens:predictions.predict(context.prefix,context.previous,
-                    context.beforePrevious,Collections.emptyMap(),language);
+                SuggestionMixer.merge(tokens,
+                    predictions.predict(context.prefix,context.previous,
+                        context.beforePrevious,Collections.emptyMap(),language),3,tokenPrefix);
             // Paint the single-word results before doing any phrase generation.
             // Phrase predictions must never delay either typing or the top row.
             handler.post(() -> {
@@ -667,32 +735,36 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 if(snapshot.selection||insideWord)
                     updatePhraseButtons(Collections.emptyList(),before,revision);
             });
-            if(!snapshot.selection && !insideWord && !ranked.isEmpty()) {
+            List<String> quickPhrases=Collections.emptyList();
+            // Quick phrases must start with words ACTUALLY used after this
+            // context. Cold generic fillers (e.g. "I" after "Let's") may be
+            // acceptable as individual fallback words but cannot be stitched
+            // into arbitrary unrelated phrases in the second row.
+            List<String> quickFirst=SuggestionMixer.merge(tokens,
+                predictions.predictPersonal(context.prefix,context.previous,
+                    context.beforePrevious,language),3,context.prefix);
+            if(!snapshot.selection && !insideWord && !quickFirst.isEmpty()) {
                 final String lang=language;
-                List<String> quickPhrases=PhrasePredictor.complete(before,ranked,
+                quickPhrases=PhrasePredictor.complete(before,quickFirst,
                     (seed,limit) -> {
                         if(revision!=predictionRevision)return Collections.emptyList();
                         TextContext following=TextContext.fromBeforeCursor(seed);
-                        if(opening && !predictions.hasPersonalNext("",following.previous))
-                            return Collections.emptyList();
-                        return predictions.predict("",following.previous,following.beforePrevious,
-                            Collections.emptyMap(),lang);
+                        // Quick phrases should be grounded in actual observed
+                        // adjacent words. Neural phrases may arrive later.
+                        return predictions.hasPersonalNext("",following.previous)?
+                            predictions.predictPersonal("",following.previous,
+                                following.beforePrevious,lang):Collections.emptyList();
                     },(word,prefix,seed) -> formatCandidate(word,prefix,seed,lang),3);
-                handler.post(() -> {
-                    if(active==this && revision==predictionRevision && lastNeuralRevision!=revision)
-                        updatePhraseButtons(quickPhrases,before,revision);
-                });
-            } else if(!snapshot.selection && !insideWord) {
-                handler.post(() -> {
-                    if(active==this && revision==predictionRevision && lastNeuralRevision!=revision)
-                        updatePhraseButtons(Collections.emptyList(),before,revision);
-                });
             }
-            // Never spend cycles asking a model to overrule previously confirmed
-            // continuations. User usage always takes precedence.
-            if(snapshot.selection||insideWord||!neuralEnabled() || observedTokens ||
-                predictions.hasPersonalNext(context.prefix,context.previous) ||
-                (opening && predictions.hasPersonalNext("","")))return;
+            final List<String> earlyPhrases=quickPhrases;
+            if(!snapshot.selection && !insideWord)handler.post(() -> {
+                if(active==this && revision==predictionRevision && lastNeuralRevision!=revision)
+                    updatePhraseButtons(earlyPhrases,before,revision);
+            });
+            // Neural completions fill only missing places, even when one or
+            // two real personal continuations already occupy other slots.
+            if(snapshot.selection||insideWord||!neuralEnabled() ||
+                (personalCount>=3 && earlyPhrases.size()>=3))return;
             ChimeEnglish en=neuralModel;
             GermanNextWord de=germanNeuralModel;
             if(("en".equals(language)&&en==null)||("de".equals(language)&&de==null))return;
@@ -711,8 +783,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                             return;
                         }
                         if(revision!=predictionRevision)return;
-                        List<String> mixed=predictions.predict(context.prefix,context.previous,
-                            context.beforePrevious,scores,language);
+                        List<String> mixed=SuggestionMixer.merge(tokens,
+                            predictions.predict(context.prefix,context.previous,
+                                context.beforePrevious,scores,language),3,tokenPrefix);
                         handler.post(() -> {
                             if(active==this&&revision==predictionRevision&&!sensitive&&!privateMode &&
                                 "letters".equals(mode)) {
@@ -725,8 +798,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                             if(revision!=predictionRevision)return Collections.emptyList();
                             TextContext next=TextContext.fromBeforeCursor(seed);
                             if(predictions.hasPersonalNext("",next.previous)) {
-                                return predictions.predict("",next.previous,next.beforePrevious,
-                                    Collections.emptyMap(),language);
+                                return predictions.predictPersonal("",next.previous,
+                                    next.beforePrevious,language);
                             }
                             try {
                                 List<String> words=new ArrayList<>(limit);
@@ -742,10 +815,14 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                         };
                         List<String> multi=PhrasePredictor.complete(before,mixed,follow,
                             (word,prefix,seed)->formatCandidate(word,prefix,seed,language),3);
+                        // Keep the user's actual phrase choices ahead of
+                        // neural phrases, and never show duplicates.
+                        multi=SuggestionMixer.merge(earlyPhrases,multi,3,"");
+                        final List<String> resolvedPhrases=multi;
                         if(revision!=predictionRevision)return;
                         handler.post(() -> {
                             if(active==this && revision==predictionRevision && !sensitive && !privateMode)
-                                updatePhraseButtons(multi,before,revision);
+                                updatePhraseButtons(resolvedPhrases,before,revision);
                         });
                     });
                 };
@@ -766,14 +843,31 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(phraseRow==null||revision!=predictionRevision)return;
         lastPhraseRevision=revision;
         phraseSource=before;
+        // Where no genuine phrase can be generated, useful keyboard functions
+        // occupy the vacant surfaces. They are clearly actions, not fake text.
+        String[] actionKeys={"clipboard","emoji","gif"};
+        String[] actionLabels={"📋", "☻", "GIF"};
+        int actionIndex=0;
         for(int i=0;i<3;i++) {
             String phrase=phrases!=null&&i<phrases.size()?phrases.get(i):"";
-            visiblePhrases[i]=phrase;
             TextView view=phraseViews[i];
-            if(view!=null) {
-                view.setText(phrase);
-                view.setContentDescription(phrase);
-                view.setEnabled(!phrase.isEmpty());
+            if(!phrase.isEmpty()) {
+                visiblePhrases[i]=phrase;
+                phraseActions[i]=null;
+                if(view!=null) {
+                    view.setText(phrase);
+                    view.setContentDescription("Wortfolge: "+phrase);
+                    view.setEnabled(true);
+                }
+            } else {
+                visiblePhrases[i]="";
+                phraseActions[i]=actionKeys[actionIndex];
+                if(view!=null) {
+                    view.setText(actionLabels[actionIndex]);
+                    view.setContentDescription("Funktion: "+actionKeys[actionIndex]);
+                    view.setEnabled(true);
+                }
+                actionIndex++;
             }
         }
     }
@@ -782,6 +876,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         phraseSource="";
         for(int i=0;i<3;i++) {
             visiblePhrases[i]="";
+            phraseActions[i]=null;
             if(phraseViews[i]!=null) {
                 phraseViews[i].setText("");phraseViews[i].setEnabled(false);
             }
@@ -814,10 +909,24 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         }
         for(int i=0;i<3;i++) {
             String value=visibleWords[i];
-            suggestions[i].setText(!value.isEmpty()?value:
-                (i==1?(editorKind==EditorPolicy.Kind.URI || editorKind==EditorPolicy.Kind.EMAIL?
-                    "":sensitive?"Privates Feld":privateMode?"Privatmodus":""):""));
-            suggestions[i].setEnabled(!value.isEmpty());
+            if(!value.isEmpty()) {
+                wordActions[i]=null;
+                suggestions[i].setText(value);
+                suggestions[i].setContentDescription("Wortvorschlag: "+value);
+                suggestions[i].setEnabled(true);
+            } else if(!sensitive && !privateMode && "letters".equals(mode)) {
+                wordActions[i]=i==0?"left":i==1?"clipboard":"right";
+                String label=i==0?"←":i==1?"📋":"→";
+                suggestions[i].setText(label);
+                suggestions[i].setContentDescription(i==0?"Cursor nach links":
+                    i==1?"Zwischenablage öffnen":"Cursor nach rechts");
+                suggestions[i].setEnabled(true);
+            } else {
+                wordActions[i]=null;
+                suggestions[i].setText(i==1?(sensitive?"Privates Feld":
+                    privateMode?"Privatmodus":""):"");
+                suggestions[i].setEnabled(false);
+            }
         }
     }
     /** Display a caret only for midword editing or selected text. */
@@ -842,6 +951,15 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         caretIndicator.setVisibility(View.VISIBLE);
     }
 
+    /** Empty prediction slots remain useful controls, not empty or fake text. */
+    private void clickWordSlot(int position) {
+        if(position<0 || position>=wordActions.length)return;
+        String action=wordActions[position];
+        if("left".equals(action)) {arrow(KeyEvent.KEYCODE_DPAD_LEFT);return;}
+        if("right".equals(action)) {arrow(KeyEvent.KEYCODE_DPAD_RIGHT);return;}
+        if("clipboard".equals(action)) {showMode("clipboard");return;}
+        chooseSuggestion(position);
+    }
     private void chooseSuggestion(int position) {
         String chosen=visibleWords[position];
         // Never commit a suggestion from an obsolete cursor or word prefix.
@@ -921,6 +1039,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private long lastShiftAt=0;
     private void renderKeyboard() {
         if(keys==null || panel==null)return;
+        updatePredictionRowVisibility();
         cancelSpaceGesture();
         keys.removeAllViews();letterViews.clear();letterNames.clear();
         panel.removeAllViews();panel.setVisibility(View.GONE);

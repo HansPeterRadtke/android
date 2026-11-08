@@ -37,6 +37,18 @@ public final class PhrasePredictorTest {
         assertArrayEquals(new String[0],PhrasePredictor.words("one"));
         assertFalse(PhrasePredictor.validWord("<unk>"));
     }
+    @Test public void onePersonalFirstWordCanProduceThreeDistinctPhrases(){
+        List<String> phrases=PhrasePredictor.complete("I am ",List.of("going"),
+            (ctx,limit)->List.of("to","home","there","to"),caps,3);
+        assertEquals(List.of("going to","going home","going there"),phrases);
+    }
+    @Test public void twoFirstWordsAreMixedBeforeExtraVariants(){
+        List<String> phrases=PhrasePredictor.complete("Ich möchte ",
+            List.of("gerne","heute"),(ctx,limit)->
+                ctx.endsWith("gerne ")?List.of("wissen","fahren","lernen"):
+                List.of("gehen","essen","kommen"),caps,3);
+        assertEquals(List.of("gerne wissen","heute gehen","gerne fahren"),phrases);
+    }
     @Test public void doesNotInferFromInvalidInput() {
         assertTrue(PhrasePredictor.complete("",null,(s,k)->List.of("x"),caps,3).isEmpty());
         assertTrue(PhrasePredictor.complete("",List.of("Haus"),(s,k)->List.of(),caps,3).isEmpty());

@@ -28,27 +28,33 @@ public final class PhrasePredictor {
         boolean opening=context.prefix.isEmpty() && context.previous.isEmpty() &&
             context.beforePrevious.isEmpty();
         boolean german=!opening && "de".equals(LanguageContext.detect(beforeCursor));
+        List<List<String>> perFirst=new ArrayList<>(firstWords.size());
         for(String word:firstWords) {
-            if(out.size()>=maxPhrases)break;
-            if(!validWord(word))continue;
-            // German prediction should not mix in a single English article "a".
-            if(german && word.length()==1)continue;
+            if(!validWord(word) || (german && word.length()==1))continue;
             String first=casing.format(word,typedPrefix,previousContext);
             String seed=previousContext+first+" ";
-            List<String> next=engine.next(seed,5);
-            if(next==null)continue;
-            String second=null;
+            List<String> next=engine.next(seed,8);
+            if(next==null || next.isEmpty())continue;
+            List<String> phrases=new ArrayList<>(3);
             for(String raw:next) {
                 if(!validWord(raw))continue;
-                String candidate=casing.format(raw,"",seed);
-                if(!differentWord(first,candidate))continue;
-                second=candidate;
-                break;
+                String second=casing.format(raw,"",seed);
+                if(!differentWord(first,second))continue;
+                String phrase=first+" "+second;
+                if(phrases.stream().noneMatch(p->p.equalsIgnoreCase(phrase)))phrases.add(phrase);
+                if(phrases.size()>=maxPhrases)break;
             }
-            if(second==null)continue;
-            String result=first+" "+second;
-            String key=result.toLowerCase(Locale.GERMAN);
-            if(seen.add(key))out.add(result);
+            if(!phrases.isEmpty())perFirst.add(phrases);
+        }
+        // Round robin yields one distinct phrase for each first word before
+        // producing variations of a single highly likely personal continuation.
+        for(int rank=0;rank<maxPhrases && out.size()<maxPhrases;rank++) {
+            for(List<String> choices:perFirst) {
+                if(rank>=choices.size())continue;
+                String phrase=choices.get(rank),key=phrase.toLowerCase(Locale.GERMAN);
+                if(seen.add(key))out.add(phrase);
+                if(out.size()==maxPhrases)break;
+            }
         }
         return out;
     }
