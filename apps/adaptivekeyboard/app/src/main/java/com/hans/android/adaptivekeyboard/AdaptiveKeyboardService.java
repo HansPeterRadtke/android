@@ -154,6 +154,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private boolean tokenHistoryReady=false;
     private final java.util.ArrayList<String[]> tokenCatchup=new java.util.ArrayList<>();
     private int searchRevision=0;
+    private final TypedWordDraft draft=new TypedWordDraft();
+    private TextContext savedDraftContext;
+    private PredictionModel.Event savedDraftEvent;
     private PredictionModel.Event recentEvent;
     private String recentSurface="";
     private long recentAt=0;
@@ -284,6 +287,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(clipboardManager!=null)clipboardManager.addPrimaryClipChangedListener(clipListener);
     }
     @Override public void onDestroy() {
+        finishTypedDraft();
         if(clipboardManager!=null)clipboardManager.removePrimaryClipChangedListener(clipListener);
         closeGifField();
         searchRevision++; handler.removeCallbacksAndMessages(null);
@@ -311,6 +315,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     public static void clearLearning(Context c) {
         if(active!=null) {
+            active.draft.reset();active.clearSavedDraft();
             active.predictions.clearLearningData();
             active.tokenHistory=new TokenHistory();
             active.tokenObserver.reset();active.tokenCatchup.clear();
@@ -483,16 +488,21 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         super.onStartInput(attribute,restarting);
         // Android can replace the connection to the same focused editor while
         // an IME-owned search field or clipboard list is in use.
-        boolean sameField=restarting && info!=null && attribute!=null &&
-            java.util.Objects.equals(info.packageName,attribute.packageName) &&
-            info.fieldId==attribute.fieldId && java.util.Objects.equals(info.fieldName,attribute.fieldName) &&
-            info.inputType==attribute.inputType &&
-            editorKind==EditorPolicy.classify(attribute.inputType,attribute.imeOptions) &&
-            sensitive==isPrivateField(attribute);
-        cancelSpaceGesture();
-        info=attribute;sensitive=isPrivateField(attribute);
-        editorKind=EditorPolicy.classify(attribute==null?0:attribute.inputType,
+        boolean sameIdentity=info!=null && attribute!=null && info.fieldId==attribute.fieldId &&
+            java.util.Objects.equals(info.fieldName,attribute.fieldName) &&
+            java.util.Objects.equals(info.packageName,attribute.packageName);
+        boolean nextSensitive=isPrivateField(attribute);
+        EditorPolicy.Kind nextKind=EditorPolicy.classify(attribute==null?0:attribute.inputType,
             attribute==null?0:attribute.imeOptions);
+        boolean sameField=restarting && sameIdentity && info.inputType==attribute.inputType &&
+            editorKind==nextKind && sensitive==nextSensitive;
+        if(!sameField) {
+            if(!sameIdentity || !nextSensitive)finishTypedDraft();
+            draft.reset();
+            if(!sameIdentity || nextSensitive)clearSavedDraft();
+        }
+        cancelSpaceGesture();
+        info=attribute;sensitive=nextSensitive;editorKind=nextKind;
         recentEvent=null;
         if(sameField) {
             if(gifField!=null)gifHost=getCurrentInputConnection();
@@ -545,7 +555,12 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(Build.VERSION.SDK_INT>=31 && ic!=null)ic.setImeConsumesInput(gifField!=null);
         refreshSettings();captureClipboard();refreshSuggestions();
     }
+    @Override public void onFinishInput() {
+        finishTypedDraft();
+        super.onFinishInput();
+    }
     @Override public void onFinishInputView(boolean finishingInput) {
+        finishTypedDraft();
         cancelSpaceGesture();
         closeGifField();
         clipboardRevision++;
@@ -563,6 +578,14 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     @Override public void onUpdateSelection(int oldStart,int oldEnd,int newStart,int newEnd,int candidatesStart,int candidatesEnd) {
         super.onUpdateSelection(oldStart,oldEnd,newStart,newEnd,candidatesStart,candidatesEnd);
+        if(learnsMessageText() && draft.hasInput() && oldEnd>0 && newStart==0 && newEnd==0) {
+            InputConnection ic=getCurrentInputConnection();
+            if(ic!=null) {
+                CharSequence left=ic.getTextBeforeCursor(1,0),right=ic.getTextAfterCursor(1,0);
+                if(left!=null && left.length()==0 && right!=null && right.length()==0)
+                    editorCleared();
+            }
+        }
         if(root!=null && "letters".equals(mode)) {
             uiSelectionUpdates++;
             if(spaceSwipe!=null && spaceSwipe.active())return;
@@ -600,6 +623,38 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         return gifField!=null?EditorPolicy.Kind.PROSE:editorKind;
     }
     private boolean typingSensitive() {return gifField==null && sensitive;}
+    private void clearSavedDraft() {
+        savedDraftEvent=null;savedDraftContext=null;
+    }
+    private PredictionModel.Event saveTyped(TextContext word) {
+        PredictionModel.Event event=predictions.learnTyped(word.prefix,word.previous,word.beforePrevious);
+        database.persist(event,word.prefix,1);
+        catchupTyped(event,word.prefix);
+        return event;
+    }
+    private void finishTypedDraft() {
+        TextContext word=draft.finish();
+        if(word!=null && learnsMessageText()) {
+            savedDraftEvent=saveTyped(word);
+            savedDraftContext=word;
+        }
+    }
+    private void editorCleared() {
+        finishTypedDraft();draft.reset();clearSavedDraft();
+    }
+    private void reopenSavedDraft(InputConnection ic) {
+        if(savedDraftEvent==null)return;
+        // Only when returning to an already counted draft, verify the caret
+        // before retracting its old spelling. Normal key taps do no editor read.
+        CharSequence left=ic.getTextBeforeCursor(350,0);
+        if(TypedWordDraft.same(savedDraftContext,TextContext.fromBeforeCursor(left))) {
+            predictions.undo(savedDraftEvent);
+            catchupUndo(savedDraftEvent);
+            database.persist(savedDraftEvent,savedDraftContext.prefix,-1);
+            draft.resume(left.toString(),savedDraftContext);
+        }
+        clearSavedDraft();
+    }
     private boolean learnsMessageText() {
         return gifField==null && !sensitive && !privateMode && EditorPolicy.learns(editorKind);
     }
@@ -629,6 +684,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         toolbarAction("←","Cursor nach links",() -> arrow(KeyEvent.KEYCODE_DPAD_LEFT));
         toolbarAction("→","Cursor nach rechts",() -> arrow(KeyEvent.KEYCODE_DPAD_RIGHT));
         toolbarAction(privateMode?"🔒":"◉","Privatmodus",() -> {
+            draft.reset();clearSavedDraft();
             privateMode=!privateMode;
             getSharedPreferences("keyboard_settings",0).edit().putBoolean("incognito",privateMode).apply();
             renderToolbar();updatePredictionRowVisibility();refreshSuggestions();
@@ -646,6 +702,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     private void showMode(String requested) {
         if("gif".equals(requested)) {
+            if(gifField==null)finishTypedDraft();
             recentEvent=null;tokenObserver.reset();
             if(gifField==null) {
                 layoutBeforeGif=mode.equals("numbers") || mode.equals("symbols")?mode:"letters";
@@ -699,6 +756,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private static final class EditorSnapshot {
         final String before,after;
         final boolean selection;
+        boolean hasSurroundingText=true;
         EditorSnapshot(String before,String after,boolean selection) {
             this.before=before;this.after=after;this.selection=selection;
         }
@@ -720,8 +778,10 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         CharSequence b=ic.getTextBeforeCursor(350,0);
         CharSequence a=ic.getTextAfterCursor(24,0);
         CharSequence selected=ic.getSelectedText(0);
-        return new EditorSnapshot(b==null?"":b.toString(),a==null?"":a.toString(),
+        EditorSnapshot snapshot=new EditorSnapshot(b==null?"":b.toString(),a==null?"":a.toString(),
             selected!=null && selected.length()>0);
+        snapshot.hasSurroundingText=b!=null && a!=null;
+        return snapshot;
     }
 
     /** Debounced scheduling only: never rank words or query editor on keypress. */
@@ -879,6 +939,11 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 if(active!=this || revision!=predictionRevision)return;
                 uiSnapshotCount++;uiSnapshotTotalNs+=took;
                 uiSnapshotMaxNs=Math.max(uiSnapshotMaxNs,took);
+                if(learnsMessageText() && snapshot.hasSurroundingText) {
+                    if(snapshot.before.isEmpty() && snapshot.after.isEmpty() && draft.hasInput())
+                        editorCleared();
+                    else draft.observe(snapshot.before,snapshot.after,snapshot.selection);
+                }
                 updateCaretIndicator(snapshot.before,snapshot.after,snapshot.selection);
                 updateAutoShiftFromText(snapshot.before);
                 restorePhraseClicks();
@@ -1129,6 +1194,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         CharSequence selection=ic.getSelectedText(0);
         // A selected punctuation token is not an English/German word. Insert
         // the *actual string* without creating a fake word in the model.
+        if(learnsMessageText()){reopenSavedDraft(ic);draft.reset();}
         if(!PhrasePredictor.validWord(chosen)) {
             if(selection!=null&&selection.length()>0)return;
             ic.commitText(chosen+" ",1);
@@ -1173,6 +1239,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(after!=null && after.length()>0 && Character.isLetter(after.charAt(0)) &&
             !context.prefix.isEmpty())return;
         ic.beginBatchEdit();
+        if(learnsMessageText()){reopenSavedDraft(ic);draft.reset();}
         if(!context.prefix.isEmpty())ic.deleteSurroundingText(context.prefix.length(),0);
         ic.commitText(selected+" ",1);
         ic.endBatchEdit();
@@ -1447,7 +1514,10 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private void enterLetter(String letter) {
         long startedNs=android.os.SystemClock.elapsedRealtimeNanos();
         InputConnection ic=typingConnection();if(ic==null)return;
-        ic.commitText(letter,1);
+        boolean learn=learnsMessageText();
+        if(learn)reopenSavedDraft(ic);
+        boolean inserted=ic.commitText(letter,1);
+        if(inserted && learn)draft.append(letter);
         long committedNs=android.os.SystemClock.elapsedRealtimeNanos()-startedNs;
         uiCommitTotalNs+=committedNs;uiCommitMaxNs=Math.max(uiCommitMaxNs,committedNs);
         recentEvent=null;
@@ -1492,13 +1562,15 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         InputConnection ic=typingConnection();if(ic==null)return;
         CharSequence before=ic.getTextBeforeCursor(500,0);
         TextContext c=TextContext.fromBeforeCursor(before);
-        if(learnsMessageText() &&
-            !c.prefix.isEmpty() && isAtWordEnd(ic) &&
-            (ic.getSelectedText(0)==null || ic.getSelectedText(0).length()==0)) {
-            PredictionModel.Event e=predictions.learnTyped(c.prefix,c.previous,c.beforePrevious);
-            database.persist(e,c.prefix,1);
-            catchupTyped(e,c.prefix);
-            recentEvent=e;recentSurface=c.prefix;recentAt=System.currentTimeMillis();
+        if(learnsMessageText()) {
+            TextContext authored=draft.finish();
+            if((before==null || before.length()==0) && authored!=null)c=authored;
+            CharSequence selected=ic.getSelectedText(0);
+            if(!c.prefix.isEmpty() && isAtWordEnd(ic) && (selected==null || selected.length()==0) &&
+                !TypedWordDraft.same(savedDraftContext,c)) {
+                recentEvent=saveTyped(c);recentSurface=c.prefix;recentAt=System.currentTimeMillis();
+            }
+            clearSavedDraft();draft.separator(before,symbol);
         }
         if(learnsMessageText() &&
             before!=null && !symbol.equals("\n")) {
@@ -1535,6 +1607,11 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private void backspace() {
         InputConnection ic=typingConnection();if(ic==null)return;
         CharSequence selection=ic.getSelectedText(0);
+        if(learnsMessageText()) {
+            if(selection==null || selection.length()==0)reopenSavedDraft(ic);
+            else clearSavedDraft();
+            draft.backspace(selection!=null && selection.length()>0);
+        }
         CharSequence before=ic.getTextBeforeCursor(Math.max(2,recentSurface.length()+2),0);
         tokenObserver.reset();
         if(selection!=null && selection.length()>0) {
@@ -1559,6 +1636,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private void arrow(int keycode) {
         InputConnection ic=typingConnection();if(ic==null)return;
         int by=keycode==KeyEvent.KEYCODE_DPAD_LEFT?-1:1;
+        if(learnsMessageText())finishTypedDraft();
+        draft.reset();
         CursorNavigator.move(ic,by);
         tokenObserver.reset();
         if(Build.VERSION.SDK_INT>=31)ic.setImeConsumesInput(false);
@@ -1674,6 +1753,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 row.setOnClickListener(v -> {
                     InputConnection target=typingConnection();
                     if(target!=null && target.commitText(clip,1)) {
+                        draft.reset();clearSavedDraft();
                         recentEvent=null;showMode("letters");
                     }
                 });

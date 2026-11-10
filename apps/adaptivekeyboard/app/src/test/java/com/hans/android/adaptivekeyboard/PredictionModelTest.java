@@ -648,4 +648,15 @@ public class PredictionModelTest {
         m.restorePair("to","work",16); // one legacy pair has no fuller context
         assertEquals("work",m.predictPersonal("","to","listen","en").get(0));
     }
+    @Test public void restoredCustomWordRemainsVisibleWithCommonPrefixInNewContext() {
+        PredictionModel m=new PredictionModel();
+        for(String word:new String[]{"schon","schnell","schön"})m.addBaseWord(word,1,"de");
+        m.restoreWord("Schraubfink",1,0,1234);
+        m.restorePair("mein","schraubfink",1);
+        java.util.Map<String,Double> hints=java.util.Map.of("schon",60.0,"schnell",56.0,"schön",52.0);
+        assertTrue(m.predict("sch","der","",hints,"de").stream().anyMatch(v->v.equalsIgnoreCase("Schraubfink")));
+        assertEquals("schraubfink",m.predict("sch","mein","",hints,"de").get(0).toLowerCase(java.util.Locale.ROOT));
+        m.clearLearningData();
+        assertFalse(m.predict("sch","der","",hints,"de").stream().anyMatch(v->v.equalsIgnoreCase("Schraubfink")));
+    }
 }

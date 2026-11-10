@@ -54,7 +54,7 @@ public final class LearningDatabase extends SQLiteOpenHelper {
 
     public void restore(PredictionModel model) {
         SQLiteDatabase d = getReadableDatabase();
-        try (Cursor c = d.rawQuery("SELECT surface,typed,selected,last_used_ms FROM words",null)) {
+        try (Cursor c = d.rawQuery("SELECT surface,typed,selected,last_used_ms FROM words WHERE typed>0 OR selected>0",null)) {
             while(c.moveToNext()) model.restoreWord(c.getString(0),c.getInt(1),c.getInt(2),c.getLong(3));
         }
         try (Cursor c = d.rawQuery("SELECT prev,word,cnt FROM pairs WHERE cnt>0",null)) {
@@ -222,6 +222,13 @@ public final class LearningDatabase extends SQLiteOpenHelper {
                     "(SELECT value FROM clipboard ORDER BY inserted DESC LIMIT 20)");
                 db.setTransactionSuccessful();
             } finally {db.endTransaction();}
+        });
+    }
+    public void countLearnedWords(java.util.function.IntConsumer result) {
+        disk.execute(() -> {
+            try(Cursor c=getReadableDatabase().rawQuery("SELECT count(*) FROM words WHERE typed>0",null)) {
+                if(c.moveToFirst())result.accept(c.getInt(0));
+            }
         });
     }
     public void readClipboard(java.util.function.Consumer<List<String>> loaded) {

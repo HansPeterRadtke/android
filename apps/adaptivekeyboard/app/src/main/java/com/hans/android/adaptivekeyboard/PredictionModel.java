@@ -53,6 +53,7 @@ public final class PredictionModel {
     }
     // Build one sorted prefix index lazily; HashMap makes startup substantially faster.
     private final Map<String,Word> words = new HashMap<>();
+    private final java.util.NavigableSet<String> learnedKeys=new java.util.TreeSet<>();
     private List<String> sortedKeys=Collections.emptyList();
     private boolean indexDirty=true;
     // Prefixes of one or two characters can match thousands of words. Only
@@ -127,7 +128,7 @@ public final class PredictionModel {
         commonPrefixCache.clear();
         long now=System.currentTimeMillis();
         w.lastUsedMs=now;
-        w.typed++;
+        w.typed++;learnedKeys.add(word);
         if(selected)w.selected++;
         String evicted=null;
         if(!a.isEmpty()) {
@@ -179,6 +180,7 @@ public final class PredictionModel {
             w.typed=Math.max(0,w.typed-1);
             if(e.selected)w.selected=Math.max(0,w.selected-1);
             w.lastUsedMs=0;
+            if(w.typed==0)learnedKeys.remove(e.word);
             if(w.typed==0 && w.baseRank==UNKNOWN_RANK){words.remove(e.word);indexDirty=true;}
         }
         if(!e.previous.isEmpty()) {
@@ -210,6 +212,7 @@ public final class PredictionModel {
         commonPrefixCache.clear();
         w.surface=surface;w.typed=Math.max(0,typed);w.selected=Math.max(0,selected);
         w.lastUsedMs=Math.max(0,lastUsedMs);
+        if(w.typed>0)learnedKeys.add(k);else learnedKeys.remove(k);
     }
     public synchronized void restorePair(String a,String word,int count) {
         cachedLegacyOpenings=null;
@@ -267,7 +270,7 @@ public final class PredictionModel {
             else {w.typed=0;w.selected=0;w.lastUsedMs=0;
                 if(w.lexicalSurface!=null)w.surface=w.lexicalSurface;}
         }
-        pairs.clear();triples.clear();pairWithContext.clear();recentByPrevious.clear();choices.clear();choiceTimes.clear();
+        learnedKeys.clear();pairs.clear();triples.clear();pairWithContext.clear();recentByPrevious.clear();choices.clear();choiceTimes.clear();
         latestChoiceByPrefix.clear();rejections.clear();nextByPrevious.clear();
         nextByTwoPrevious.clear();commonPrefixCache.clear();indexDirty=true;
     }
@@ -593,7 +596,31 @@ public final class PredictionModel {
         // the context provides too few distinct candidates for three slots.
         List<String> supplement=SuggestionMixer.merge(out,
             SuggestionMixer.coldStart(rawPrefix,language,sentenceStart),3,rawPrefix);
-        return SuggestionMixer.merge(personal,supplement,3,rawPrefix);
+        List<String> ranked=SuggestionMixer.merge(personal,supplement,3,rawPrefix);
+        if(prefix.length()>=2 && personal.size()<3)
+            includeCustomCompletion(ranked,rawPrefix,prefix);
+        return ranked;
+    }
+
+    /** Keep an actual user-coined spelling reachable even in a different sentence. */
+    private void includeCustomCompletion(List<String> ranked,String rawPrefix,String prefix) {
+        for(String shown:ranked) {
+            Word w=words.get(norm(shown));
+            if(w!=null && w.baseRank==UNKNOWN_RANK && w.typed>0 &&
+                norm(shown).startsWith(prefix))return;
+        }
+        Word best=null;
+        for(String key:learnedKeys.tailSet(prefix,true)) {
+            if(!key.startsWith(prefix))break;
+            Word w=words.get(key);
+            if(w.baseRank!=UNKNOWN_RANK)continue;
+            int uses=w.typed+w.selected;
+            if(best==null || uses>best.typed+best.selected ||
+                (uses==best.typed+best.selected && w.lastUsedMs>best.lastUsedMs))best=w;
+        }
+        if(best==null)return;
+        String value=caseMatched(best.surface,rawPrefix);
+        if(ranked.size()<3)ranked.add(value);else ranked.set(2,value);
     }
     private static double recencyBonus(long lastSeenMs,double strength) {
         if(lastSeenMs<=0)return 0;

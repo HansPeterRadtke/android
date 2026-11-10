@@ -19,6 +19,17 @@ import android.text.InputType;
 /** Simple onboarding and explicit local-data controls. */
 public final class SettingsActivity extends Activity {
     private LinearLayout layout;
+    private TextView learnedCount;
+    private LearningDatabase history;
+    private void refreshLearnedCount() {
+        if(history!=null)history.countLearnedWords(count->runOnUiThread(()->{
+            if(isDestroyed())return;
+            boolean paused=getSharedPreferences("keyboard_settings",0).getBoolean("incognito",false);
+            learnedCount.setText("Gespeicherte Wörter: "+count+(paused?" · Privatmodus an":"")+" · Aktualisieren");
+        }));
+    }
+    @Override protected void onResume() {super.onResume();refreshLearnedCount();}
+    @Override protected void onDestroy() {if(history!=null)history.close();super.onDestroy();}
     private int dp(int v) { return Math.round(getResources().getDisplayMetrics().density*v); }
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
@@ -79,11 +90,17 @@ public final class SettingsActivity extends Activity {
         });
         layout.addView(neural);
         label("Lernverhalten",19);
-        label("Beim Weitertippen wird nichts übernommen. Leertaste, Satzzeichen, Eingabetaste oder eine bewusst gewählte Vorhersage bestätigen Wörter bzw. Satzzeichen-Tokens. Der vollständige Text wird nicht gespeichert; nur lokale Übergangsstatistiken. Passwörter, URLs, E-Mail-Adressen und private Felder werden von der persönlichen Lernstatistik ausgeschlossen.",14);
+        history=new LearningDatabase(this);
+        learnedCount=new TextView(this);
+        learnedCount.setPadding(0,dp(6),0,dp(6));
+        learnedCount.setOnClickListener(v->refreshLearnedCount());
+        layout.addView(learnedCount);
+
+        label("Beim Weitertippen wird nichts übernommen. Die Tastatur speichert bestätigte Wörter und das zuletzt selbst getippte Wort auch beim Absenden oder Verlassen einer Nachricht. Der vollständige Text wird nicht gespeichert; nur lokale Übergangsstatistiken. Passwörter, URLs, E-Mail-Adressen und private Felder werden von der persönlichen Lernstatistik ausgeschlossen.",14);
         action("Privatmodus umschalten",() -> {
             boolean newValue=!getSharedPreferences("keyboard_settings",0).getBoolean("incognito",false);
             getSharedPreferences("keyboard_settings",0).edit().putBoolean("incognito",newValue).apply();
-            AdaptiveKeyboardService.refreshSettings();
+            AdaptiveKeyboardService.refreshSettings();refreshLearnedCount();
             new AlertDialog.Builder(this).setMessage(newValue?"Privatmodus an. Es wird nichts gelernt.":"Privatmodus aus. Lernen bei bestätigten Wörtern aktiv.").setPositiveButton("OK",null).show();
         });
         label("GIF-Suche: Reaktionen statt Wikimedia-Animationen",19);
