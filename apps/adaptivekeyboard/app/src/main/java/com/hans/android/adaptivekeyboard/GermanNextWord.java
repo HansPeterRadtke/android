@@ -139,13 +139,7 @@ public final class GermanNextWord {
         }
         return normalized;
     }
-    private String[] sentenceWords(String input) {
-        String before=input==null?"":input;
-        String prefix=ChimeEnglish.activePrefix(before);
-        if(!prefix.isEmpty())before=before.substring(0,before.length()-prefix.length());
-        int cutoff=-1;
-        for(char c:new char[]{'.','?','!','\n','…'})cutoff=Math.max(cutoff,before.lastIndexOf(c));
-        if(cutoff>=0)before=before.substring(cutoff+1);
+    private String[] sentenceWords(String before) {
         ArrayList<String> tokens=new ArrayList<>();
         Matcher matcher=WORDS.matcher(before);
         while(matcher.find())tokens.add(canonicalGerman(matcher.group()));
@@ -203,9 +197,10 @@ public final class GermanNextWord {
     public synchronized List<Candidate> predict(String beforeCursor,int requested) {
         int limit=Math.min(32,Math.max(0,requested));
         if(limit==0)return Collections.emptyList();
-        String prefix=ChimeEnglish.activePrefix(beforeCursor==null?"":beforeCursor)
-            .toLowerCase(Locale.GERMAN);
-        float[] scores=logits(sentenceWords(beforeCursor));
+        String text = beforeCursor == null ? "" : beforeCursor;
+        String typedPrefix = ChimeEnglish.activePrefix(text);
+        String prefix = typedPrefix.toLowerCase(Locale.GERMAN);
+        float[] scores = logits(sentenceWords(GrammarTokens.sentenceBeforePrefix(text, typedPrefix)));
         float[] best=new float[limit];int[] indices=new int[limit];
         Arrays.fill(best,Float.NEGATIVE_INFINITY);
         for(int id:offerIds) {

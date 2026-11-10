@@ -45,4 +45,13 @@ public class ChimeEnglishTest {
         assertFalse(ChimeEnglish.isOfferable("<unk>"));
         assertFalse(ChimeEnglish.isOfferable("🔥"));
     }
+
+    @Test public void keepsPunctuationTokensAndDropsOnlyTheUnfinishedWord() {
+        assertEquals("I think... ", ChimeEnglish.sentenceContext("I think... ma"));
+        assertEquals("I asked Dr. Smith ", ChimeEnglish.sentenceContext("I asked Dr. Smith wh"));
+        assertEquals("it costs 3.50 ", ChimeEnglish.sentenceContext("it costs 3.50 to"));
+        assertEquals("visit example.", ChimeEnglish.sentenceContext("visit example.com"));
+        assertEquals(" next ", ChimeEnglish.sentenceContext("I like films. next wo"));
+        assertEquals(" next ", ChimeEnglish.sentenceContext("Really? next wo"));
+    }
 }

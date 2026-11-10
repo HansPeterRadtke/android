@@ -45,4 +45,26 @@ public class GrammarTokensTest {
         c=TextContext.fromBeforeCursor("visit example.com ");
         assertEquals("com",c.previous);
     }
+
+    @Test public void fullStopAfterOrdinaryWordIsNotAnAbbreviationSuffix() {
+        assertTrue(WordCase.sentenceStart("Wir sind vier Teams. "));
+        assertTrue(WordCase.sentenceStart("I liked both films. "));
+        assertEquals("Wir sind vier Teams.".length(),
+                GrammarTokens.lastSentenceStart("Wir sind vier Teams. Weiter geht es"));
+        assertFalse(WordCase.sentenceStart("Bitte fragen Sie Dr. "));
+    }
+
+    @Test public void bothDotsOfSpacedGermanAbbreviationsRetainContext() {
+        assertEquals(0, GrammarTokens.lastSentenceStart("Das gilt z. B. heute"));
+        assertEquals(0, GrammarTokens.lastSentenceStart("Das gilt d. h. auch hier"));
+        assertEquals(0, GrammarTokens.lastSentenceStart("Das gilt u. a. heute"));
+    }
+
+    @Test public void casingUsesTheWholeDomainAndRecognizesGermanClosingQuotes() {
+        assertFalse(WordCase.sentenceStart("Besuche beispiel.de"));
+        assertTrue(WordCase.sentenceStart("Sie sagte „Bis morgen.“ "));
+        assertTrue(WordCase.sentenceStart("Sie sagte „Bis morgen.“\u00a0"));
+        assertTrue(WordCase.sentenceStart("Er fragte »Wirklich?« "));
+        assertFalse(WordCase.sentenceStart("Er sagte „vielleicht…“ "));
+    }
 }

@@ -52,4 +52,19 @@ public final class GermanNextWordTest {
         try {new GermanNextWord(new ByteArrayInputStream(source));fail("corrupt checkpoint was accepted");}
         catch(IOException expected) {assertTrue(expected.getMessage().contains("checksum"));}
     }
+
+    @Test public void predictsFromTheSameWordsAcrossNonFinalPunctuation() throws Exception {
+        GermanNextWord model = model();
+        List<String> afterRequest = suggestions(model, "ich würde gerne ", 5);
+        assertEquals(afterRequest, suggestions(model, "ich würde gerne... ", 5));
+        assertEquals(afterRequest, suggestions(model, "ich würde gerne… ", 5));
+        assertEquals(suggestions(model, "ich würde gerne wis", 5),
+                suggestions(model, "ich würde gerne... wis", 5));
+        assertEquals(suggestions(model, "ich frage Dr Müller ", 5),
+                suggestions(model, "ich frage Dr. Müller ", 5));
+        assertEquals(suggestions(model, "das kostet Euro ", 5),
+                suggestions(model, "das kostet 3.50 Euro ", 5));
+        assertEquals(suggestions(model, "besuche beispiel de", 5),
+                suggestions(model, "besuche beispiel.de", 5));
+    }
 }

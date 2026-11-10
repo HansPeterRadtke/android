@@ -141,11 +141,7 @@ public final class ChimeEnglish {
     }
     static String sentenceContext(String before) {
         if(before==null)return "";
-        String text=before.substring(0,before.length()-activePrefix(before).length());
-        int cutoff=Math.max(Math.max(text.lastIndexOf('.'),text.lastIndexOf('!')),
-            Math.max(text.lastIndexOf('?'),text.lastIndexOf('\n')));
-        if(cutoff>=0)return text.substring(cutoff+1);
-        return text;
+        return GrammarTokens.sentenceBeforePrefix(before, activePrefix(before));
     }
     int[] contextIds(String before) {
         String context=sentenceContext(before);

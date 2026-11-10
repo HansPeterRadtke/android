@@ -65,10 +65,18 @@ public final class GrammarTokens {
     }
     public static boolean isSentenceStart(String before) {
         if(before==null||before.isEmpty())return true;
-        int cursor=before.length()-1;
-        while(cursor>=0 && (before.charAt(cursor)==' '||before.charAt(cursor)=='\t'||
-              before.charAt(cursor)=='\r'||before.charAt(cursor)=='"'||
-              before.charAt(cursor)=='\u201d'||before.charAt(cursor)==')'))cursor--;
+        return isSentenceStartAt(before, before.length());
+    }
+    static boolean isSentenceStartAt(String before, int end) {
+        int cursor = end - 1;
+        while (cursor >= 0) {
+            char c = before.charAt(cursor);
+            if (c == '\n' || !(Character.isWhitespace(c) || Character.isSpaceChar(c)
+                    || "\"'’“”«»‹›)]".indexOf(c) >= 0)) {
+                break;
+            }
+            cursor--;
+        }
         if(cursor<0)return true;
         char c=before.charAt(cursor);
         if(c=='\n')return true;
@@ -85,6 +93,27 @@ public final class GrammarTokens {
         }
         return start;
     }
+    // Classify dots using the full text: the prefix in "example.com" tells us
+    // the preceding dot is inside a domain even though "com" is still being typed.
+    static String sentenceBeforePrefix(String text, String prefix) {
+        return text.substring(lastSentenceStart(text), text.length() - prefix.length());
+    }
+
+    private static boolean isAbbreviationPeriod(String text, int at) {
+        for (String abbreviation : ABBREVIATIONS) {
+            for (int dot = abbreviation.indexOf('.'); dot >= 0; dot = abbreviation.indexOf('.', dot + 1)) {
+                int start = at - dot;
+                if (start < 0 || (start > 0 && Character.isLetterOrDigit(text.codePointBefore(start)))) {
+                    continue;
+                }
+                if (text.regionMatches(true, start, abbreviation, 0, abbreviation.length())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private static boolean realPeriod(String value,int at) {
         if(at<0||at>=value.length()||value.charAt(at)!='.')return false;
         if(at>0&&value.charAt(at-1)=='.'||at+1<value.length()&&value.charAt(at+1)=='.')
@@ -93,8 +122,7 @@ public final class GrammarTokens {
             Character.isDigit(value.charAt(at+1)))return false; // 3.14
         if(at+1<value.length() && Character.isLetterOrDigit(value.charAt(at+1)))
             return false; // example.com, v1.2, abbreviations
-        String left=value.substring(Math.max(0,at-18),at+1).toLowerCase(Locale.ROOT);
-        for(String abbreviation:ABBREVIATIONS)if(left.endsWith(abbreviation))return false;
+        if (isAbbreviationPeriod(value, at)) return false;
         // Single initials, such as "J. Smith", are normally not full stops.
         if(at>=1 && Character.isUpperCase(value.charAt(at-1)) &&
             (at==1||!Character.isLetter(value.charAt(at-2))))return false;

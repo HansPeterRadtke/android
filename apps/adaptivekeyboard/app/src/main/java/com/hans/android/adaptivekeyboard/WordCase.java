@@ -35,8 +35,7 @@ public final class WordCase {
     public static boolean sentenceStart(String beforeCursor) {
         String text=beforeCursor==null?"":beforeCursor;
         String prefix=GrammarTokens.activeWord(text);
-        if(!prefix.isEmpty())text=text.substring(0,text.length()-prefix.length());
-        return GrammarTokens.isSentenceStart(text);
+        return GrammarTokens.isSentenceStartAt(text, text.length() - prefix.length());
     }
 
     /** Inserted words obey sentence capitalization; explicit prefix wins. */
