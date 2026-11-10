@@ -210,20 +210,29 @@ public final class LearningDatabase extends SQLiteOpenHelper {
     }
 
     public void saveClip(String value) {
-        if (value == null || value.isBlank()) return;
-        String clip = value.length() > 3000 ? value.substring(0,3000) : value;
+        if(value==null || value.isEmpty())return;
         disk.execute(() -> {
-            SQLiteDatabase db = getWritableDatabase();
-            db.execSQL("INSERT OR REPLACE INTO clipboard(value,inserted) VALUES (?,?)",new Object[]{clip,System.currentTimeMillis()});
-            db.execSQL("DELETE FROM clipboard WHERE value NOT IN (SELECT value FROM clipboard ORDER BY inserted DESC LIMIT 20)");
+            SQLiteDatabase db=getWritableDatabase();
+            db.beginTransaction();
+            try {
+                db.execSQL("INSERT OR REPLACE INTO clipboard(value,inserted) "+
+                    "SELECT ?,max(?,coalesce(max(inserted),0)+1) FROM clipboard",
+                    new Object[]{value,System.currentTimeMillis()});
+                db.execSQL("DELETE FROM clipboard WHERE value NOT IN "+
+                    "(SELECT value FROM clipboard ORDER BY inserted DESC LIMIT 20)");
+                db.setTransactionSuccessful();
+            } finally {db.endTransaction();}
         });
     }
-    public List<String> clipboard() {
-        ArrayList<String> values = new ArrayList<>();
-        try (Cursor c = getReadableDatabase().rawQuery("SELECT value FROM clipboard ORDER BY inserted DESC LIMIT 20",null)) {
-            while(c.moveToNext()) values.add(c.getString(0));
-        }
-        return values;
+    public void readClipboard(java.util.function.Consumer<List<String>> loaded) {
+        disk.execute(() -> {
+            List<String> values=new ArrayList<>();
+            try(Cursor c=getReadableDatabase().rawQuery(
+                "SELECT value FROM clipboard ORDER BY inserted DESC LIMIT 20",null)) {
+                while(c.moveToNext())values.add(c.getString(0));
+            }
+            loaded.accept(values);
+        });
     }
     public void clearClipboard() {
         disk.execute(() -> getWritableDatabase().delete("clipboard",null,null));

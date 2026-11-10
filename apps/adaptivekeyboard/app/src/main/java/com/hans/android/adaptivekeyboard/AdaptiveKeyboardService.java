@@ -26,6 +26,7 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputContentInfo;
 import android.view.inputmethod.SurroundingText;
+import android.widget.EditText;
 import android.widget.GridLayout;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
@@ -129,13 +130,20 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private TextView[] suggestions = new TextView[3];
     private String[] visibleWords = new String[3];
     private final String[] wordActions=new String[3];
-    private String mode="letters",gifQuery="";
+    private String mode="letters",layoutBeforeGif="letters";
+    private LinearLayout gifPane;
+    private EditText gifField;
+    private InputConnection gifConnection,gifHost;
+    private TextView providerButton;
+    private ClipboardManager clipboardManager;
+    private final ClipboardManager.OnPrimaryClipChangedListener clipListener=this::clipboardChanged;
+    private String lastClipboardText;
+    private long lastClipboardTime=-1,skippedClipboardTime=-1;
+    private int clipboardRevision;
     private TextView gifStatus;
     private LinearLayout gifResults;
     private ScrollView gifScroll;
-    private TextView gifQueryDisplay, gifMore;
     private String gifProvider="reactions", gifRating="r";
-    private boolean gifEditing=true;
     private int gifOffset=0, gifGridCells=0;
     private int gifPreviewsExpected, gifPreviewsLoaded, gifPreviewsFailed;
     private boolean shift=true,caps=false,sensitive=false,privateMode=false;
@@ -269,8 +277,12 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             });
         });
         refreshSettings();
+        clipboardManager=(ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+        if(clipboardManager!=null)clipboardManager.addPrimaryClipChangedListener(clipListener);
     }
     @Override public void onDestroy() {
+        if(clipboardManager!=null)clipboardManager.removePrimaryClipChangedListener(clipListener);
+        closeGifField();
         searchRevision++; handler.removeCallbacksAndMessages(null);
         cancelSpaceGesture();
         network.shutdownNow();
@@ -322,7 +334,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         int flags=info.inputType & (InputType.TYPE_TEXT_FLAG_CAP_SENTENCES |
             InputType.TYPE_TEXT_FLAG_CAP_WORDS | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
         if(flags==0)return false;
-        InputConnection ic=getCurrentInputConnection();
+        InputConnection ic=typingConnection();
         return ic!=null && ic.getCursorCapsMode(flags)!=0;
     }
     private void synchronizeShift() {
@@ -361,13 +373,13 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     /** Uses already available surrounding text; no editor IPC round trip. */
     private void updateAutoShiftFromText(String before) {
         if(!"letters".equals(mode))return;
-        int flags=info==null?0:info.inputType;
+        int flags=gifField!=null || info==null?0:info.inputType;
         boolean charCaps=(flags & InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS)!=0;
         boolean wordCaps=(flags & InputType.TYPE_TEXT_FLAG_CAP_WORDS)!=0 &&
             (before.isEmpty() || Character.isWhitespace(before.charAt(before.length()-1)));
         boolean sentenceCaps=TextContext.fromBeforeCursor(before).prefix.isEmpty() &&
             WordCase.sentenceStart(before);
-        boolean desired=EditorPolicy.allowsAutoShift(editorKind) &&
+        boolean desired=EditorPolicy.allowsAutoShift(typingKind()) &&
             (charCaps || wordCaps || sentenceCaps);
         ShiftController.Mode old=shiftController.mode();
         shiftController.automatic(desired);
@@ -406,6 +418,11 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     @Override public View onCreateInputView() {
         root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(3),dp(4),dp(3),dp(6));root.setBackgroundColor(BG);
+        closeGifField();
+        gifPane=new LinearLayout(this);
+        gifPane.setOrientation(LinearLayout.VERTICAL);
+        gifPane.setVisibility(View.GONE);
+        root.addView(gifPane,new LinearLayout.LayoutParams(-1,-2));
         suggestionRow=new LinearLayout(this);suggestionRow.setGravity(Gravity.CENTER_VERTICAL);
         root.addView(suggestionRow,new LinearLayout.LayoutParams(-1,dp(44)));
         for(int i=0;i<3;i++) {
@@ -439,8 +456,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         caretIndicator.setVisibility(View.INVISIBLE);
         detailFrame.addView(caretIndicator,new FrameLayout.LayoutParams(-1,dp(38)));
         caretIndicator.setOnClickListener(v -> {
-            if(CursorNavigator.collapseToEnd(getCurrentInputConnection())) {
-                if(Build.VERSION.SDK_INT>=31)getCurrentInputConnection().setImeConsumesInput(false);
+            if(CursorNavigator.collapseToEnd(typingConnection())) {
+                if(Build.VERSION.SDK_INT>=31)typingConnection().setImeConsumesInput(false);
                 refreshSuggestions();
             }
         });
@@ -452,7 +469,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         keys=new LinearLayout(this);keys.setOrientation(LinearLayout.VERTICAL);
         root.addView(keys,new LinearLayout.LayoutParams(-1,-2));
         renderToolbar();renderKeyboard();
-        if(!sensitive && !privateMode) {
+        if(!typingSensitive() && !privateMode) {
             updateSuggestionButtons(Collections.emptyList(),"","",false,predictionRevision);
             updatePhraseButtons(Collections.emptyList(),"",predictionRevision);
         }
@@ -461,6 +478,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     @Override public void onStartInput(EditorInfo attribute, boolean restarting) {
         cancelSpaceGesture();
+        closeGifField();
+        clipboardRevision++;
         super.onStartInput(attribute,restarting);
         info=attribute;sensitive=isPrivateField(attribute);
         editorKind=EditorPolicy.classify(attribute==null?0:attribute.inputType,
@@ -470,7 +489,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         mode = (cls == InputType.TYPE_CLASS_NUMBER || cls == InputType.TYPE_CLASS_PHONE ||
             cls == InputType.TYPE_CLASS_DATETIME) ? "numbers" : "letters";
         shiftController.reset(false);
-        shift=false;caps=false;manualShiftPending=false;gifQuery="";
+        shift=false;caps=false;manualShiftPending=false;
         lastRankedSuggestionWords=Collections.emptyList();
         lastRawPhraseCandidates=Collections.emptyList();
         searchRevision++;predictionRevision++;recentEvent=null;
@@ -484,9 +503,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         }
         if(root!=null){
             renderToolbar();renderKeyboard();
-            if(!sensitive && !privateMode) {
+            if(!typingSensitive() && !privateMode) {
                 updateSuggestionButtons(Collections.emptyList(),"","",false,predictionRevision);
-                if(editorKind==EditorPolicy.Kind.URI || editorKind==EditorPolicy.Kind.EMAIL)
+                if(typingKind()==EditorPolicy.Kind.URI || typingKind()==EditorPolicy.Kind.EMAIL)
                     showEditorShortcuts(predictionRevision);
                 else {
                     restorePhraseClicks();
@@ -504,11 +523,13 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         // EditorInfo and the snapshot determine automatic Shift. Do not erase
         // explicit one-time Shift while the keyboard view is reopened.
         InputConnection ic=getCurrentInputConnection();
-        if(Build.VERSION.SDK_INT>=31 && ic!=null)ic.setImeConsumesInput(false);
-        refreshSettings();refreshSuggestions();
+        if(Build.VERSION.SDK_INT>=31 && ic!=null)ic.setImeConsumesInput(gifField!=null);
+        refreshSettings();captureClipboard();refreshSuggestions();
     }
     @Override public void onFinishInputView(boolean finishingInput) {
         cancelSpaceGesture();
+        closeGifField();
+        clipboardRevision++;
         super.onFinishInputView(finishingInput);
     }
 
@@ -553,15 +574,31 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         v.setMinHeight(dp(h));v.setContentDescription(text);
         return v;
     }
-    /** Prediction surfaces have no place in clipboard/GIF/emoji or private panels. */
+    private InputConnection typingConnection() {
+        return gifField!=null?gifConnection:getCurrentInputConnection();
+    }
+    private EditorPolicy.Kind typingKind() {
+        return gifField!=null?EditorPolicy.Kind.PROSE:editorKind;
+    }
+    private boolean typingSensitive() {return gifField==null && sensitive;}
+
     private void updatePredictionRowVisibility() {
-        boolean enabled="letters".equals(mode) && !sensitive && !privateMode;
+        boolean enabled="letters".equals(mode) && !typingSensitive() && !privateMode;
         if(suggestionRow!=null)suggestionRow.setVisibility(enabled?View.VISIBLE:View.GONE);
         if(detailFrame!=null)detailFrame.setVisibility(enabled?View.VISIBLE:View.GONE);
     }
     private void renderToolbar() {
         if(toolbar==null)return;
         toolbar.removeAllViews();
+        if("clipboard".equals(mode)) {
+            TextView back=button("‹",22,KEY,33);
+            back.setContentDescription("Zurück zur Tastatur");
+            back.setOnClickListener(v->showMode("letters"));
+            toolbar.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);
+            toolbar.addView(back,new LinearLayout.LayoutParams(dp(44),dp(33)));
+            return;
+        }
+        toolbar.setGravity(Gravity.CENTER);
         toolbarAction("📋","Zwischenablage",() -> showMode("clipboard"));
         toolbarAction("☻","Emoji",() -> showMode("emoji"));
         toolbarAction("GIF","GIF-Suche",() -> showMode("gif"));
@@ -584,18 +621,57 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         toolbar.addView(t,p);t.setOnClickListener(v->handler.run());
     }
     private void showMode(String requested) {
-        if(requested.equals(mode)) requested="letters";
-        mode=requested;
-        if(!requested.equals("gif"))searchRevision++;
-        if(requested.equals("gif")) {
-            gifQuery="";gifEditing=true;gifOffset=0;gifGridCells=0;
-            gifProvider=GifSources.initialProvider(!getSharedPreferences("keyboard_settings",0)
-                .getString("giphy_key","").isEmpty());
-            gifRating=getSharedPreferences("keyboard_settings",0).getString("giphy_rating","r");
+        if("gif".equals(requested)) {
+            recentEvent=null;tokenObserver.reset();
+            if(gifField==null) {
+                layoutBeforeGif=mode.equals("numbers") || mode.equals("symbols")?mode:"letters";
+                if(!mode.equals("letters") && !mode.equals("symbols")) {
+                    mode="letters";renderToolbar();renderKeyboard();
+                }
+                showGifPanel();
+            } else {
+                closeGifField();
+                mode=layoutBeforeGif;
+                renderToolbar();renderKeyboard();
+            }
+        } else {
+            mode=requested.equals(mode)?"letters":requested;
+            renderToolbar();renderKeyboard();
         }
-        if(!"letters".equals(mode))clearPhrases();
-        renderKeyboard();refreshSuggestions();
+        refreshSuggestions();
     }
+    @Override public boolean onKeyDown(int code,KeyEvent event) {
+        if(gifField!=null && isInputViewShown() && !event.isSystem() &&
+            ("letters".equals(mode) || "symbols".equals(mode))) {
+            if(code==KeyEvent.KEYCODE_ENTER || code==KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                if(event.getRepeatCount()==0)searchGif();
+            } else if(!event.isCtrlPressed() || !gifField.onKeyShortcut(code,event)) {
+                gifField.onKeyDown(code,event);
+            }
+            return true;
+        }
+        return super.onKeyDown(code,event);
+    }
+    @Override public boolean onKeyUp(int code,KeyEvent event) {
+        if(gifField!=null && isInputViewShown() && !event.isSystem() &&
+            ("letters".equals(mode) || "symbols".equals(mode))) {
+            if(code!=KeyEvent.KEYCODE_ENTER && code!=KeyEvent.KEYCODE_NUMPAD_ENTER)
+                gifField.onKeyUp(code,event);
+            return true;
+        }
+        return super.onKeyUp(code,event);
+    }
+
+    private void closeGifField() {
+        searchRevision++;
+        gifField=null;
+        if(gifConnection!=null)gifConnection.closeConnection();
+        gifConnection=null;gifResults=null;
+        if(Build.VERSION.SDK_INT>=31 && gifHost!=null)gifHost.setImeConsumesInput(false);
+        gifHost=null;
+        if(gifPane!=null){gifPane.removeAllViews();gifPane.setVisibility(View.GONE);}
+    }
+
     private static final class EditorSnapshot {
         final String before,after;
         final boolean selection;
@@ -651,7 +727,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             button.setContentDescription("URL/E-Mail Zeichen: "+value);
             button.setOnClickListener(v -> {
                 if(idx>=choices.length || !EditorPolicy.shortcuts(editorKind)[idx].equals(value))return;
-                InputConnection ic=getCurrentInputConnection();
+                InputConnection ic=typingConnection();
                 if(ic!=null){ic.commitText(value,1);refreshSuggestions();}
             });
         }
@@ -685,8 +761,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         // on every fast keystroke. No editor text or model IPC is required.
         scheduledPendingControls=() -> {
             if(revision!=predictionRevision || !"letters".equals(mode) ||
-                sensitive || privateMode ||
-                editorKind==EditorPolicy.Kind.URI || editorKind==EditorPolicy.Kind.EMAIL)return;
+                typingSensitive() || privateMode ||
+                typingKind()==EditorPolicy.Kind.URI || typingKind()==EditorPolicy.Kind.EMAIL)return;
             if(lastCandidateRevision!=revision)showPendingWordControls(revision);
             if(lastPhraseRevision!=revision)
                 updatePhraseButtons(Collections.emptyList(),"",revision);
@@ -711,13 +787,13 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     /** No blocking editor IPC is allowed on the keyboard input/UI thread. */
     private void calculateSuggestions(int revision) {
         if(revision!=predictionRevision || active!=this || suggestions[0]==null)return;
-        if(editorKind==EditorPolicy.Kind.URI || editorKind==EditorPolicy.Kind.EMAIL) {
+        if(typingKind()==EditorPolicy.Kind.URI || typingKind()==EditorPolicy.Kind.EMAIL) {
             if(caretIndicator!=null)caretIndicator.setVisibility(View.INVISIBLE);
             updateSuggestionButtons(Collections.emptyList(),"","",false,revision);
             showEditorShortcuts(revision);
             return;
         }
-        if(sensitive || privateMode || !EditorPolicy.predictsWords(editorKind) ||
+        if(typingSensitive() || privateMode || !EditorPolicy.predictsWords(typingKind()) ||
             !"letters".equals(mode)) {
             if(caretIndicator!=null)caretIndicator.setVisibility(View.INVISIBLE);
             clearPhrases();
@@ -727,13 +803,16 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         // Capture the connection reference on the UI thread, then read its
         // surrounding text on a dedicated worker. Remote editors can stall a
         // read for hundreds of milliseconds; never make typing wait for it.
-        final InputConnection ic=getCurrentInputConnection();
+        final InputConnection ic=typingConnection();
         if(ic==null)return;
+        // A local EditText belongs to the UI thread. Workers consume an immutable
+        // snapshot, just as they do after reading a remote app editor.
+        final EditorSnapshot local=gifField==null?null:captureEditor(ic);
         fastPredictWorker.execute(() -> {
             if(revision!=predictionRevision)return;
             long started=android.os.SystemClock.elapsedRealtimeNanos();
             EditorSnapshot snapshot;
-            try {snapshot=captureEditor(ic);}
+            try {snapshot=local!=null?local:captureEditor(ic);}
             catch(Exception ex) {
                 android.util.Log.w("KontextTastatur","Editor snapshot unavailable",ex);
                 return;
@@ -831,7 +910,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                             predictions.predict(context.prefix,context.previous,
                                 context.beforePrevious,scores,language),3,tokenPrefix);
                         handler.post(() -> {
-                            if(active==this&&revision==predictionRevision&&!sensitive&&!privateMode &&
+                            if(active==this&&revision==predictionRevision&&!typingSensitive()&&!privateMode &&
                                 "letters".equals(mode)) {
                                 lastNeuralRevision=revision;
                                 updateSuggestionButtons(mixed,context.prefix,before,false,revision);
@@ -864,7 +943,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                         final List<String> resolvedPhrases=multi;
                         if(revision!=predictionRevision)return;
                         handler.post(() -> {
-                            if(active==this && revision==predictionRevision && !sensitive && !privateMode)
+                            if(active==this && revision==predictionRevision && !typingSensitive() && !privateMode)
                                 updatePhraseButtons(resolvedPhrases,before,revision);
                         });
                     });
@@ -967,7 +1046,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 suggestions[i].setText(value);
                 suggestions[i].setContentDescription("Wortvorschlag: "+value);
                 suggestions[i].setEnabled(true);
-            } else if(!sensitive && !privateMode && "letters".equals(mode)) {
+            } else if(!typingSensitive() && !privateMode && "letters".equals(mode)) {
                 wordActions[i]=i==0?"left":i==1?"clipboard":"right";
                 String label=i==0?"←":i==1?"📋":"→";
                 suggestions[i].setText(label);
@@ -988,7 +1067,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         boolean inside=!before.isEmpty() && !after.isEmpty() &&
             Character.isLetter(before.charAt(before.length()-1)) &&
             Character.isLetter(after.charAt(0));
-        if(sensitive || !"letters".equals(mode) || (!selected && !inside)) {
+        if(typingSensitive() || !"letters".equals(mode) || (!selected && !inside)) {
             caretIndicator.setVisibility(View.INVISIBLE);
             if(phraseRow!=null)phraseRow.setVisibility(View.VISIBLE);
             return;
@@ -1016,9 +1095,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private void chooseSuggestion(int position) {
         String chosen=visibleWords[position];
         // Never commit a suggestion from an obsolete cursor or word prefix.
-        if(chosen==null||chosen.isEmpty()||privateMode||sensitive ||
+        if(chosen==null||chosen.isEmpty()||privateMode||typingSensitive() ||
             lastCandidateRevision!=predictionRevision)return;
-        InputConnection ic=getCurrentInputConnection();if(ic==null)return;
+        InputConnection ic=typingConnection();if(ic==null)return;
         CharSequence beforeChars=ic.getTextBeforeCursor(500,0);
         String beforeText=beforeChars==null?"":beforeChars.toString();
         TextContext ctx=TextContext.fromBeforeCursor(beforeChars);
@@ -1028,7 +1107,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(!PhrasePredictor.validWord(chosen)) {
             if(selection!=null&&selection.length()>0)return;
             ic.commitText(chosen+" ",1);
-            if(EditorPolicy.learns(editorKind) && !privateMode && !sensitive)
+            if(EditorPolicy.learns(typingKind()) && !privateMode && !typingSensitive())
                 rememberToken(personalPreviousToken(beforeText),chosen);
             tokenObserver.reset();recentEvent=null;
             refreshSuggestions();return;
@@ -1040,7 +1119,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         PredictionModel.Event e=predictions.learnSelection(ctx.prefix,chosen,ctx.previous,ctx.beforePrevious);
         database.persist(e,chosen,1);
         catchupChoice(e,chosen);
-        if(EditorPolicy.learns(editorKind))rememberToken(personalPreviousToken(beforeText),chosen);
+        if(EditorPolicy.learns(typingKind()))rememberToken(personalPreviousToken(beforeText),chosen);
         tokenObserver.reset();
         recentEvent=e;recentSurface=chosen;recentAt=System.currentTimeMillis();
         shiftController.consumeSuggestion();
@@ -1050,11 +1129,11 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     private void choosePhrase(int position) {
         if(position<0 || position>=visiblePhrases.length ||
-            privateMode||sensitive ||lastPhraseRevision!=predictionRevision)return;
+            privateMode||typingSensitive() ||lastPhraseRevision!=predictionRevision)return;
         String selected=visiblePhrases[position];
         String[] parts=PhrasePredictor.words(selected);
         if(parts.length<2)return;
-        InputConnection ic=getCurrentInputConnection();if(ic==null)return;
+        InputConnection ic=typingConnection();if(ic==null)return;
         CharSequence beforeChars=ic.getTextBeforeCursor(350,0);
         String before=beforeChars==null?"":beforeChars.toString();
         // A phrase must come from the actual current cursor context.
@@ -1078,7 +1157,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 index==0?context.prefix:"",word,prev,prev2);
             database.persist(event,word,1);
             catchupChoice(event,word);
-            if(EditorPolicy.learns(editorKind)) {
+            if(EditorPolicy.learns(typingKind())) {
                 rememberToken(priorToken,word);
                 priorToken=word;
             }
@@ -1099,10 +1178,11 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         keys.removeAllViews();letterViews.clear();letterNames.clear();
         shiftKeyView=null;
         panel.removeAllViews();panel.setVisibility(View.GONE);
+        boolean textLayout=mode.equals("letters") || mode.equals("symbols");
+        gifPane.setVisibility(gifField!=null && textLayout?View.VISIBLE:View.GONE);
+        keys.setVisibility(View.VISIBLE);
         if(mode.equals("emoji")){showEmojiPanel();return;}
         if(mode.equals("clipboard")){showClipboardPanel();return;}
-        if(mode.equals("gif"))showGifPanel();
-        else keys.setVisibility(View.VISIBLE);
         if(mode.equals("numbers")) {
             row(new String[]{"1","2","3"},null);
             row(new String[]{"4","5","6"},null);
@@ -1141,6 +1221,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             p.setMargins(dp(2),dp(1),dp(2),dp(1));row.addView(v,p);
             if(character) {letterViews.add(v);letterNames.add(original);}
             if("⇧".equals(original))shiftKeyView=v;
+            if("↵".equals(original) && gifField!=null)v.setContentDescription("GIF-Suche starten");
             v.setOnClickListener(w -> press(original));
             if("Leerzeichen".equals(original)) {
                 v.setContentDescription("Leerzeichen. Halten und links oder rechts schieben, um den Cursor zu bewegen.");
@@ -1219,7 +1300,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         // Keep downX as the origin. Using the *latest* touch position here
         // silently lost movement made during the long-press delay.
         spaceSwipe.activate(spaceDownX);
-        InputConnection connection=getCurrentInputConnection();
+        InputConnection connection=typingConnection();
         long started=android.os.SystemClock.elapsedRealtimeNanos();
         spaceCursor=CursorNavigator.begin(connection);
         spaceCaptureNs=android.os.SystemClock.elapsedRealtimeNanos()-started;
@@ -1259,7 +1340,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             if(spaceSwipe.active()) {
                 int delta=spaceSwipe.move(spaceLatestX,dp(12));
                 if(delta!=0) {
-                    InputConnection connection=getCurrentInputConnection();
+                    InputConnection connection=typingConnection();
                     long started=android.os.SystemClock.elapsedRealtimeNanos();
                     boolean moved=CursorNavigator.move(connection,spaceCursor,delta);
                     long took=android.os.SystemClock.elapsedRealtimeNanos()-started;
@@ -1336,12 +1417,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     /** The input path commits a character immediately; prediction is deferred. */
     private void enterLetter(String letter) {
-        if(mode.equals("gif")) {
-            gifQuery+=letter.toLowerCase(Locale.GERMAN);
-            updateGifStatus();return;
-        }
         long startedNs=android.os.SystemClock.elapsedRealtimeNanos();
-        InputConnection ic=getCurrentInputConnection();if(ic==null)return;
+        InputConnection ic=typingConnection();if(ic==null)return;
         ic.commitText(letter,1);
         long committedNs=android.os.SystemClock.elapsedRealtimeNanos()-startedNs;
         uiCommitTotalNs+=committedNs;uiCommitMaxNs=Math.max(uiCommitMaxNs,committedNs);
@@ -1380,15 +1457,11 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 " max_snapshot_ms="+(uiSnapshotMaxNs/1_000_000.0));
     }
     private void enterDelimiter(String symbol) {
-        if(mode.equals("gif")) {
-            if(symbol.equals("\n"))searchGif();
-            else {gifQuery+=symbol;updateGifStatus();}
-            return;
-        }
-        InputConnection ic=getCurrentInputConnection();if(ic==null)return;
+        if(gifField!=null && symbol.equals("\n")) {searchGif();return;}
+        InputConnection ic=typingConnection();if(ic==null)return;
         CharSequence before=ic.getTextBeforeCursor(500,0);
         TextContext c=TextContext.fromBeforeCursor(before);
-        if(!sensitive && !privateMode && EditorPolicy.learns(editorKind) &&
+        if(!typingSensitive() && !privateMode && EditorPolicy.learns(typingKind()) &&
             !c.prefix.isEmpty() && isAtWordEnd(ic) &&
             (ic.getSelectedText(0)==null || ic.getSelectedText(0).length()==0)) {
             PredictionModel.Event e=predictions.learnTyped(c.prefix,c.previous,c.beforePrevious);
@@ -1396,7 +1469,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             catchupTyped(e,c.prefix);
             recentEvent=e;recentSurface=c.prefix;recentAt=System.currentTimeMillis();
         }
-        if(!sensitive && !privateMode && EditorPolicy.learns(editorKind) &&
+        if(!typingSensitive() && !privateMode && EditorPolicy.learns(typingKind()) &&
             before!=null && !symbol.equals("\n")) {
             for(String[] pair:tokenObserver.observe(before.toString(),symbol)) {
                 TokenHistory.Event event=tokenHistory.learn(pair[0],pair[1]);
@@ -1429,11 +1502,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         return after==null || after.length()==0 || !Character.isLetter(after.charAt(0));
     }
     private void backspace() {
-        if(mode.equals("gif")) {
-            if(!gifQuery.isEmpty())gifQuery=gifQuery.substring(0,gifQuery.offsetByCodePoints(gifQuery.length(),-1));
-            updateGifStatus();return;
-        }
-        InputConnection ic=getCurrentInputConnection();if(ic==null)return;
+        InputConnection ic=typingConnection();if(ic==null)return;
         CharSequence selection=ic.getSelectedText(0);
         CharSequence before=ic.getTextBeforeCursor(Math.max(2,recentSurface.length()+2),0);
         tokenObserver.reset();
@@ -1444,7 +1513,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             // Removing just the delimiter does NOT reject an accepted suggestion.
             // Retract learning only when the user actually starts removing that word.
             boolean deletingFromConfirmedWord = recentEvent!=null &&
-                System.currentTimeMillis()-recentAt<3500 && !sensitive && !privateMode &&
+                System.currentTimeMillis()-recentAt<3500 && !typingSensitive() && !privateMode &&
                 !recentSurface.isEmpty() && before.toString().endsWith(recentSurface);
             if(deletingFromConfirmedWord) {
                 predictions.undo(recentEvent);
@@ -1453,11 +1522,11 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             }
             if (deletingFromConfirmedWord) recentEvent=null;
             ic.deleteSurroundingText(1,0);
-        } else ic.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN,KeyEvent.KEYCODE_DEL));
+        } else if(gifField==null)ic.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN,KeyEvent.KEYCODE_DEL));
         refreshSuggestions();
     }
     private void arrow(int keycode) {
-        InputConnection ic=getCurrentInputConnection();if(ic==null)return;
+        InputConnection ic=typingConnection();if(ic==null)return;
         int by=keycode==KeyEvent.KEYCODE_DPAD_LEFT?-1:1;
         CursorNavigator.move(ic,by);
         tokenObserver.reset();
@@ -1508,147 +1577,167 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             GridLayout.LayoutParams p=new GridLayout.LayoutParams();p.width=dp(45);p.height=dp(45);
             p.setMargins(dp(2),dp(2),dp(2),dp(2));grid.addView(v,p);
             v.setOnClickListener(w -> {
-                InputConnection ic=getCurrentInputConnection();if(ic!=null)ic.commitText(emoji,1);
+                InputConnection ic=typingConnection();if(ic!=null)ic.commitText(emoji,1);
             });
         }
     }
-    private void showClipboardPanel() {
-        panelHeader("Zwischenablage (lokal angeheftet)",() -> showMode("letters"));
-        LinearLayout actions=new LinearLayout(this);panel.addView(actions,new LinearLayout.LayoutParams(-1,dp(43)));
-        clipboardAction(actions,"Kopieren",() -> contextAction(android.R.id.copy));
-        clipboardAction(actions,"Einfügen",() -> contextAction(android.R.id.paste));
-        clipboardAction(actions,"Ausschneiden",() -> contextAction(android.R.id.cut));
-        if(sensitive) {
-            TextView note=button("In diesem Feld ist der Verlauf ausgeblendet",14,BG,58);
-            panel.addView(note);return;
-        }
-        clipboardAction(actions,"Anheften",() -> {
-            ClipboardManager mgr=(ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
-            ClipData clip=mgr==null?null:mgr.getPrimaryClip();
-            if(clip!=null&&clip.getItemCount()>0) {
-                CharSequence text=clip.getItemAt(0).coerceToText(this);
-                if(text!=null&&!text.toString().isEmpty()) {
-                    database.saveClip(text.toString());toast("In der App-Zwischenablage gespeichert");
-                    handler.postDelayed(this::renderKeyboard,100);
-                }
-            } else toast("Zwischenablage ist leer");
-        });
-        ScrollView history=new ScrollView(this);panel.addView(history,new LinearLayout.LayoutParams(-1,dp(180)));
-        LinearLayout list=new LinearLayout(this);list.setOrientation(LinearLayout.VERTICAL);history.addView(list);
-        List<String> entries=database.clipboard();
-        if(entries.isEmpty()) {
-            TextView empty=button("Noch nichts angeheftet. Erst kopieren, dann Anheften drücken.",13,BG,50);
-            list.addView(empty,new LinearLayout.LayoutParams(-1,dp(50)));
-        }
-        for(String clip:entries) {
-            String caption=clip.length()>65?clip.substring(0,65)+"…":clip;
-            TextView row=button(caption,14,KEY,44);
-            row.setMaxLines(2);row.setPadding(dp(8),0,dp(8),0);
-            LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,dp(44));p.bottomMargin=dp(3);
-            list.addView(row,p);
-            row.setOnClickListener(v -> {InputConnection ic=getCurrentInputConnection();
-                if(ic!=null)ic.commitText(clip,1);showMode("letters");});
-        }
-        TextView clear=button("Angeheftete Einträge löschen",12,0xff6f3540,36);
-        list.addView(clear,new LinearLayout.LayoutParams(-1,dp(36)));
-        clear.setOnClickListener(v -> {database.clearClipboard();toast("Lokale Zwischenablage wird gelöscht");showMode("letters");});
+    private void clipboardChanged() {
+        if("clipboard".equals(mode) && panel!=null)showClipboardPanel();
+        else captureClipboard();
     }
-    private void clipboardAction(LinearLayout parent,String label,Runnable click) {
-        TextView t=button(label,12,KEY,38);
-        LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(38),1);p.setMargins(dp(2),0,dp(2),0);
-        parent.addView(t,p);t.setOnClickListener(v->click.run());
-    }
-    private void contextAction(int action) {
-        InputConnection ic=getCurrentInputConnection();
-        if(ic!=null)ic.performContextMenuAction(action);
-        if(action==android.R.id.paste)showMode("letters");
-    }
-    private void gifToolbarButton(LinearLayout row,String name,boolean selected,Runnable action) {
-        TextView button=button(name,12,selected?PRESSED:KEY,36);
-        LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,dp(36),1);
-        params.setMargins(dp(2),0,dp(2),0);
-        row.addView(button,params);
-        button.setOnClickListener(v->action.run());
-    }
-    private void showGifPanel() {
-        panelHeader(gifProvider.equals("giphy")?"GIF-Suche · Powered By GIPHY":
-            gifProvider.equals("reactions")?"ReactionGIFs · ohne Konto":
-            gifProvider.equals("commons")?"Wikimedia · GIF-Archiv (keine Reaktionen)":
-            "GIF-Reaktionen · Websuche ohne API-Schlüssel",() -> showMode("letters"));
-        LinearLayout sources=new LinearLayout(this);
-        panel.addView(sources,new LinearLayout.LayoutParams(-1,dp(38)));
-        gifToolbarButton(sources,"Reaktionen",gifProvider.equals("reactions"),() -> setGifProvider("reactions"));
-        gifToolbarButton(sources,"GIPHY",gifProvider.equals("giphy"),() -> {
-            String api=getSharedPreferences("keyboard_settings",0).getString("giphy_key","");
-            if(api.isEmpty()) {
-                gifStatus.setText("GIPHY braucht einen kostenlosen API-Schlüssel. Einstellungen öffnen.");
-                Intent intent=new Intent(this,SettingsActivity.class);
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                requestHideSelf(0);
-                startActivity(intent);
+
+    private void captureClipboard() {
+        if(clipboardManager==null)return;
+        try {
+            ClipDescription description=clipboardManager.getPrimaryClipDescription();
+            if(description==null)return;
+            if(privateMode) {
+                skippedClipboardTime=description.getTimestamp();
                 return;
             }
-            setGifProvider("giphy");
-        });
-        gifToolbarButton(sources,"Tenor-Web",gifProvider.equals("tenorweb"),() -> {
-            setGifProvider("tenorweb");
-            openTenorWeb();
-        });
-
-        gifToolbarButton(sources,"Archiv",gifProvider.equals("commons"),() -> setGifProvider("commons"));
-        LinearLayout queryRow=new LinearLayout(this);
-        panel.addView(queryRow,new LinearLayout.LayoutParams(-1,dp(34)));
-        gifQueryDisplay=button("",14,KEY,33);
-        LinearLayout.LayoutParams qp=new LinearLayout.LayoutParams(0,dp(33),1);
-        qp.setMargins(dp(2),0,dp(2),0);queryRow.addView(gifQueryDisplay,qp);
-        gifQueryDisplay.setOnClickListener(v->setGifEditing(true));
-        TextView clear=button("×",20,PRESSED,33);
-        LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(dp(36),dp(33));
-        cp.setMargins(dp(2),0,dp(2),0);queryRow.addView(clear,cp);
-        clear.setOnClickListener(v->{
-            gifQuery="";searchRevision++;gifOffset=0;gifGridCells=0;
-            gifResults.removeAllViews();
-            updateGifStatus();setGifEditing(true);
-        });
-        gifStatus=button("",12,BG,36);
-        panel.addView(gifStatus,new LinearLayout.LayoutParams(-1,dp(36)));
-        gifScroll=new ScrollView(this);
-        gifScroll.setFillViewport(false);
-        panel.addView(gifScroll,new LinearLayout.LayoutParams(-1,dp(130)));
-        gifResults=new LinearLayout(this);
-        gifResults.setOrientation(LinearLayout.VERTICAL);
-        gifScroll.addView(gifResults,new ScrollView.LayoutParams(-1,-2));
-        LinearLayout actions=new LinearLayout(this);
-        panel.addView(actions,new LinearLayout.LayoutParams(-1,dp(38)));
-        gifToolbarButton(actions,gifProvider.equals("giphy")?"Suchen / Trends":
-            gifProvider.equals("reactions")?"GIFs suchen":
-            gifProvider.equals("commons")?"Archiv durchsuchen":"Im Browser suchen",
-            false,()->searchGif(false));
-        gifToolbarButton(actions,gifProvider.equals("giphy")?"Mehr GIFs":
-            gifProvider.equals("tenorweb") || gifProvider.equals("reactions")?"GIPHY-Web":"Tenor-Web",false,()-> {
-                if(gifProvider.equals("giphy"))searchGif(true);
-                else if(gifProvider.equals("tenorweb") || gifProvider.equals("reactions"))openGiphyWeb();
-                else openTenorWeb();
-            });
-        gifToolbarButton(actions,"Tastatur",false,()->setGifEditing(true));
-        updateGifStatus();
-        updateGifLayout();
+            if(description.getTimestamp()==skippedClipboardTime || !description.hasMimeType("text/*") ||
+                (description.getExtras()!=null &&
+                 description.getExtras().getBoolean("android.content.extra.IS_SENSITIVE",false)))return;
+            ClipData data=clipboardManager.getPrimaryClip();
+            if(data==null || data.getItemCount()==0)return;
+            ClipDescription actual=data.getDescription();
+            if(actual.getExtras()!=null &&
+                actual.getExtras().getBoolean("android.content.extra.IS_SENSITIVE",false))return;
+            StringBuilder combined=new StringBuilder();
+            for(int i=0;i<data.getItemCount();i++) {
+                CharSequence value=data.getItemAt(i).getText();
+                if(value==null || value.length()==0)continue;
+                if(combined.length()>0)combined.append('\n');
+                combined.append(value);
+            }
+            if(combined.length()==0)return;
+            String text=combined.toString();
+            if(actual.getTimestamp()==lastClipboardTime && text.equals(lastClipboardText))return;
+            lastClipboardTime=actual.getTimestamp();lastClipboardText=text;
+            database.saveClip(text);
+        } catch(SecurityException unavailable) {
+            // The currently selected IME may read the clipboard when Android allows it.
+        }
     }
-    private void setGifProvider(String value) {
-        if(value.equals(gifProvider))return;
-        gifProvider=value;
-        searchRevision++;
-        gifOffset=0;gifGridCells=0;
-        gifEditing=true;
-        renderKeyboard();
-        refreshSuggestions();
+
+    private void showClipboardPanel() {
+        panel.setVisibility(View.VISIBLE);
+        captureClipboard();
+        final int revision=++clipboardRevision;
+        database.readClipboard(entries -> handler.post(() -> {
+            if(active!=this || revision!=clipboardRevision || !"clipboard".equals(mode))return;
+            panel.removeAllViews();
+            ScrollView history=new ScrollView(this);
+            panel.addView(history,new LinearLayout.LayoutParams(-1,dp(220)));
+            LinearLayout list=new LinearLayout(this);
+            list.setOrientation(LinearLayout.VERTICAL);history.addView(list);
+            if(entries.isEmpty())list.addView(button("Noch kein kopierter Text",14,BG,44));
+            for(String clip:entries) {
+                String preview=clip.length()>300?clip.substring(0,300)+"…":clip;
+                TextView row=button(preview,15,KEY,44);
+                row.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);
+                row.setMaxLines(2);row.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                row.setPadding(dp(10),0,dp(10),0);
+                LinearLayout.LayoutParams size=new LinearLayout.LayoutParams(-1,dp(48));
+                size.bottomMargin=dp(2);list.addView(row,size);
+                row.setOnClickListener(v -> {
+                    InputConnection target=typingConnection();
+                    if(target!=null && target.commitText(clip,1)) {
+                        recentEvent=null;showMode("letters");
+                    }
+                });
+            }
+        }));
+    }
+
+    private void showGifPanel() {
+        gifProvider=GifSources.initialProvider(!getSharedPreferences("keyboard_settings",0)
+            .getString("giphy_key","").isEmpty());
+        gifRating=getSharedPreferences("keyboard_settings",0).getString("giphy_rating","r");
+        gifPane.removeAllViews();
+        gifPane.setVisibility(View.VISIBLE);
+        LinearLayout row=new LinearLayout(this);
+        gifPane.addView(row,new LinearLayout.LayoutParams(-1,dp(40)));
+        gifField=new EditText(this) {
+            @Override protected void onSelectionChanged(int start,int end) {
+                super.onSelectionChanged(start,end);
+                if(this==gifField)refreshSuggestions();
+            }
+            @Override protected void onTextChanged(CharSequence text,int start,int before,int count) {
+                super.onTextChanged(text,start,before,count);
+                if(this==gifField && gifResults!=null) {
+                    clearGifResults();
+                    refreshSuggestions();
+                }
+            }
+        };
+        gifField.setSingleLine();
+        gifField.setTextSize(16);gifField.setTextColor(TEXT);gifField.setHintTextColor(0xffc7d1dc);
+        gifField.setHint("GIFs suchen");gifField.setPadding(dp(10),0,dp(6),0);
+        gifField.setBackground(background(KEY));gifField.setShowSoftInputOnFocus(false);
+        gifField.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
+        gifField.setOnEditorActionListener((field,id,event)->{searchGif();return true;});
+        row.addView(gifField,new LinearLayout.LayoutParams(0,-1,1));
+        providerButton=button(providerLabel()+" ▾",12,KEY,38);
+        providerButton.setContentDescription("GIF-Anbieter wählen");
+        row.addView(providerButton,new LinearLayout.LayoutParams(-2,-1));
+        providerButton.setPadding(dp(8),0,dp(8),0);
+        providerButton.setOnClickListener(v -> {
+            PopupMenu menu=new PopupMenu(this,providerButton);
+            String[] names={"Reaktionen","GIPHY","Tenor-Web","GIPHY-Web","Archiv"};
+            String[] providers={"reactions","giphy","tenorweb","giphyweb","commons"};
+            for(int i=0;i<names.length;i++)menu.getMenu().add(0,i,0,names[i]);
+            menu.setOnMenuItemClickListener(item -> {
+                gifProvider=providers[item.getItemId()];
+                providerButton.setText(providerLabel()+" ▾");clearGifResults();return true;
+            });
+            menu.show();
+        });
+        TextView search=button("⌕",21,KEY,38);search.setContentDescription("GIFs suchen");
+        row.addView(search,new LinearLayout.LayoutParams(dp(44),-1));
+        search.setOnClickListener(v -> searchGif());
+        gifStatus=button("",12,BG,22);
+        gifStatus.setVisibility(View.GONE);
+        gifPane.addView(gifStatus,new LinearLayout.LayoutParams(-1,dp(24)));
+        gifScroll=new ScrollView(this);
+        gifScroll.setVisibility(View.GONE);
+        gifPane.addView(gifScroll,new LinearLayout.LayoutParams(-1,dp(109)));
+        gifResults=new LinearLayout(this);gifResults.setOrientation(LinearLayout.VERTICAL);
+        gifScroll.addView(gifResults,new ScrollView.LayoutParams(-1,-2));
+        gifScroll.setOnScrollChangeListener((v,x,y,oldX,oldY)-> {
+            if(y>oldY && !v.canScrollVertically(1) && "giphy".equals(gifProvider) && gifHasMore)
+                searchGif(true);
+        });
+        gifField.requestFocus();
+        gifConnection=gifField.onCreateInputConnection(new EditorInfo());
+        gifHost=getCurrentInputConnection();
+        if(Build.VERSION.SDK_INT>=31 && gifHost!=null)gifHost.setImeConsumesInput(true);
+        clearGifResults();
+        updateAutoShiftFromText("");
+        updatePredictionRowVisibility();
+    }
+
+    private boolean gifHasMore;
+    private String providerLabel() {
+        switch(gifProvider) {
+            case "giphy":return "Powered by GIPHY";
+            case "commons":return "Archiv";
+            case "tenorweb":return "Tenor-Web";
+            case "giphyweb":return "GIPHY-Web";
+            default:return "Reaktionen";
+        }
+    }
+    private void clearGifResults() {
+        searchRevision++;gifOffset=0;gifGridCells=0;gifHasMore=false;
+        gifResults.removeAllViews();gifScroll.scrollTo(0,0);
+        gifScroll.setVisibility(View.GONE);gifStatus.setText("");gifStatus.setVisibility(View.GONE);
     }
     private void openTenorWeb() {openGifWebsite("tenorweb");}
     private void openGiphyWeb() {openGifWebsite("giphyweb");}
     private void openGifWebsite(String provider) {
         // No API key or scraping. Explicitly open the provider's normal public
         // search page; media selection and browser sharing happen on the site.
-        String slug=GifSources.slug(gifQuery);
+        String slug=GifSources.slug(gifField.getText().toString());
         Uri.Builder uri=new Uri.Builder().scheme("https")
             .authority(GifSources.websiteHost(provider)).appendPath("search");
         uri.appendPath(provider.equals("giphyweb")?slug:slug+"-gifs");
@@ -1658,35 +1747,11 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         try {requestHideSelf(0);startActivity(intent);}
         catch(Exception e) {gifStatus.setText("GIF-Website konnte im Browser nicht geöffnet werden.");}
     }
-    private void setGifEditing(boolean editing) {
-        gifEditing=editing;
-        updateGifLayout();
-    }
-    private void updateGifLayout() {
-        if(keys==null || gifScroll==null || !mode.equals("gif"))return;
-        keys.setVisibility(gifEditing?View.VISIBLE:View.GONE);
-        LinearLayout.LayoutParams scrollParams=(LinearLayout.LayoutParams)gifScroll.getLayoutParams();
-        scrollParams.height=dp(gifEditing?125:315);
-        gifScroll.setLayoutParams(scrollParams);
-    }
-    private void updateGifStatus() {
-        if(!mode.equals("gif"))return;
-        if(gifQueryDisplay!=null)
-            gifQueryDisplay.setText(gifQuery.isEmpty()?"Suchbegriff eingeben / Trends":"Suche: "+gifQuery);
-        if(gifStatus!=null && gifResults!=null && gifGridCells==0) {
-            String api=getSharedPreferences("keyboard_settings",0).getString("giphy_key","");
-            gifStatus.setText(gifProvider.equals("giphy")?
-                (api.isEmpty()?"GIPHY-Schlüssel fehlt":"GIPHY · Filter: "+gifRating.toUpperCase(Locale.ROOT)):
-                gifProvider.equals("reactions")?"ReactionGIFs · z. B. facepalm, bullshit, middle finger":
-                gifProvider.equals("commons")?
-                    "Wikimedia ist ein Sacharchiv, keine gute Reaktions-GIF-Suche":
-                    "Ohne API-Schlüssel: Reaktions-GIFs im Browser auf Tenor/GIPHY suchen");
-        }
-    }
     private void searchGif() {searchGif(false);}
     private void searchGif(boolean more) {
-        if(!mode.equals("gif"))return;
-        final String query=gifQuery.trim();
+        if(gifField==null)return;
+        final String query=gifField.getText().toString().trim();
+        gifStatus.setVisibility(View.VISIBLE);gifHasMore=false;
         final String provider=gifProvider;
         if(provider.equals("tenorweb")) {
             if(more)gifStatus.setText("Mehr Ergebnisse gibt es auf der Tenor-Webseite.");
@@ -1723,23 +1788,24 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                     GiphySearch.searchGiphy(key,query,rating,offset):provider.equals("reactions")?
                     ReactionGifFeed.search(query):GiphySearch.searchOpenverse(query);
                 handler.post(() -> {
-                    if(request!=searchRevision||!mode.equals("gif"))return;
+                    if(request!=searchRevision||gifField==null)return;
                     gifOffset=offset;
                     gifPreviewsExpected=results.size();
                     gifStatus.setText(results.isEmpty()?"Keine Treffer in "+
                         (provider.equals("giphy")?"GIPHY":provider.equals("reactions")?"ReactionGIFs":"Wikimedia"):
                         "GIFs: "+results.size()+" geladen · Vorschau läuft");
                     for(GiphySearch.Gif gif:results)addGifPreview(gif,request);
-                    if(!results.isEmpty())setGifEditing(false);
+                    gifHasMore=provider.equals("giphy") && results.size()==24;
+                    gifScroll.setVisibility(gifGridCells>0?View.VISIBLE:View.GONE);
                 });
             } catch(Exception error) {
-                handler.post(() -> {if(request==searchRevision&&mode.equals("gif"))
+                handler.post(() -> {if(request==searchRevision&&gifField!=null)
                     gifStatus.setText(GiphySearch.userErrorMessage(error));});
             }
         });
     }
     private void updateGifPreviewProgress(int request, boolean success) {
-        if(request!=searchRevision || !mode.equals("gif") || gifStatus==null)return;
+        if(request!=searchRevision || gifField==null || gifStatus==null)return;
         if(success)gifPreviewsLoaded++;else gifPreviewsFailed++;
         String status=gifStatus.getText().toString();
         // Image loading may continue after an explicit share/copy action;
@@ -1748,6 +1814,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         int finished=gifPreviewsLoaded+gifPreviewsFailed;
         if(finished==gifPreviewsExpected && gifPreviewsLoaded==0)
             gifStatus.setText("GIFs gefunden, Vorschau nicht verfügbar. Titel antippen oder erneut suchen.");
+        else if(finished==gifPreviewsExpected && gifPreviewsFailed==0)
+            gifStatus.setVisibility(View.GONE);
         else gifStatus.setText("Vorschau "+finished+"/"+gifPreviewsExpected+
             (gifPreviewsFailed>0?" · "+gifPreviewsFailed+" nicht geladen":""));
     }
@@ -1786,7 +1854,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             popup.show();return true;
         });
         network.execute(() -> {
-            if(request!=searchRevision || !mode.equals("gif"))return;
+            if(request!=searchRevision || gifField==null)return;
             byte[] preview=previewCache.get(gif.thumbnail);
             if(preview==null) {
                 try {
@@ -1804,7 +1872,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             }
             final byte[] imageBytes=preview;
             handler.post(() -> {
-                if(request!=searchRevision || !mode.equals("gif"))return;
+                if(request!=searchRevision || gifField==null)return;
                 boolean success=false;
                 if(imageBytes!=null) {
                     try {
@@ -1837,6 +1905,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private void sendGif(GiphySearch.Gif gif) { sendGif(gif,false); }
 
     private void copyGif(GiphySearch.Gif gif) {
+        gifStatus.setVisibility(View.VISIBLE);
         gifStatus.setText("GIF wird für die Zwischenablage geladen …");
         sendWorker.execute(() -> {
             try {
@@ -1858,14 +1927,18 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
 
     private void sendGif(GiphySearch.Gif gif, boolean forceShare) {
-        if(gifStatus==null)return;
+        if(gifField==null)return;
+        final int request=searchRevision;
+        final InputConnection destination=getCurrentInputConnection();
+        gifStatus.setVisibility(View.VISIBLE);
         gifStatus.setText("GIF-Datei wird heruntergeladen …");
         sendWorker.execute(() -> {
             try {
                 File file=GiphySearch.cacheGif(getCacheDir(),gif);
                 handler.post(() -> {
+                    if(gifField==null || searchRevision!=request || destination!=getCurrentInputConnection())return;
                     Uri uri=GifSharing.uriFor(this,file.getName());
-                    InputConnection ic=getCurrentInputConnection();
+                    InputConnection ic=destination;
                     boolean supported=!forceShare && ic!=null && info!=null &&
                         GifDeliveryPolicy.supportsDirectGif(info.contentMimeTypes);
                     boolean committed=false;

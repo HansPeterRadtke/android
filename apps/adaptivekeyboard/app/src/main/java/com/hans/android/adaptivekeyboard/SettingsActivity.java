@@ -134,7 +134,7 @@ public final class SettingsActivity extends Activity {
         action("Gespeicherte Zwischenablage löschen",() -> new AlertDialog.Builder(this)
             .setTitle("Zwischenablage löschen?").setNegativeButton("Abbrechen",null)
             .setPositiveButton("Löschen",(dialog,which) -> new LearningDatabase(this).clearClipboard()).show());
-        label("Datenschutz: Android kann den Inhalt von Tastatur-Eingaben an das ausgewählte IME übermitteln. Diese App speichert bestätigte Wort- und Satzzeichen-Tokens als lokale Häufigkeitsstatistiken sowie freiwillig angeheftete Zwischenablageeinträge. Die gespeicherte Datei liegt in der privaten App-Datenbank; Android-Backups sind abgeschaltet.",13);
+        label("Datenschutz: Android kann den Inhalt von Tastatur-Eingaben an das ausgewählte IME übermitteln. Diese App speichert bestätigte Wort- und Satzzeichen-Tokens als lokale Häufigkeitsstatistiken sowie die letzten zwanzig kopierten Texte. Als vertraulich markierte Clips werden nicht in den Verlauf aufgenommen. Die gespeicherte Datei liegt in der privaten App-Datenbank; Android-Backups sind abgeschaltet.",13);
     }
     private void label(String value,int size) {
         TextView v=new TextView(this);v.setText(value);v.setTextSize(size);
