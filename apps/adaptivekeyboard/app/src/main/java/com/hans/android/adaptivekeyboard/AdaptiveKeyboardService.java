@@ -209,24 +209,32 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             } catch(Exception ex) {
                 android.util.Log.e("KontextTastatur","Optional offline English neural model not available",ex);
             }
+            final ChimeEnglish ready=englishModel;
+            if (ready != null) handler.post(() -> {
+                if (active != this) return;
+                neuralModel = ready;
+                refreshSuggestions();
+            });
             try(java.io.InputStream modelStream=getAssets().open("german_next_word.nwp")) {
                 germanModel=new GermanNextWord(modelStream);
             } catch(Exception ex) {
                 android.util.Log.e("KontextTastatur","Optional offline German neural model not available",ex);
             }
-            final ChimeEnglish ready=englishModel;
-            final GermanNextWord germanReady=germanModel;
-            handler.post(() -> {
-                if(active!=this)return;
-                neuralModel=ready;germanNeuralModel=germanReady;
-                refreshSuggestions();
-            });
             try(java.io.InputStream caseStream=getAssets().open("de_word_case.gcase")) {
                 caseModel=new GermanCaseModel(caseStream);
             } catch(Exception ex) {
                 android.util.Log.e("KontextTastatur","German corpus capitalization unavailable",ex);
             }
             final GermanCaseModel caseReady=caseModel;
+            final GermanNextWord germanReady=germanModel;
+            // The same German candidate can be a noun or a verb. Apply its
+            // contextual spelling from the first neural result onward.
+            handler.post(() -> {
+                if (active != this) return;
+                germanCaseModel = caseReady;
+                germanNeuralModel = germanReady;
+                refreshSuggestions();
+            });
             PredictionModel readyPredictor=new PredictionModel();
             loadLexicon(readyPredictor,"de_lexicon.json","de");
             loadLexicon(readyPredictor,"en_lexicon.json","en");
@@ -256,9 +264,6 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                         modelCatchup.clear();modelCatchupEnabled=false;
                         predictions=readyPredictor;
                         baselineNgrams=loaded;
-                        neuralModel=ready;
-                        germanNeuralModel=germanReady;
-                        germanCaseModel=caseReady;
                         refreshSuggestions();
                         android.util.Log.i("KontextTastatur","Offline language model ready: "+
                             loaded.size()+" ngrams, "+readyPredictor.size()+" words");
