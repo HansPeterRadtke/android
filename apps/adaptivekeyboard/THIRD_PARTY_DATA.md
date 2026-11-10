@@ -47,3 +47,8 @@ The binary `app/src/main/assets/chime_en.ltc` is an unchanged copy of the publis
 ### German contextual casing corpus (v0.9.0)
 
 `app/src/main/assets/de_word_case.gcase` is a GZIP-compressed set of **aggregate token and preceding-word case counts**, generated using `scripts/make_german_casing.py` from the official Tatoeba German sentence export. Attribution: Tatoeba's contributors, [CC BY 2.0 France](https://creativecommons.org/licenses/by/2.0/fr/), https://tatoeba.org/ and https://downloads.tatoeba.org/exports/per_language/deu/ . It contains no sentences, identifiers, names of sentence authors, private user strings, or individual text passages. The original corpus remains available at the cited official sources. The asset is about 837 KB and supplies capitalization statistics for roughly 20,000 recognized word forms and their frequent predecessors. It is a heuristic, not an authoritative German grammar resource.
+
+
+## ReactionGIFs.com in version 0.20
+
+The keyless picker reads the public RSS feed at https://www.reactiongifs.com/feed/ or the site's RSS search results. It displays source credit on each result and links the original post when sharing to a compatible editor. Media is fetched on demand. The APK contains no GIFs from this provider.

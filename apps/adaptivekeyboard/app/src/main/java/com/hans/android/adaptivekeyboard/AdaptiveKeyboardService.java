@@ -134,7 +134,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private LinearLayout gifResults;
     private ScrollView gifScroll;
     private TextView gifQueryDisplay, gifMore;
-    private String gifProvider="tenorweb", gifRating="r";
+    private String gifProvider="reactions", gifRating="r";
     private boolean gifEditing=true;
     private int gifOffset=0, gifGridCells=0;
     private int gifPreviewsExpected, gifPreviewsLoaded, gifPreviewsFailed;
@@ -749,17 +749,24 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             // first words and their confirmed continuations may be shown.
             final boolean opening=context.prefix.isEmpty() &&
                 context.previous.isEmpty() && context.beforePrevious.isEmpty();
-            String language=LanguageContext.detect(before);
+            String language=LanguageContext.detect(before,predictions);
             String tokenPrefix=GrammarTokens.activeWord(before);
             String tokenPrev=personalPreviousToken(before);
             List<String> tokens=tokenHistory.predict(tokenPrev,tokenPrefix,3);
-            final int personalCount=SuggestionMixer.merge(tokens,
-                predictions.predictPersonal(context.prefix,context.previous,
-                    context.beforePrevious,language),3,context.prefix).size();
-            // An observed punctuation token occupies a high-priority slot, not
-            // the *entire* row. Use model words for the other positions.
+            // Word history knows the previous two words. The token table knows
+            // just one: use it for punctuation and for contexts after symbols.
+            if(!context.previous.isEmpty() &&
+                TextContext.normalize(tokenPrev).equals(TextContext.normalize(context.previous))) {
+                tokens=new ArrayList<>(tokens);
+                tokens.removeIf(PhrasePredictor::validWord);
+            }
+            final List<String> tokenChoices=tokens;
+            List<String> personalWords=predictions.predictPersonal(context.prefix,context.previous,
+                context.beforePrevious,language);
+            List<String> quickFirst=SuggestionMixer.merge(tokenChoices,personalWords,3,tokenPrefix);
+            final int personalCount=quickFirst.size();
             List<String> ranked=(snapshot.selection||insideWord)?Collections.emptyList():
-                SuggestionMixer.merge(tokens,
+                SuggestionMixer.merge(tokenChoices,
                     predictions.predict(context.prefix,context.previous,
                         context.beforePrevious,Collections.emptyMap(),language),3,tokenPrefix);
             // Paint the single-word results before doing any phrase generation.
@@ -780,9 +787,6 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             // context. Cold generic fillers (e.g. "I" after "Let's") may be
             // acceptable as individual fallback words but cannot be stitched
             // into arbitrary unrelated phrases in the second row.
-            List<String> quickFirst=SuggestionMixer.merge(tokens,
-                predictions.predictPersonal(context.prefix,context.previous,
-                    context.beforePrevious,language),3,context.prefix);
             if(!snapshot.selection && !insideWord && !quickFirst.isEmpty()) {
                 final String lang=language;
                 quickPhrases=PhrasePredictor.complete(before,quickFirst,
@@ -823,7 +827,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                             return;
                         }
                         if(revision!=predictionRevision)return;
-                        List<String> mixed=SuggestionMixer.merge(tokens,
+                        List<String> mixed=SuggestionMixer.merge(tokenChoices,
                             predictions.predict(context.prefix,context.previous,
                                 context.beforePrevious,scores,language),3,tokenPrefix);
                         handler.post(() -> {
@@ -837,24 +841,23 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                         PhrasePredictor.Continuations follow=(seed,limit) -> {
                             if(revision!=predictionRevision)return Collections.emptyList();
                             TextContext next=TextContext.fromBeforeCursor(seed);
-                            if(predictions.hasPersonalNext("",next.previous)) {
-                                return predictions.predictPersonal("",next.previous,
-                                    next.beforePrevious,language);
-                            }
+                            String nextLanguage=LanguageContext.detect(seed,predictions);
+                            List<String> observed=predictions.predictPersonal("",next.previous,
+                                next.beforePrevious,nextLanguage);
+                            if(opening || !observed.isEmpty())return observed;
                             try {
-                                List<String> words=new ArrayList<>(limit);
-                                if("en".equals(language)) {
-                                    for(ChimeEnglish.Candidate candidate:en.predict(seed,limit))
-                                        words.add(candidate.word);
-                                } else {
-                                    for(GermanNextWord.Candidate candidate:de.predict(seed,limit))
-                                        words.add(candidate.word);
-                                }
-                                return words;
+                                Map<String,Double> hints=Collections.emptyMap();
+                                if("en".equals(nextLanguage) && en!=null)
+                                    hints=neuralScores(en.predict(seed,limit));
+                                else if("de".equals(nextLanguage) && de!=null)
+                                    hints=germanNeuralScores(de.predict(seed,limit));
+                                return predictions.predict("",next.previous,next.beforePrevious,
+                                    hints,nextLanguage);
                             } catch(Exception e) {return Collections.emptyList();}
                         };
-                        List<String> multi=PhrasePredictor.complete(before,mixed,follow,
-                            (word,prefix,seed)->formatCandidate(word,prefix,seed,language),3);
+                        List<String> multi=PhrasePredictor.complete(before,opening?quickFirst:mixed,follow,
+                            (word,prefix,seed)->formatCandidate(word,prefix,seed,
+                                LanguageContext.detect(seed,predictions)),3);
                         // Keep the user's actual phrase choices ahead of
                         // neural phrases, and never show duplicates.
                         multi=SuggestionMixer.merge(earlyPhrases,multi,3,"");
@@ -934,7 +937,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(suggestions[0]==null)return;
         lastRankedSuggestionWords=new ArrayList<>(ranked);
         lastSuggestionPrefix=prefix;lastSuggestionBefore=before;
-        String language=LanguageContext.detect(before);
+        String language=LanguageContext.detect(before,predictions);
         GermanCaseModel casing=germanCaseModel;
         TextContext context=TextContext.fromBeforeCursor(before);
         boolean confirmedNext=predictions.hasPersonalNext(prefix,context.previous);
@@ -1569,10 +1572,12 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     private void showGifPanel() {
         panelHeader(gifProvider.equals("giphy")?"GIF-Suche · Powered By GIPHY":
+            gifProvider.equals("reactions")?"ReactionGIFs · ohne Konto":
             gifProvider.equals("commons")?"Wikimedia · GIF-Archiv (keine Reaktionen)":
             "GIF-Reaktionen · Websuche ohne API-Schlüssel",() -> showMode("letters"));
         LinearLayout sources=new LinearLayout(this);
         panel.addView(sources,new LinearLayout.LayoutParams(-1,dp(38)));
+        gifToolbarButton(sources,"Reaktionen",gifProvider.equals("reactions"),() -> setGifProvider("reactions"));
         gifToolbarButton(sources,"GIPHY",gifProvider.equals("giphy"),() -> {
             String api=getSharedPreferences("keyboard_settings",0).getString("giphy_key","");
             if(api.isEmpty()) {
@@ -1589,7 +1594,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             setGifProvider("tenorweb");
             openTenorWeb();
         });
-        gifToolbarButton(sources,"GIPHY-Web",false,this::openGiphyWeb);
+
         gifToolbarButton(sources,"Archiv",gifProvider.equals("commons"),() -> setGifProvider("commons"));
         LinearLayout queryRow=new LinearLayout(this);
         panel.addView(queryRow,new LinearLayout.LayoutParams(-1,dp(34)));
@@ -1616,12 +1621,13 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         LinearLayout actions=new LinearLayout(this);
         panel.addView(actions,new LinearLayout.LayoutParams(-1,dp(38)));
         gifToolbarButton(actions,gifProvider.equals("giphy")?"Suchen / Trends":
+            gifProvider.equals("reactions")?"GIFs suchen":
             gifProvider.equals("commons")?"Archiv durchsuchen":"Im Browser suchen",
             false,()->searchGif(false));
         gifToolbarButton(actions,gifProvider.equals("giphy")?"Mehr GIFs":
-            gifProvider.equals("tenorweb")?"GIPHY-Web":"Tenor-Web",false,()-> {
+            gifProvider.equals("tenorweb") || gifProvider.equals("reactions")?"GIPHY-Web":"Tenor-Web",false,()-> {
                 if(gifProvider.equals("giphy"))searchGif(true);
-                else if(gifProvider.equals("tenorweb"))openGiphyWeb();
+                else if(gifProvider.equals("tenorweb") || gifProvider.equals("reactions"))openGiphyWeb();
                 else openTenorWeb();
             });
         gifToolbarButton(actions,"Tastatur",false,()->setGifEditing(true));
@@ -1671,6 +1677,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             String api=getSharedPreferences("keyboard_settings",0).getString("giphy_key","");
             gifStatus.setText(gifProvider.equals("giphy")?
                 (api.isEmpty()?"GIPHY-Schlüssel fehlt":"GIPHY · Filter: "+gifRating.toUpperCase(Locale.ROOT)):
+                gifProvider.equals("reactions")?"ReactionGIFs · z. B. facepalm, bullshit, middle finger":
                 gifProvider.equals("commons")?
                     "Wikimedia ist ein Sacharchiv, keine gute Reaktions-GIF-Suche":
                     "Ohne API-Schlüssel: Reaktions-GIFs im Browser auf Tenor/GIPHY suchen");
@@ -1713,13 +1720,14 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         searchWorker.execute(() -> {
             try {
                 List<GiphySearch.Gif> results=provider.equals("giphy")?
-                    GiphySearch.searchGiphy(key,query,rating,offset):GiphySearch.searchOpenverse(query);
+                    GiphySearch.searchGiphy(key,query,rating,offset):provider.equals("reactions")?
+                    ReactionGifFeed.search(query):GiphySearch.searchOpenverse(query);
                 handler.post(() -> {
                     if(request!=searchRevision||!mode.equals("gif"))return;
                     gifOffset=offset;
                     gifPreviewsExpected=results.size();
                     gifStatus.setText(results.isEmpty()?"Keine Treffer in "+
-                        (provider.equals("giphy")?"GIPHY":"Wikimedia"):
+                        (provider.equals("giphy")?"GIPHY":provider.equals("reactions")?"ReactionGIFs":"Wikimedia"):
                         "GIFs: "+results.size()+" geladen · Vorschau läuft");
                     for(GiphySearch.Gif gif:results)addGifPreview(gif,request);
                     if(!results.isEmpty())setGifEditing(false);
@@ -1782,9 +1790,11 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             byte[] preview=previewCache.get(gif.thumbnail);
             if(preview==null) {
                 try {
-                    preview=GiphySearch.requestPreview(gif.thumbnail,1_500_000);
+                    int limit=gif.thumbnail.equals(gif.original)?8_000_000:1_500_000;
+                    preview=GiphySearch.requestPreview(gif.thumbnail,limit);
                 } catch(Exception thumbFailure) {
-                    try {preview=GiphySearch.requestPreview(gif.original,1_800_000);}
+                    try {if(!gif.thumbnail.equals(gif.original))
+                        preview=GiphySearch.requestPreview(gif.original,1_800_000);}
                     catch(Exception sourceFailure) {
                         android.util.Log.w("KontextTastatur","GIF preview unavailable: "+
                             GiphySearch.userErrorMessage(sourceFailure));

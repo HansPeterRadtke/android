@@ -3,7 +3,7 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 public final class GifSourcesTest {
     @Test public void noKeyDefaultsToRelevantReactionsNotCommonsArchive() {
-        assertEquals("tenorweb",GifSources.initialProvider(false));
+        assertEquals("reactions",GifSources.initialProvider(false));
         assertEquals("giphy",GifSources.initialProvider(true));
     }
     @Test public void searchTermsAreKeptForProviderInsteadOfInventingRandomKeywords() {

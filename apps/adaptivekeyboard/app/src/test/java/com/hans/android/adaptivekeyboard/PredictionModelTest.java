@@ -327,7 +327,7 @@ public class PredictionModelTest {
         for(int i=0;i<8;i++)model.learnTyped("bleiben","möchte","");
         assertEquals("bleiben",model.predict("","möchte","").get(0));
         assertEquals(2,model.predictPersonal("","möchte","","de").size());
-        assertEquals(3,model.predict("","möchte","").size());
+        assertEquals(2,model.predict("","möchte","").size());
     }
     @Test public void restoredHistoryGivesSameOrderingAndUndoWorks(){
         PredictionModel live=new PredictionModel();
@@ -595,8 +595,7 @@ public class PredictionModelTest {
         m.learnTyped("am","I","");
         java.util.List<String> all=m.predict("","let's","",
             java.util.Collections.emptyMap(),"en");
-        assertEquals(3,all.size());
-        assertEquals("go",all.get(0));
+        assertEquals(java.util.List.of("go"),all);
         java.util.List<String> actualFirst=m.predictPersonal("","let's","","en");
         assertEquals(java.util.List.of("go"),actualFirst);
         java.util.List<String> quick=PhrasePredictor.complete("Let's ",actualFirst,
@@ -611,5 +610,42 @@ public class PredictionModelTest {
         PredictionModel m=new PredictionModel();
         assertNull(m.learnTyped("", "a", "b"));
         assertNull(m.learnTyped("a".repeat(61),"a","b"));
+    }
+    @Test public void exactSentenceContextWinsAgainstACommonLastWord() {
+        PredictionModel model=new PredictionModel();
+        for(int i=0;i<12;i++)model.learnTyped("work","to","go");
+        model.learnTyped("music","to","listen");
+        assertEquals("music",model.predict("","to","listen").get(0));
+        assertEquals("work",model.predict("","to","go").get(0));
+    }
+    @Test public void unknownContextNeverGetsSentenceOpenersAsFiller() {
+        PredictionModel model=new PredictionModel();
+        model.learnTyped("hello","","");
+        assertTrue(model.predict("","quuxword","after",java.util.Map.of(),"en").isEmpty());
+        assertEquals(java.util.List.of("works"),model.predict("","quuxword","after",
+            java.util.Map.of("works",42.0),"en"));
+    }
+    @Test public void dictionaryRoutesUnmarkedEnglishAndGermanContexts() {
+        PredictionModel model=new PredictionModel();
+        model.addBaseWord("sounds",230,"en");model.addBaseWord("good",82,"en");
+        model.addBaseWord("klingt",200,"de");model.addBaseWord("gut",70,"de");
+        assertEquals("en",LanguageContext.detect("Sounds good ",model));
+        assertEquals("de",LanguageContext.detect("Klingt gut ",model));
+    }
+    @Test public void commonConnectorDoesNotImportUnrelatedPersonalSentences() {
+        PredictionModel m=new PredictionModel();
+        m.addBaseWord("to",2,"en");
+        m.restoreWord("work",15,0);
+        m.restorePair("to","work",15);
+        m.restoreTriple("go","to","work",15);
+        m.restoreTriple("go","to","work",15);
+        assertFalse(m.predict("","to","listen",java.util.Map.of("music",50.0),"en").contains("work"));
+        assertEquals("work",m.predict("","to","go").get(0));
+        PredictionModel.Event event=m.learnTyped("work","to","listen");
+        assertEquals("work",m.predictPersonal("","to","listen","en").get(0));
+        m.undo(event);
+        assertTrue(m.predictPersonal("","to","listen","en").isEmpty());
+        m.restorePair("to","work",16); // one legacy pair has no fuller context
+        assertEquals("work",m.predictPersonal("","to","listen","en").get(0));
     }
 }

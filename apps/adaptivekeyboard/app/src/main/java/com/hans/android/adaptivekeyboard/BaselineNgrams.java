@@ -66,11 +66,27 @@ public final class BaselineNgrams {
         Map<String,Double> scores=new LinkedHashMap<>(24);
         if(!a.isEmpty()) {
             addScores(scores,nextAfterOne.get(a),prefix,2.7,16,language);
-            if(!b.isEmpty())addScores(scores,nextAfterTwo.get(ctx(b,a)),prefix,4.2,24,language);
+            if(!b.isEmpty()) {
+                List<Candidate> matches=nextAfterTwo.get(ctx(b,a));
+                addScores(scores,matches,prefix,4.2,24,language);
+                if(matches!=null) {
+                    int peak=0;
+                    for(Candidate c:matches)
+                        if(language==null || language.isEmpty() || language.equals(c.language))
+                            peak=Math.max(peak,c.count);
+                    // Prefer well-attested completions of this exact pair. Counts
+                    // are truncated in the asset, so compare to its strongest match.
+                    for(Candidate c:matches) {
+                        if((language!=null && !language.isEmpty() && !language.equals(c.language)) ||
+                            !c.token.startsWith(prefix))continue;
+                        double confidence=c.count/(c.count+3.0);
+                        scores.merge(c.token,32.0*confidence*c.count/peak,Double::sum);
+                    }
+                }
+            }
         }
-        // Without any observed personal or baseline continuation, still show
-        // useful possible first words instead of a permanently empty suggestion bar.
-        if(scores.size()<3) {
+        // Sentence starts are valid evidence only at an actual sentence boundary.
+        if(a.isEmpty() && b.isEmpty()) {
             addScores(scores,starts,prefix,1.45,18,language);
         }
         return scores;

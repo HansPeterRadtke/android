@@ -30,6 +30,9 @@ public final class LanguageContext {
 
     /** Uses recent words across sentence boundaries, never transmits or stores them. */
     public static String detect(String text) {
+        return detect(text,null);
+    }
+    public static String detect(String text,PredictionModel lexicon) {
         if(text==null || text.isBlank())return "de";
         String s=text.length()>180?text.substring(text.length()-180):text;
         String prefix=ChimeEnglish.activePrefix(s);
@@ -55,6 +58,12 @@ public final class LanguageContext {
         if(last.length()>2) {
             if(EN.contains(last)&&!DE.contains(last))english+=last.contains("'")?5.0:1.5;
             if(DE.contains(last)&&!EN.contains(last))german+=1.5;
+        }
+        if(lexicon!=null && Math.abs(english-german)<0.5) {
+            double evidence=0;
+            for(int i=start;i<words.size();i++)evidence+=lexicon.signal(words.get(i));
+            if(last.length()>2)evidence+=lexicon.signal(last);
+            if(Math.abs(evidence)>0.35)return evidence>0?"en":"de";
         }
         return english>german+0.4?"en":"de";
     }

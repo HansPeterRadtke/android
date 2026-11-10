@@ -8,7 +8,7 @@ public final class GifSources {
     public static String initialProvider(boolean hasOwnGiphyKey) {
         // The anonymous Wikimedia corpus is archival and is not a suitable
         // default for reaction GIF searches.
-        return hasOwnGiphyKey?"giphy":"tenorweb";
+        return hasOwnGiphyKey?"giphy":"reactions";
     }
     public static String slug(String query) {
         if(query==null||query.trim().isEmpty())return "reaction";

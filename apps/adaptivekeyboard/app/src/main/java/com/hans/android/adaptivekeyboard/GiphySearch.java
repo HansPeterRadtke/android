@@ -27,7 +27,7 @@ public final class GiphySearch {
     }
     private GiphySearch() { }
     public static List<Gif> search(String apiKey, String query) throws Exception {
-        if(apiKey == null || apiKey.trim().isEmpty())return searchOpenverse(query);
+        if(apiKey == null || apiKey.trim().isEmpty())return ReactionGifFeed.search(query);
         return searchGiphy(apiKey,query,"r",0);
     }
 
@@ -175,7 +175,7 @@ public final class GiphySearch {
             String host=u.getHost().toLowerCase(java.util.Locale.ROOT);
             return u.getProtocol().equals("https") &&
                 (host.equals("giphy.com") || host.endsWith(".giphy.com") ||
-                 host.equals("upload.wikimedia.org") || host.equals("api.openverse.org"));
+                 ReactionGifFeed.isHost(host) || host.equals("upload.wikimedia.org") || host.equals("api.openverse.org"));
         } catch (Exception e) {return false;}
     }
     public static byte[] request(String url, int maxSize) throws Exception {
@@ -189,7 +189,7 @@ public final class GiphySearch {
         HttpURLConnection con = (HttpURLConnection)new URL(url).openConnection();
         con.setConnectTimeout(connectMs); con.setReadTimeout(readMs); con.setInstanceFollowRedirects(false);
         con.setRequestProperty("User-Agent", "KontextTastatur/0.5 (+https://github.com/HansPeterRadtke/android)");
-        con.setRequestProperty("Accept", "application/json, image/gif, image/*;q=0.9, */*;q=0.5");
+        con.setRequestProperty("Accept", "application/json, application/rss+xml, image/gif, image/*;q=0.9, */*;q=0.5");
         try {
             if (con.getResponseCode() != 200) throw new java.io.IOException("HTTP "+con.getResponseCode());
             try(InputStream in=con.getInputStream(); ByteArrayOutputStream bytes=new ByteArrayOutputStream()) {

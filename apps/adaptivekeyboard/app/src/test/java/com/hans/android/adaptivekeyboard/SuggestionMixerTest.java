@@ -21,9 +21,9 @@ public final class SuggestionMixerTest {
     }
     @Test public void coldStartOffersCommonWordsWithoutNeuralStartupDelay() {
         assertEquals(3,SuggestionMixer.coldStart("","de",true).size());
-        assertEquals(3,SuggestionMixer.coldStart("","en",false).size());
+        assertTrue(SuggestionMixer.coldStart("","en",false).isEmpty());
         assertEquals("Ich",SuggestionMixer.coldStart("","de",true).get(0));
-        assertEquals("i",SuggestionMixer.coldStart("","en",false).get(0));
+        assertEquals("we",SuggestionMixer.coldStart("we","en",false).get(0));
         assertTrue(SuggestionMixer.coldStart("zzzzzz","en",false).isEmpty());
     }
     @Test public void oneEditTypoCorrectionIsStillAvailable(){

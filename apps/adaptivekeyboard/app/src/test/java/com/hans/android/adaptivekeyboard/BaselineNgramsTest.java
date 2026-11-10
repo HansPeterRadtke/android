@@ -23,12 +23,12 @@ public final class BaselineNgramsTest {
         assertTrue(scores.get("hier")>scores.get("gut"));
         assertEquals(0,m.candidates("zzzz","bin","ich").size());
     }
-    @Test public void fallbacksAtStartAndUnknownContextStillExist() {
+    @Test public void startWordsDoNotLeakIntoUnknownContexts() {
         BaselineNgrams m=new BaselineNgrams();
         m.add("S","","","ich",140,"de");
         m.add("S","","","i",200,"en");
         m.add("S","","","das",90,"de");
         assertEquals(3,m.candidates("","","").size());
-        assertEquals(3,m.candidates("","unbekannt","irgendwas").size());
+        assertTrue(m.candidates("","unbekannt","irgendwas").isEmpty());
     }
 }

@@ -25,6 +25,7 @@ public final class SuggestionMixer {
     /** Use no arbitrary guesses if the field has an impossible multi-letter prefix. */
     public static List<String> coldStart(String prefix,String language,boolean atSentenceStart) {
         String check=normalized(prefix);
+        if(check.isEmpty() && !atSentenceStart)return java.util.Collections.emptyList();
         String[] items="en".equals(language)?ENGLISH:GERMAN;
         List<String> result=new ArrayList<>(3);
         for(String word:items) {

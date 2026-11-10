@@ -67,6 +67,8 @@ public final class PredictionModel {
     private final Map<String,java.util.ArrayDeque<String>> recentByPrevious=new HashMap<>();
     private List<String> cachedLegacyOpenings=null;
     private final Map<String,Integer> triples=new HashMap<>();
+    // Total observations of each pair for which a preceding word is known.
+    private final Map<String,Integer> pairWithContext=new HashMap<>();
     private final Map<String,Integer> choices=new HashMap<>();
     private final Map<String,Long> choiceTimes=new HashMap<>();
     private final Map<String,Long> latestChoiceByPrefix=new HashMap<>();
@@ -134,7 +136,10 @@ public final class PredictionModel {
             evicted=PersonalNextWords.append(recentByPrevious.computeIfAbsent(a,
                 k->new java.util.ArrayDeque<>(PersonalNextWords.WINDOW)),word);
         }
-        if(!b.isEmpty()&&!a.isEmpty())adjust(triples,key(b,a,word),1);
+        if(!b.isEmpty()&&!a.isEmpty()) {
+            adjust(triples,key(b,a,word),1);
+            adjust(pairWithContext,key(a,word),1);
+        }
         if(selected&&!prefix.isEmpty())updateChoices(b,a,prefix,word,1,now);
         return new Event(word,a,b,prefix,selected,now,evicted);
     }
@@ -186,6 +191,7 @@ public final class PredictionModel {
         }
         if(!e.beforePrevious.isEmpty()&&!e.previous.isEmpty()) {
             adjust(triples,key(e.beforePrevious,e.previous,e.word),-1);
+            adjust(pairWithContext,key(e.previous,e.word),-1);
             if(get(triples,key(e.beforePrevious,e.previous,e.word))==0) {
                 Set<String> after=nextByTwoPrevious.get(key(e.beforePrevious,e.previous));
                 if(after!=null)after.remove(e.word);
@@ -216,7 +222,10 @@ public final class PredictionModel {
         if(!tokens.isEmpty())recentByPrevious.put(norm(previous),tokens);
     }
     public synchronized void restoreTriple(String b,String a,String word,int count) {
-        if(count>0){triples.put(key(b,a,word),count);rememberNext(a,b,word);}
+        if(count<=0)return;
+        Integer old=triples.put(key(b,a,word),count);
+        adjust(pairWithContext,key(a,word),count-(old==null?0:old));
+        rememberNext(a,b,word);
     }
     public synchronized void restoreChoice(String b,String a,String prefix,String word,int count) {
         restoreChoice(b,a,prefix,word,count,0);
@@ -258,7 +267,7 @@ public final class PredictionModel {
             else {w.typed=0;w.selected=0;w.lastUsedMs=0;
                 if(w.lexicalSurface!=null)w.surface=w.lexicalSurface;}
         }
-        pairs.clear();triples.clear();recentByPrevious.clear();choices.clear();choiceTimes.clear();
+        pairs.clear();triples.clear();pairWithContext.clear();recentByPrevious.clear();choices.clear();choiceTimes.clear();
         latestChoiceByPrefix.clear();rejections.clear();nextByPrevious.clear();
         nextByTwoPrevious.clear();commonPrefixCache.clear();indexDirty=true;
     }
@@ -301,6 +310,14 @@ public final class PredictionModel {
         return best;
     }
 
+    // Frequent words such as "to" join many unrelated constructions. A word
+    // observed exclusively in a different construction needs fresh evidence.
+    private boolean onlyOtherContext(String a,String b,String word,int pair,int triple) {
+        Word previous=words.get(a);
+        return !b.isEmpty() && triple==0 && pair>0 && previous!=null &&
+            previous.baseRank<120 && get(pairWithContext,key(a,word))>=pair;
+    }
+
     /**
      * Strict personal-history priority. If the previous word has confirmed
      * continuations matching the user's typed prefix, use ONLY those words.
@@ -328,14 +345,14 @@ public final class PredictionModel {
         for(String word:successors) {
             if(!word.startsWith(prefix))continue;
             int count=get(pairs,key(a,word));
-            if(count<=0)continue;
+            int match=get(triples,key(b,a,word));
+            if(count<=0 || onlyOtherContext(a,b,word,count,match))continue;
             double score=PersonalNextWords.score(count,countTotal,
                 recentShares.getOrDefault(word,0.0),observations);
             if(!b.isEmpty()) {
-                // Prioritize the owner's immediate preceding *word*; a matching
-                // two-word context only resolves close scores, not the other way around.
-                int match=get(triples,key(b,a,word));
-                if(match>0)score+=0.03*Math.log1p(match);
+                // An observed longer context is more specific than a frequent
+                // continuation of the last word in a different sentence.
+                if(match>0)score+=1.0+Math.log1p(match);
             }
             results.add(new Ranked(word,score));
         }
@@ -615,17 +632,19 @@ public final class PredictionModel {
         return true;
     }
     /** Positive=English, negative=German; ambiguous shared words are neutral. */
-    private double signal(String token) {
+    synchronized double signal(String token) {
         Word w=words.get(token);
-        if(w==null)return 0;
+        if(w==null || (w.enRank==UNKNOWN_RANK && w.deRank==UNKNOWN_RANK))return 0;
         if(w.enRank==UNKNOWN_RANK)return -1;
         if(w.deRank==UNKNOWN_RANK)return 1;
-        if(w.enRank<80 && w.deRank>600)return 0.6;
-        if(w.deRank<80 && w.enRank>600)return -0.6;
+        // Shared vocabulary can have very different frequencies in each language.
+        if((w.enRank+20L)*5 < w.deRank+20L)return 0.6;
+        if((w.deRank+20L)*5 < w.enRank+20L)return -0.6;
         return 0;
     }
     private void offer(Scored[] best,String form,Word w,String a,String b,String prefix,String rawPrefix,double languageBias,double penalty,double genericScore) {
         int pair=get(pairs,key(a,form)),triple=get(triples,key(b,a,form));
+        if(onlyOtherContext(a,b,form,pair,triple))pair=0;
         if(prefix.isEmpty() && pair==0 && triple==0 && genericScore<=0)return;
         double base=w.baseRank==UNKNOWN_RANK?0:Math.max(0,13-1.2*Math.log1p(w.baseRank));
         double preference=0;
@@ -652,12 +671,15 @@ public final class PredictionModel {
             if(contextualLast>0 && contextualLast==latestChoiceByPrefix.getOrDefault(currentPrefix,0L))
                 latestPreference+=recencyBonus(contextualLast,9);
         }
-        double score=base+contextLanguage+genericScore+6*Math.log1p(w.typed)+6*Math.log1p(w.selected)
+        // Global popularity helps complete a typed prefix. For the next word,
+        // the sentence supplies much stronger evidence than dictionary rank.
+        double globalWeight=prefix.isEmpty() && !a.isEmpty()?0.15:1.0;
+        double score=genericScore+globalWeight*(base+contextLanguage+6*Math.log1p(w.typed)
+            +6*Math.log1p(w.selected)+recencyBonus(w.lastUsedMs,5))
             +latestPreference
             +12*Math.log1p(pair)+18*Math.log1p(triple)
             +19*Math.log1p(contextualChoice)
             +9*Math.log1p(get(choices,key("","",prefix,form)))
-            +recencyBonus(w.lastUsedMs,5)
             +recencyBonus(choiceTimes.getOrDefault(key("","",prefix,form),0L),14)
             +(a.isEmpty()&&b.isEmpty()?0:recencyBonus(choiceTimes.getOrDefault(key(b,a,prefix,form),0L),8))
             -10*Math.log1p(contextualReject)
