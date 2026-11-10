@@ -327,7 +327,7 @@ public final class PredictionModel {
      * Generic corpora and neural output are not allowed to overrule them.
      */
     private List<String> personalNext(String rawPrefix,String previous,
-                                      String beforePrevious,String language) {
+                                      String beforePrevious,String language,boolean wholePhrase) {
         String a=norm(previous),b=norm(beforePrevious),prefix=norm(rawPrefix);
         if(a.isEmpty()&&b.isEmpty())a=SENTENCE_START;
         if(a.isEmpty())return Collections.emptyList();
@@ -349,7 +349,7 @@ public final class PredictionModel {
             if(!word.startsWith(prefix))continue;
             int count=get(pairs,key(a,word));
             int match=get(triples,key(b,a,word));
-            if(count<=0 || onlyOtherContext(a,b,word,count,match))continue;
+            if(count<=0 || (wholePhrase && !b.isEmpty() && match==0) || onlyOtherContext(a,b,word,count,match))continue;
             double score=PersonalNextWords.score(count,countTotal,
                 recentShares.getOrDefault(word,0.0),observations);
             if(!b.isEmpty()) {
@@ -470,10 +470,15 @@ public final class PredictionModel {
         return false;
     }
 
+    /** A learned pair after another word must have been observed as one triple. */
+    public synchronized List<String> personalPhraseNext(TextContext following,String language) {
+        return personalNext("",following.previous,following.beforePrevious,language,true);
+    }
+
     /** Precisely observed personal ranking, without model or generic filler. */
     public synchronized List<String> predictPersonal(String rawPrefix,String prev,String prev2,
                                                      String language) {
-        List<String> personal=personalNext(rawPrefix,prev,prev2,language);
+        List<String> personal=personalNext(rawPrefix,prev,prev2,language,false);
         if(norm(rawPrefix).isEmpty() && norm(prev).isEmpty() && norm(prev2).isEmpty())
             return personalOpeningBackfill(personal);
         return personal;

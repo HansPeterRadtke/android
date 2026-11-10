@@ -44,7 +44,7 @@ Caveats: This is a tested first keyboard release, **not** feature parity with Gb
 
 ## Prebuilt emulator-tested Android package
 
-The signed debug APK is checked in under `release/kontexttastatur-0.23.0-debug.apk`, alongside its SHA-256. It is deliberately a development/test build, not a production Play Store release. It can be sideloaded after allowing installs from the chosen file source; choose the keyboard in Android system input method settings. It never changes the default IME automatically.
+The signed debug APK is checked in under `release/kontexttastatur-0.24.0-debug.apk`, alongside its SHA-256. It is deliberately a development/test build, not a production Play Store release. It can be sideloaded after allowing installs from the chosen file source; choose the keyboard in Android system input method settings. It never changes the default IME automatically.
 
 ## November 6 owner feedback correction (version 0.3.0)
 
@@ -313,3 +313,11 @@ In ordinary message fields, the IME tracks its current typed word locally. A spa
 For a prefix of at least two characters, a custom spelling the user previously typed can occupy an alternative slot in a new sentence. A known continuation for the specific context still takes priority. Settings under **Lernverhalten** shows the number of distinct words with stored usage. Tap **Gespeicherte Wörter** to refresh it.
 
 Android 34 emulator acceptance used real keyboard taps and a separate message editor. In the published 0.22 APK, a synthetic word followed by Space was stored, while words followed by the app's Submit button or by hiding the keyboard were missing. In 0.23, repeated submissions of the same word incremented its count once per submission. Hide and reopen followed by Space counted once. Extending a word after reopening replaced the earlier spelling. After stopping and restarting the keyboard process, the original next-word context and the custom prefix completion were both available. For example, “der sch” showed the previously learned “Schraubfink” from another context. The settings count agreed with the number of distinct words in SQLite. The physical Ulefone was unavailable for testing.
+
+## Version 0.24.0
+
+The phrase row suggests two words that have occurred together after the preceding words. Its bilingual tables use up to three words of history and distinguish sentence openings from embedded clauses. A typed prefix constrains the first word of the suggestion. For a personal continuation in the middle of a sentence, the last context word and both suggested words must have been observed in that order. A separately observed “we are” and “are you” can no longer create “we are you”. A directly learned sequence remains available. The word row retains its personalized and neural ranking.
+
+In a paired test of 500 English and 500 German Tatoeba excerpts, the exact next two words appeared among the three phrase suggestions in 52 English and 37 German cases. The prior release got 36 and 22. The updated phrase row offered at least one phrase in 937 of the 1,000 cases, compared with 1,000 in v0.23. Excerpts were sampled from lines skipped by the bundled corpus generators, using a fixed seed and no personal history. The frozen models may share training material with Tatoeba. Exact matches measure agreement with the recorded next words. Other continuations may also fit.
+
+Android 34 emulator regression checks use both “Ok, we ” and “Ok , we ” after separately teaching the keyboard “we are” and “are you”. The update also recognizes “we” as an English word in an otherwise ambiguous field before a space is entered.

@@ -81,7 +81,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private volatile int observedRevision=0;
     private long uiKeyTotalNs,uiKeyMaxNs,uiCommitTotalNs,uiCommitMaxNs;
     private int uiKeyCount,uiSelectionUpdates,uiSnapshotCount;
-    private int lastCandidateRevision=-1,lastNeuralRevision=-1;
+    private int lastCandidateRevision=-1;
     private long uiSnapshotTotalNs,uiSnapshotMaxNs;
     private static final int REFRESH_DELAY_MS=55,NEURAL_DELAY_MS=140;
     private volatile ChimeEnglish neuralModel;
@@ -100,7 +100,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             @Override protected int sizeOf(String key,byte[] value) {return value.length;}
         };
     private volatile PredictionModel predictions;
-    private BaselineNgrams baselineNgrams;
+    private volatile PhraseTable englishPhrases,germanPhrases;
     // Preserve user events occurring while the private DB snapshot is loading.
     private boolean modelCatchupEnabled=false;
     private boolean initialHistoryReady=false;
@@ -204,6 +204,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             try{personalHistoryGate.await();}
             catch(InterruptedException stop){Thread.currentThread().interrupt();return;}
             if(active!=this)return;
+            englishPhrases=loadPhraseTable("en");
+            germanPhrases=loadPhraseTable("de");
+            handler.post(() -> {if(active==this)refreshSuggestions();});
             ChimeEnglish englishModel=null;
             GermanNextWord germanModel=null;
             GermanCaseModel caseModel=null;
@@ -266,7 +269,6 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                             action.accept(readyPredictor);
                         modelCatchup.clear();modelCatchupEnabled=false;
                         predictions=readyPredictor;
-                        baselineNgrams=loaded;
                         refreshSuggestions();
                         android.util.Log.i("KontextTastatur","Offline language model ready: "+
                             loaded.size()+" ngrams, "+readyPredictor.size()+" words");
@@ -300,6 +302,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         neuralWorker.shutdownNow();
         fastPredictWorker.shutdownNow();
         neuralModel=null;germanNeuralModel=null;germanCaseModel=null;
+        englishPhrases=null;germanPhrases=null;
         modelCatchup.clear();modelCatchupEnabled=false;
         tokenCatchup.clear();tokenHistoryReady=false;tokenObserver.reset();
         pendingHeavyInstall=null;initialHistoryReady=false;
@@ -326,6 +329,14 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             active.refreshSuggestions();
         } else {
             new LearningDatabase(c).clearLearning();
+        }
+    }
+    private PhraseTable loadPhraseTable(String language) {
+        try(java.io.InputStream in=getAssets().open(language+"_phrase_pairs.ngram")) {
+            return new PhraseTable(in,language);
+        } catch(java.io.IOException ex) {
+            android.util.Log.e("KontextTastatur","Phrase table unavailable: "+language,ex);
+            return null;
         }
     }
     private void loadLexicon(PredictionModel target,String name,String language) {
@@ -525,7 +536,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         lastPhraseRevision=-1;phraseSource="";
         clearPhrases();
         // No suggestion from the previous editor may flash on a fresh field.
-        lastCandidateRevision=-1;lastNeuralRevision=-1;
+        lastCandidateRevision=-1;
         for(int i=0;i<3;i++) {
             visibleWords[i]="";wordActions[i]=null;
             if(suggestions[i]!=null){suggestions[i].setText("");suggestions[i].setEnabled(false);}
@@ -951,33 +962,22 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                 if(snapshot.selection||insideWord)
                     updatePhraseButtons(Collections.emptyList(),before,revision);
             });
-            List<String> quickPhrases=Collections.emptyList();
-            // Quick phrases must start with words ACTUALLY used after this
-            // context. Cold generic fillers (e.g. "I" after "Let's") may be
-            // acceptable as individual fallback words but cannot be stitched
-            // into arbitrary unrelated phrases in the second row.
-            if(!snapshot.selection && !insideWord && !quickFirst.isEmpty()) {
-                final String lang=language;
-                quickPhrases=PhrasePredictor.complete(before,quickFirst,
-                    (seed,limit) -> {
-                        if(revision!=predictionRevision)return Collections.emptyList();
-                        TextContext following=TextContext.fromBeforeCursor(seed);
-                        // Quick phrases should be grounded in actual observed
-                        // adjacent words. Neural phrases may arrive later.
-                        return predictions.hasPersonalNext("",following.previous)?
-                            predictions.predictPersonal("",following.previous,
-                                following.beforePrevious,lang):Collections.emptyList();
-                    },(word,prefix,seed) -> formatCandidate(word,prefix,seed,lang),3);
-            }
-            final List<String> earlyPhrases=quickPhrases;
-            if(!snapshot.selection && !insideWord)handler.post(() -> {
-                if(active==this && revision==predictionRevision && lastNeuralRevision!=revision)
-                    updatePhraseButtons(earlyPhrases,before,revision);
+            if(snapshot.selection || insideWord || revision!=predictionRevision)return;
+            PhrasePredictor.Casing casing=(word,prefix,seed)->formatCandidate(word,prefix,seed,language);
+            List<String> learned=PhrasePredictor.complete(before,quickFirst,(seed,limit)->{
+                TextContext next=TextContext.fromBeforeCursor(seed);
+                return predictions.personalPhraseNext(next,LanguageContext.detect(seed,predictions));
+            },casing,3);
+            PhraseTable table="en".equals(language)?englishPhrases:germanPhrases;
+            List<String> observed=Collections.emptyList();
+            if(!opening && table!=null && learned.size()<3)
+                observed=table.complete(before,ranked,casing,3);
+            List<String> phrases=SuggestionMixer.merge(learned,observed,3,"");
+            handler.post(() -> {
+                if(active==this && revision==predictionRevision)
+                    updatePhraseButtons(phrases,before,revision);
             });
-            // Neural completions fill only missing places, even when one or
-            // two real personal continuations already occupy other slots.
-            if(snapshot.selection||insideWord||!neuralEnabled() ||
-                (personalCount>=3 && earlyPhrases.size()>=3))return;
+            if(!neuralEnabled() || personalCount>=3)return;
             ChimeEnglish en=neuralModel;
             GermanNextWord de=germanNeuralModel;
             if(("en".equals(language)&&en==null)||("de".equals(language)&&de==null))return;
@@ -1002,39 +1002,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
                         handler.post(() -> {
                             if(active==this&&revision==predictionRevision&&!typingSensitive()&&!privateMode &&
                                 "letters".equals(mode)) {
-                                lastNeuralRevision=revision;
                                 updateSuggestionButtons(mixed,context.prefix,before,false,revision);
                             }
-                        });
-                        if(revision!=predictionRevision)return;
-                        PhrasePredictor.Continuations follow=(seed,limit) -> {
-                            if(revision!=predictionRevision)return Collections.emptyList();
-                            TextContext next=TextContext.fromBeforeCursor(seed);
-                            String nextLanguage=LanguageContext.detect(seed,predictions);
-                            List<String> observed=predictions.predictPersonal("",next.previous,
-                                next.beforePrevious,nextLanguage);
-                            if(opening || !observed.isEmpty())return observed;
-                            try {
-                                Map<String,Double> hints=Collections.emptyMap();
-                                if("en".equals(nextLanguage) && en!=null)
-                                    hints=neuralScores(en.predict(seed,limit));
-                                else if("de".equals(nextLanguage) && de!=null)
-                                    hints=germanNeuralScores(de.predict(seed,limit));
-                                return predictions.predict("",next.previous,next.beforePrevious,
-                                    hints,nextLanguage);
-                            } catch(Exception e) {return Collections.emptyList();}
-                        };
-                        List<String> multi=PhrasePredictor.complete(before,opening?quickFirst:mixed,follow,
-                            (word,prefix,seed)->formatCandidate(word,prefix,seed,
-                                LanguageContext.detect(seed,predictions)),3);
-                        // Keep the user's actual phrase choices ahead of
-                        // neural phrases, and never show duplicates.
-                        multi=SuggestionMixer.merge(earlyPhrases,multi,3,"");
-                        final List<String> resolvedPhrases=multi;
-                        if(revision!=predictionRevision)return;
-                        handler.post(() -> {
-                            if(active==this && revision==predictionRevision && !typingSensitive() && !privateMode)
-                                updatePhraseButtons(resolvedPhrases,before,revision);
                         });
                     });
                 };

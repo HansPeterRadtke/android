@@ -52,3 +52,9 @@ The binary `app/src/main/assets/chime_en.ltc` is an unchanged copy of the publis
 ## ReactionGIFs.com in version 0.20
 
 The keyless picker reads the public RSS feed at https://www.reactiongifs.com/feed/ or the site's RSS search results. It displays source credit on each result and links the original post when sharing to a compatible editor. Media is fetched on demand. The APK contains no GIFs from this provider.
+
+## Observed phrase continuations in version 0.24
+
+The English and German phrase tables derive from the same October 31, 2026 per-language exports by Tatoeba contributors credited above. The transformed aggregate data are provided under CC BY 2.0 France. Source and contributor attribution records are available on [Tatoeba](https://tatoeba.org/) and in its [per-language exports](https://downloads.tatoeba.org/exports/per_language/). [License](https://creativecommons.org/licenses/by/2.0/fr/).
+
+Run `scripts/make_phrase_data.py en eng_sentences.tsv.bz2 app/src/main/assets/en_phrase_pairs.ngram` and the equivalent command with `de`, `deu_sentences.tsv.bz2` and `de_phrase_pairs.ngram` from the keyboard project directory. Each table stores short context keys and the most frequent consecutive two-word continuations. Training spans break at punctuation, with internal apostrophes preserved. The generator uses the same line sampling strides as the baseline n-grams, retains repeated observations and emits deterministic compressed files. The word '^' in a context key marks the beginning of a sentence. The runtime reads both files offline.

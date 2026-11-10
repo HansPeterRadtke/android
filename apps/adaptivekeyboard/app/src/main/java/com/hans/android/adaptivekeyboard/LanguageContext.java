@@ -59,7 +59,7 @@ public final class LanguageContext {
         // A distinctive complete English/German word as the active prefix
         // supplies a language signal without reinterpreting its capitalization.
         String last=prefix.toLowerCase(Locale.GERMAN);
-        if(last.length()>2) {
+        if(last.length()>2 || (last.length()==2 && english==german)) {
             if(EN.contains(last)&&!DE.contains(last))english+=last.contains("'")?5.0:1.5;
             if(DE.contains(last)&&!EN.contains(last))german+=1.5;
         }
