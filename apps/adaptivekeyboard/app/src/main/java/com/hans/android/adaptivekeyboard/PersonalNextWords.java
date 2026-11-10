@@ -20,13 +20,16 @@ public final class PersonalNextWords {
     private PersonalNextWords() { }
 
     public static boolean valid(String word) {
-        if(word==null || word.isEmpty() || word.length()>60)return false;
-        if(word.indexOf(SEP)>=0)return false;
+        if(word==null || word.isEmpty() || word.length()>60 ||
+           !Character.isLetterOrDigit(word.codePointAt(0)))return false;
         for(int i=0;i<word.length();) {
             int cp=word.codePointAt(i);
-            if(!Character.isLetter(cp) && Character.getType(cp)!=Character.NON_SPACING_MARK &&
-               cp!='\'' && cp!='’' && cp!='-')return false;
             i+=Character.charCount(cp);
+            if(Character.isLetterOrDigit(cp) || Character.getType(cp)==Character.NON_SPACING_MARK ||
+               Character.getType(cp)==Character.COMBINING_SPACING_MARK)continue;
+            if((cp=='\'' || cp=='’' || cp=='-') && i<word.length() &&
+               Character.isLetterOrDigit(word.codePointAt(i)))continue;
+            return false;
         }
         return true;
     }

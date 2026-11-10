@@ -3,14 +3,11 @@ package com.hans.android.adaptivekeyboard;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 
-/** Personal next-TOKEN history (words, punctuation, symbols), never model guesses. */
+/** Personal word transitions from confirmed input, including older database entries. */
 public final class TokenHistory {
     public static final String START="<start>";
     private static final String SEP="\u001f";
@@ -25,8 +22,7 @@ public final class TokenHistory {
     private final Map<String,ArrayDeque<String>> recent=new HashMap<>();
 
     public static boolean valid(String token) {
-        if(token==null||token.isEmpty()||token.length()>60||token.indexOf(SEP)>=0)return false;
-        return !token.startsWith("<") || token.equals("<3");
+        return PersonalNextWords.valid(token);
     }
     public static String norm(String token) {return GrammarTokens.normalize(token);}
     public synchronized Event learn(String preceding,String current) {

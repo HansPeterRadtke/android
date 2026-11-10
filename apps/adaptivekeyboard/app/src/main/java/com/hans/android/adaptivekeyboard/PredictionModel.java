@@ -89,7 +89,7 @@ public final class PredictionModel {
     public synchronized void addBaseWord(String value,int rank) {addBaseWord(value,rank,"de");}
     public synchronized void addBaseWord(String value,int rank,String language) {
         String k=norm(value);
-        if(k.isEmpty())return;
+        if(!PersonalNextWords.valid(value))return;
         Word w=words.get(k);
         if(w==null){w=new Word(value);words.put(k,w);indexDirty=true;
             commonPrefixCache.clear();}
@@ -117,7 +117,7 @@ public final class PredictionModel {
     private Event learn(String raw,String prev,String prev2,String pref,boolean selected) {
         cachedLegacyOpenings=null;
         String word=norm(raw),a=norm(prev),b=norm(prev2),prefix=norm(pref);
-        if(word.isEmpty()||word.length()>60)return null;
+        if(!PersonalNextWords.valid(raw))return null;
         // At a real sentence start no previous word is present. Record the
         // confirmed first word explicitly; never infer it from a dictionary.
         if(a.isEmpty()&&b.isEmpty())a=SENTENCE_START;
@@ -206,7 +206,8 @@ public final class PredictionModel {
     }
     public synchronized void restoreWord(String surface,int typed,int selected,long lastUsedMs) {
         cachedLegacyOpenings=null;
-        String k=norm(surface);if(k.isEmpty())return;
+        if(!PersonalNextWords.valid(surface))return;
+        String k=norm(surface);
         Word w=words.get(k);
         if(w==null){w=new Word(surface);words.put(k,w);indexDirty=true;}
         commonPrefixCache.clear();
@@ -216,7 +217,7 @@ public final class PredictionModel {
     }
     public synchronized void restorePair(String a,String word,int count) {
         cachedLegacyOpenings=null;
-        if(count>0){pairs.put(key(a,word),count);rememberNext(a,"",word);}
+        if(count>0 && PersonalNextWords.valid(word)){pairs.put(key(a,word),count);rememberNext(a,"",word);}
     }
     public synchronized void restoreRecent(String previous,String serialized) {
         cachedLegacyOpenings=null;
@@ -225,7 +226,7 @@ public final class PredictionModel {
         if(!tokens.isEmpty())recentByPrevious.put(norm(previous),tokens);
     }
     public synchronized void restoreTriple(String b,String a,String word,int count) {
-        if(count<=0)return;
+        if(count<=0 || !PersonalNextWords.valid(word))return;
         Integer old=triples.put(key(b,a,word),count);
         adjust(pairWithContext,key(a,word),count-(old==null?0:old));
         rememberNext(a,b,word);
@@ -506,7 +507,7 @@ public final class PredictionModel {
         if(baseline!=null)generic.putAll(baseline.candidates(prefix,a,b,language));
         if(neuralScores!=null)for(Map.Entry<String,Double> e:neuralScores.entrySet()) {
             String word=norm(e.getKey());
-            if(word.startsWith(prefix) && e.getValue()!=null && e.getValue()>0)
+            if(PersonalNextWords.valid(e.getKey()) && word.startsWith(prefix) && e.getValue()!=null && e.getValue()>0)
                 generic.merge(word,e.getValue(),Double::sum);
         }
         if(prefix.isEmpty()&&a.isEmpty()&&generic.isEmpty())

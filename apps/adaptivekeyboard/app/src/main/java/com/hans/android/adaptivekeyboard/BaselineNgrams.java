@@ -41,7 +41,7 @@ public final class BaselineNgrams {
     private static String ctx(String a,String b) {return a+"\u0001"+b;}
 
     public synchronized void add(String kind,String prev2,String previous,String word,int n,String language) {
-        if(n<=0 || word==null || word.isEmpty() || word.length()>60)return;
+        if(n<=0 || !PersonalNextWords.valid(word))return;
         Candidate candidate=new Candidate(norm(word),n,language);
         if("B".equals(kind))
             nextAfterOne.computeIfAbsent(norm(previous),k->new ArrayList<>(6)).add(candidate);

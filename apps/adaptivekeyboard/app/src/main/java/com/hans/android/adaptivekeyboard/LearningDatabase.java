@@ -14,7 +14,7 @@ public final class LearningDatabase extends SQLiteOpenHelper {
     private final ExecutorService disk = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "keyboard-local-database"); t.setDaemon(true); return t;
     });
-    public LearningDatabase(Context c) { super(c, "learned.db", null, 5); }
+    public LearningDatabase(Context c) { super(c, "learned.db", null, 6); }
 
     @Override public void onCreate(SQLiteDatabase d) {
         d.execSQL("CREATE TABLE words(token TEXT PRIMARY KEY, surface TEXT NOT NULL, typed INTEGER NOT NULL DEFAULT 0, selected INTEGER NOT NULL DEFAULT 0, last_used_ms INTEGER NOT NULL DEFAULT 0)");
@@ -28,7 +28,7 @@ public final class LearningDatabase extends SQLiteOpenHelper {
         d.execSQL("CREATE TABLE token_recent(prev TEXT PRIMARY KEY, history TEXT NOT NULL)");
     }
     @Override public void onUpgrade(SQLiteDatabase db, int from, int to) {
-        if (from<1 || from>5 || to!=5)
+        if (from<1 || from>5 || to!=6)
             throw new IllegalStateException("Unsupported database version; personal history unchanged");
         if (from<=1) {
             db.execSQL("CREATE TABLE IF NOT EXISTS rejections(prev2 TEXT NOT NULL, prev TEXT NOT NULL, prefix TEXT NOT NULL, word TEXT NOT NULL, cnt INTEGER NOT NULL, PRIMARY KEY(prev2,prev,prefix,word))");
@@ -50,6 +50,37 @@ public final class LearningDatabase extends SQLiteOpenHelper {
             db.execSQL("CREATE TABLE IF NOT EXISTS token_pairs(prev TEXT NOT NULL, next TEXT NOT NULL, cnt INTEGER NOT NULL, PRIMARY KEY(prev,next))");
             db.execSQL("CREATE TABLE IF NOT EXISTS token_recent(prev TEXT PRIMARY KEY, history TEXT NOT NULL)");
         }
+        if(from==5)removePunctuationHistory(db);
+    }
+
+    // SQLiteOpenHelper wraps the whole upgrade in a transaction. Read the old
+    // tables without modifying them under a cursor, even across cursor windows.
+    private static void removePunctuationHistory(SQLiteDatabase db) {
+        db.execSQL("CREATE TEMP TABLE invalid_tokens(value TEXT PRIMARY KEY)");
+        try(Cursor c=db.rawQuery("SELECT prev FROM token_pairs UNION SELECT next FROM token_pairs",null)) {
+            while(c.moveToNext()) {
+                String token=c.getString(0);
+                if(!TokenHistory.START.equals(token) && !TokenHistory.valid(token))
+                    db.execSQL("INSERT INTO invalid_tokens VALUES (?)",new Object[]{token});
+            }
+        }
+        db.execSQL("DELETE FROM token_pairs WHERE next=? OR prev IN (SELECT value FROM invalid_tokens) "+
+                   "OR next IN (SELECT value FROM invalid_tokens)",new Object[]{TokenHistory.START});
+        db.execSQL("DROP TABLE invalid_tokens");
+
+        db.execSQL("CREATE TEMP TABLE cleaned_recent(prev TEXT PRIMARY KEY, history TEXT NOT NULL)");
+        try(Cursor c=db.rawQuery("SELECT prev,history FROM token_recent",null)) {
+            while(c.moveToNext()) {
+                String prev=c.getString(0);
+                if(!TokenHistory.START.equals(prev) && !TokenHistory.valid(prev))continue;
+                String history=TokenHistory.encode(TokenHistory.decode(c.getString(1)));
+                if(!history.isEmpty())
+                    db.execSQL("INSERT INTO cleaned_recent VALUES (?,?)",new Object[]{prev,history});
+            }
+        }
+        db.execSQL("DELETE FROM token_recent");
+        db.execSQL("INSERT INTO token_recent SELECT prev,history FROM cleaned_recent");
+        db.execSQL("DROP TABLE cleaned_recent");
     }
 
     public void restore(PredictionModel model) {
@@ -74,7 +105,7 @@ public final class LearningDatabase extends SQLiteOpenHelper {
         }
     }
 
-    /** Restore personal punctuation/character-string history in disk order. */
+    /** Restore confirmed word transitions in disk order. */
     public void restoreTokensAsync(TokenHistory target,Runnable finished) {
         disk.execute(() -> {
             try {

@@ -44,7 +44,7 @@ Caveats: This is a tested first keyboard release, **not** feature parity with Gb
 
 ## Prebuilt emulator-tested Android package
 
-The signed debug APK is checked in under `release/kontexttastatur-0.24.0-debug.apk`, alongside its SHA-256. It is deliberately a development/test build, not a production Play Store release. It can be sideloaded after allowing installs from the chosen file source; choose the keyboard in Android system input method settings. It never changes the default IME automatically.
+The signed debug APK is checked in under `release/kontexttastatur-0.25.0-debug.apk`, alongside its SHA-256. It is deliberately a development/test build, not a production Play Store release. It can be sideloaded after allowing installs from the chosen file source; choose the keyboard in Android system input method settings. It never changes the default IME automatically.
 
 ## November 6 owner feedback correction (version 0.3.0)
 
@@ -321,3 +321,11 @@ The phrase row suggests two words that have occurred together after the precedin
 In a paired test of 500 English and 500 German Tatoeba excerpts, the exact next two words appeared among the three phrase suggestions in 52 English and 37 German cases. The prior release got 36 and 22. The updated phrase row offered at least one phrase in 937 of the 1,000 cases, compared with 1,000 in v0.23. Excerpts were sampled from lines skipped by the bundled corpus generators, using a fixed seed and no personal history. The frozen models may share training material with Tatoeba. Exact matches measure agreement with the recorded next words. Other continuations may also fit.
 
 Android 34 emulator regression checks use both “Ok, we ” and “Ok , we ” after separately teaching the keyboard “we are” and “are you”. The update also recognizes “we” as an English word in an otherwise ambiguous field before a space is entered.
+
+## Version 0.25.0
+
+Punctuation ends the current word. The keyboard learns the word once and keeps standalone punctuation, blank strings and strings containing spaces out of the word row. Apostrophes inside contractions, accented letters and alphanumeric words remain eligible. The database upgrade removes legacy punctuation transitions from lifetime counts and recent token history while preserving word counts, phrase history, prefix choices and clipboard entries.
+
+The symbol keys and the long-press punctuation menu use the same spacing rules in English and German prose. After a completed word, repeated exclamation marks attach directly to the text. A single-word or phrase suggestion respects an existing mark or space at the caret. A suggestion tapped immediately after an exclamation mark starts the next word with one space.
+
+Android emulator acceptance reproduced a standalone “!” in the center word slot in version 0.24 and “Hallo !” from its long-press menu. An in-place upgrade kept every row of the seven existing word, phrase, choice and clipboard tables. Real taps in version 0.25 produced “hello!”, “We love it!” and a new word followed by three exclamation marks and a question mark. The word count increased once. No punctuation entries appeared in the token tables. All 163 JVM tests passed.
