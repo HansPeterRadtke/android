@@ -43,7 +43,7 @@ Caveats: This is a tested first keyboard release, **not** feature parity with Gb
 
 ## Prebuilt emulator-tested Android package
 
-The signed debug APK is checked in under `release/kontexttastatur-0.21.0-debug.apk`, alongside its SHA-256. It is deliberately a development/test build, not a production Play Store release. It can be sideloaded after allowing installs from the chosen file source; choose the keyboard in Android system input method settings. It never changes the default IME automatically.
+The signed debug APK is checked in under `release/kontexttastatur-0.22.0-debug.apk`, alongside its SHA-256. It is deliberately a development/test build, not a production Play Store release. It can be sideloaded after allowing installs from the chosen file source; choose the keyboard in Android system input method settings. It never changes the default IME automatically.
 
 ## November 6 owner feedback correction (version 0.3.0)
 
@@ -292,3 +292,15 @@ GIF search uses a single editable field above the usual keyboard. The field rece
 The clipboard shows recent text from Android with the newest entry first. Recopying moves an existing entry to the top. Tapping a row inserts the complete original text. The twenty-entry history shares the existing private database with older pinned entries. Android exposes the current primary clip and subsequent copy events to the selected IME. Clips marked sensitive are excluded from the saved history.
 
 Android 34 emulator acceptance used a separate editor app. Tapping the “Happy” suggestion completed the GIF query, physical keys extended it, switching providers preserved it, and searching left the app's draft intact. Clipboard tests checked order, deduplication, exclusion of a marked-sensitive item, pasting into the GIF field, and exact one-tap insertion into the editor of multiline text with surrounding spaces and a 4,404-character entry. All 147 existing JVM tests passed. The physical Ulefone remains untested.
+
+## Version 0.22.0
+
+The Android editor can restart its input connection while the user is still editing the same field. Version 0.21 reset the keyboard on every such notification. The IME now preserves the active GIF query, GIF results, clipboard panel and Shift state across same-field restarts. Opening a different editor starts a fresh session. URL and email shortcuts have their own visible row in address fields.
+
+One press of Shift requests initial capitals, including at an automatically capitalized sentence start. A rapid second press locks capitals. A slower second press selects lowercase. The displayed keys, suggested words and inserted letters use the same setting.
+
+GIF search reads the usual predictions while its typed words, accepted suggestions and accepted phrases stay out of message learning. Earlier versions recorded search and message observations together, so the update preserves those records. The startup predictor now uses the bundled common German and English vocabulary while the larger dictionaries are loading.
+
+The keyboard was exercised on an Android 34 emulator using a separate editor app with a real input-connection restart, clipboard copy actions and a message draft. The previous public APK was downloaded, verified and installed in a clean Android user profile before testing the upgrade. No physical handset participated in this test.
+
+In the emulator, “happy birthday ” produced “to”, “dear” and “you” after reopening the editor while the full dictionary was still loading. The updated APK passed 149 JVM tests.

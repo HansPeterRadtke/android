@@ -175,23 +175,25 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         // the large generic dictionaries or neural model preparation.
         modelCatchupEnabled=true;
         PredictionModel ownerHistory=new PredictionModel();
-        database.restoreAsync(ownerHistory,() -> handler.post(() -> {
-            if(active!=this)return;
-            for(java.util.function.Consumer<PredictionModel> event:modelCatchup)
-                event.accept(ownerHistory);
-            modelCatchup.clear();
-            modelCatchupEnabled=false;
-            predictions=ownerHistory;
-            initialHistoryReady=true;
-            personalHistoryGate.countDown();
-            refreshSuggestions();
-            android.util.Log.i("KontextTastatur","Personal next-word history ready: "+
-                ownerHistory.size()+" confirmed tokens");
-            if(pendingHeavyInstall!=null){
-                Runnable install=pendingHeavyInstall;pendingHeavyInstall=null;
-                install.run();
-            }
-        }));
+        database.restoreAsync(ownerHistory,() -> {
+            CommonLexiconCase.seed(ownerHistory);
+            handler.post(() -> {
+                if(active!=this)return;
+                for(java.util.function.Consumer<PredictionModel> event:modelCatchup)
+                    event.accept(ownerHistory);
+                modelCatchup.clear();
+                modelCatchupEnabled=false;
+                predictions=ownerHistory;
+                initialHistoryReady=true;
+                personalHistoryGate.countDown();
+                refreshSuggestions();
+                android.util.Log.i("KontextTastatur","Personal history and starter vocabulary ready");
+                if(pendingHeavyInstall!=null){
+                    Runnable install=pendingHeavyInstall;pendingHeavyInstall=null;
+                    install.run();
+                }
+            });
+        });
         // Generic dictionaries load AFTER the owner's personal statistics;
         // otherwise decompression and lexicon indexing compete with the only
         // learning data the owner actually wants to see immediately.
@@ -212,23 +214,19 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             } catch(Exception ex) {
                 android.util.Log.e("KontextTastatur","Optional offline German neural model not available",ex);
             }
+            final ChimeEnglish ready=englishModel;
+            final GermanNextWord germanReady=germanModel;
+            handler.post(() -> {
+                if(active!=this)return;
+                neuralModel=ready;germanNeuralModel=germanReady;
+                refreshSuggestions();
+            });
             try(java.io.InputStream caseStream=getAssets().open("de_word_case.gcase")) {
                 caseModel=new GermanCaseModel(caseStream);
             } catch(Exception ex) {
                 android.util.Log.e("KontextTastatur","German corpus capitalization unavailable",ex);
             }
-            final ChimeEnglish ready=englishModel;
-            final GermanNextWord germanReady=germanModel;
             final GermanCaseModel caseReady=caseModel;
-            // Publish the tiny local neural fallbacks *before* the larger
-            // dictionary/index load. This makes a blank field useful early,
-            // without delaying actual character input or uploading context.
-            handler.post(() -> {
-                if(active!=this)return;
-                neuralModel=ready;
-                germanNeuralModel=germanReady;
-                refreshSuggestions();
-            });
             PredictionModel readyPredictor=new PredictionModel();
             loadLexicon(readyPredictor,"de_lexicon.json","de");
             loadLexicon(readyPredictor,"en_lexicon.json","en");
@@ -477,19 +475,35 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         return root;
     }
     @Override public void onStartInput(EditorInfo attribute, boolean restarting) {
-        cancelSpaceGesture();
-        closeGifField();
-        clipboardRevision++;
         super.onStartInput(attribute,restarting);
+        // Android can replace the connection to the same focused editor while
+        // an IME-owned search field or clipboard list is in use.
+        boolean sameField=restarting && info!=null && attribute!=null &&
+            java.util.Objects.equals(info.packageName,attribute.packageName) &&
+            info.fieldId==attribute.fieldId && java.util.Objects.equals(info.fieldName,attribute.fieldName) &&
+            info.inputType==attribute.inputType &&
+            editorKind==EditorPolicy.classify(attribute.inputType,attribute.imeOptions) &&
+            sensitive==isPrivateField(attribute);
+        cancelSpaceGesture();
         info=attribute;sensitive=isPrivateField(attribute);
         editorKind=EditorPolicy.classify(attribute==null?0:attribute.inputType,
             attribute==null?0:attribute.imeOptions);
-        tokenObserver.reset();
+        recentEvent=null;
+        if(sameField) {
+            if(gifField!=null)gifHost=getCurrentInputConnection();
+            refreshSuggestions();
+            return;
+        }
+        closeGifField();
+        clipboardRevision++;
         int cls = attribute == null ? 0 : attribute.inputType & InputType.TYPE_MASK_CLASS;
         mode = (cls == InputType.TYPE_CLASS_NUMBER || cls == InputType.TYPE_CLASS_PHONE ||
             cls == InputType.TYPE_CLASS_DATETIME) ? "numbers" : "letters";
-        shiftController.reset(false);
-        shift=false;caps=false;manualShiftPending=false;
+        boolean initialCaps=attribute!=null && EditorPolicy.allowsAutoShift(editorKind) &&
+            (attribute.initialCapsMode!=0 ||
+             (attribute.inputType & InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS)!=0);
+        shiftController.reset(initialCaps);
+        shift=shiftController.active();caps=false;manualShiftPending=false;
         lastRankedSuggestionWords=Collections.emptyList();
         lastRawPhraseCandidates=Collections.emptyList();
         searchRevision++;predictionRevision++;recentEvent=null;
@@ -581,11 +595,16 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         return gifField!=null?EditorPolicy.Kind.PROSE:editorKind;
     }
     private boolean typingSensitive() {return gifField==null && sensitive;}
+    private boolean learnsMessageText() {
+        return gifField==null && !sensitive && !privateMode && EditorPolicy.learns(editorKind);
+    }
 
     private void updatePredictionRowVisibility() {
         boolean enabled="letters".equals(mode) && !typingSensitive() && !privateMode;
         if(suggestionRow!=null)suggestionRow.setVisibility(enabled?View.VISIBLE:View.GONE);
-        if(detailFrame!=null)detailFrame.setVisibility(enabled?View.VISIBLE:View.GONE);
+        boolean address="letters".equals(mode) && !privateMode &&
+            (typingKind()==EditorPolicy.Kind.URI || typingKind()==EditorPolicy.Kind.EMAIL);
+        if(detailFrame!=null)detailFrame.setVisibility(enabled||address?View.VISIBLE:View.GONE);
     }
     private void renderToolbar() {
         if(toolbar==null)return;
@@ -716,7 +735,8 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     }
     private void showEditorShortcuts(int revision) {
         if(phraseRow==null || revision!=predictionRevision)return;
-        String[] choices=EditorPolicy.shortcuts(editorKind);
+        final EditorPolicy.Kind kind=typingKind();
+        String[] choices=EditorPolicy.shortcuts(kind);
         lastPhraseRevision=-1;
         for(int i=0;i<phraseViews.length;i++) {
             final int idx=i;
@@ -726,7 +746,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             button.setText(value);button.setEnabled(!value.isEmpty());
             button.setContentDescription("URL/E-Mail Zeichen: "+value);
             button.setOnClickListener(v -> {
-                if(idx>=choices.length || !EditorPolicy.shortcuts(editorKind)[idx].equals(value))return;
+                if(typingKind()!=kind || !"letters".equals(mode) || privateMode || idx>=choices.length)return;
                 InputConnection ic=typingConnection();
                 if(ic!=null){ic.commitText(value,1);refreshSuggestions();}
             });
@@ -1107,7 +1127,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(!PhrasePredictor.validWord(chosen)) {
             if(selection!=null&&selection.length()>0)return;
             ic.commitText(chosen+" ",1);
-            if(EditorPolicy.learns(typingKind()) && !privateMode && !typingSensitive())
+            if(learnsMessageText())
                 rememberToken(personalPreviousToken(beforeText),chosen);
             tokenObserver.reset();recentEvent=null;
             refreshSuggestions();return;
@@ -1116,12 +1136,15 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if((selection==null||selection.length()==0)&&!ctx.prefix.isEmpty()) ic.deleteSurroundingText(ctx.prefix.length(),0);
         ic.commitText(chosen+" ",1);
         ic.endBatchEdit();
-        PredictionModel.Event e=predictions.learnSelection(ctx.prefix,chosen,ctx.previous,ctx.beforePrevious);
-        database.persist(e,chosen,1);
-        catchupChoice(e,chosen);
-        if(EditorPolicy.learns(typingKind()))rememberToken(personalPreviousToken(beforeText),chosen);
+        recentEvent=null;
+        if(learnsMessageText()) {
+            PredictionModel.Event event=predictions.learnSelection(ctx.prefix,chosen,ctx.previous,ctx.beforePrevious);
+            database.persist(event,chosen,1);
+            catchupChoice(event,chosen);
+            rememberToken(personalPreviousToken(beforeText),chosen);
+            recentEvent=event;recentSurface=chosen;recentAt=System.currentTimeMillis();
+        }
         tokenObserver.reset();
-        recentEvent=e;recentSurface=chosen;recentAt=System.currentTimeMillis();
         shiftController.consumeSuggestion();
         synchronizeShift();
         updateAutoShiftFromText(beforeText+chosen+" ");
@@ -1148,24 +1171,24 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         if(!context.prefix.isEmpty())ic.deleteSurroundingText(context.prefix.length(),0);
         ic.commitText(selected+" ",1);
         ic.endBatchEdit();
-        String prev=context.previous,prev2=context.beforePrevious;
-        String priorToken=personalPreviousToken(before);
-        PredictionModel.Event last=null;
-        for(int index=0;index<parts.length;index++) {
-            String word=parts[index];
-            PredictionModel.Event event=predictions.learnSelection(
-                index==0?context.prefix:"",word,prev,prev2);
-            database.persist(event,word,1);
-            catchupChoice(event,word);
-            if(EditorPolicy.learns(typingKind())) {
+        recentEvent=null;
+        if(learnsMessageText()) {
+            String prev=context.previous,prev2=context.beforePrevious;
+            String priorToken=personalPreviousToken(before);
+            for(int index=0;index<parts.length;index++) {
+                String word=parts[index];
+                PredictionModel.Event event=predictions.learnSelection(
+                    index==0?context.prefix:"",word,prev,prev2);
+                database.persist(event,word,1);
+                catchupChoice(event,word);
                 rememberToken(priorToken,word);
                 priorToken=word;
+                prev2=prev;prev=word;
+                recentEvent=event;
             }
-            prev2=prev;prev=word;
-            last=event;
+            recentSurface=parts[parts.length-1];recentAt=System.currentTimeMillis();
         }
-        recentEvent=last;recentSurface=parts[parts.length-1];
-        recentAt=System.currentTimeMillis();
+        tokenObserver.reset();
         shiftController.consumeSuggestion();
         synchronizeShift();
         updateAutoShiftFromText(before+selected+" ");
@@ -1425,6 +1448,9 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         recentEvent=null;
         if(!letter.equals("'")&&!letter.equals("’")) {
             shiftController.consumeLetter();
+            if(gifField==null && info!=null && EditorPolicy.allowsAutoShift(editorKind) &&
+                (info.inputType & InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS)!=0)
+                shiftController.automatic(true);
             synchronizeShift();
         }
         refreshSuggestions();
@@ -1461,7 +1487,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
         InputConnection ic=typingConnection();if(ic==null)return;
         CharSequence before=ic.getTextBeforeCursor(500,0);
         TextContext c=TextContext.fromBeforeCursor(before);
-        if(!typingSensitive() && !privateMode && EditorPolicy.learns(typingKind()) &&
+        if(learnsMessageText() &&
             !c.prefix.isEmpty() && isAtWordEnd(ic) &&
             (ic.getSelectedText(0)==null || ic.getSelectedText(0).length()==0)) {
             PredictionModel.Event e=predictions.learnTyped(c.prefix,c.previous,c.beforePrevious);
@@ -1469,7 +1495,7 @@ public final class AdaptiveKeyboardService extends InputMethodService {
             catchupTyped(e,c.prefix);
             recentEvent=e;recentSurface=c.prefix;recentAt=System.currentTimeMillis();
         }
-        if(!typingSensitive() && !privateMode && EditorPolicy.learns(typingKind()) &&
+        if(learnsMessageText() &&
             before!=null && !symbol.equals("\n")) {
             for(String[] pair:tokenObserver.observe(before.toString(),symbol)) {
                 TokenHistory.Event event=tokenHistory.learn(pair[0],pair[1]);
@@ -1929,16 +1955,17 @@ public final class AdaptiveKeyboardService extends InputMethodService {
     private void sendGif(GiphySearch.Gif gif, boolean forceShare) {
         if(gifField==null)return;
         final int request=searchRevision;
-        final InputConnection destination=getCurrentInputConnection();
         gifStatus.setVisibility(View.VISIBLE);
         gifStatus.setText("GIF-Datei wird heruntergeladen …");
         sendWorker.execute(() -> {
             try {
                 File file=GiphySearch.cacheGif(getCacheDir(),gif);
                 handler.post(() -> {
-                    if(gifField==null || searchRevision!=request || destination!=getCurrentInputConnection())return;
+                    // A true editor switch invalidates the query revision. A
+                    // same-field restart may legitimately supply a new connection.
+                    if(gifField==null || searchRevision!=request)return;
                     Uri uri=GifSharing.uriFor(this,file.getName());
-                    InputConnection ic=destination;
+                    InputConnection ic=getCurrentInputConnection();
                     boolean supported=!forceShare && ic!=null && info!=null &&
                         GifDeliveryPolicy.supportsDirectGif(info.contentMimeTypes);
                     boolean committed=false;

@@ -28,6 +28,10 @@ public final class LanguageContext {
         "heute","morgen","hallo","bitte","danke","möchte","kann","geht","geht's"));
     private static final Pattern WORDS=Pattern.compile("[\\p{L}]+(?:['’][\\p{L}]+)*");
 
+    private static double signal(String word,PredictionModel model) {
+        return model==null?CommonLexiconCase.languageSignal(word):model.signal(word);
+    }
+
     /** Uses recent words across sentence boundaries, never transmits or stores them. */
     public static String detect(String text) {
         return detect(text,null);
@@ -59,10 +63,10 @@ public final class LanguageContext {
             if(EN.contains(last)&&!DE.contains(last))english+=last.contains("'")?5.0:1.5;
             if(DE.contains(last)&&!EN.contains(last))german+=1.5;
         }
-        if(lexicon!=null && Math.abs(english-german)<0.5) {
+        if(Math.abs(english-german)<0.5) {
             double evidence=0;
-            for(int i=start;i<words.size();i++)evidence+=lexicon.signal(words.get(i));
-            if(last.length()>2)evidence+=lexicon.signal(last);
+            for(int i=start;i<words.size();i++)evidence+=signal(words.get(i),lexicon);
+            if(last.length()>2)evidence+=signal(last,lexicon);
             if(Math.abs(evidence)>0.35)return evidence>0?"en":"de";
         }
         return english>german+0.4?"en":"de";

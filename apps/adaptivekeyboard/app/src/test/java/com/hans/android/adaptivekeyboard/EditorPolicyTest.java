@@ -23,6 +23,11 @@ public final class EditorPolicyTest {
         assertEquals(EditorPolicy.Kind.PROSE,EditorPolicy.classify(InputType.TYPE_CLASS_TEXT|
             InputType.TYPE_TEXT_FLAG_CAP_SENTENCES,EditorInfo.IME_ACTION_NONE));
     }
+    @Test public void searchEditorsOfferCompletionsWithoutSavingSearchTerms() {
+        EditorPolicy.Kind search=EditorPolicy.classify(InputType.TYPE_CLASS_TEXT,EditorInfo.IME_ACTION_SEARCH);
+        assertTrue(EditorPolicy.predictsWords(search));
+        assertFalse(EditorPolicy.learns(search));
+    }
     @Test public void privateAndNumericFieldsNeverLearn(){
         assertEquals(EditorPolicy.Kind.PRIVATE,EditorPolicy.classify(InputType.TYPE_CLASS_TEXT|
             InputType.TYPE_TEXT_VARIATION_PASSWORD,EditorInfo.IME_ACTION_DONE));

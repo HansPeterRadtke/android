@@ -1,6 +1,6 @@
 package com.hans.android.adaptivekeyboard;
 
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
@@ -72,11 +72,22 @@ public final class CommonLexiconCase {
         "none reasons russia ship stock trump weekend wonder worst africa awesome band beach cash clearly commercial compared effort ended fan fighting imagine impact lack latest learning multiple older operation organization passed pictures"
     );
     private static Map<String,String> build(String words) {
-        Map<String,String> dictionary=new HashMap<>();
+        Map<String,String> dictionary=new LinkedHashMap<>();
         for(String spelling:words.split(" ")) {
             if(!spelling.isEmpty())dictionary.put(spelling.toLowerCase(Locale.GERMAN),spelling);
         }
         return dictionary;
+    }
+    // The lists above are already bundled in frequency order. Make them
+    // available to the lightweight predictor while the full assets load.
+    static void seed(PredictionModel model) {
+        int rank=0;
+        for(String word:DE.values())model.addBaseWord(word,rank++,"de");
+        rank=0;
+        for(String word:EN.values())model.addBaseWord(word,rank++,"en");
+    }
+    static double languageSignal(String word) {
+        return (EN.containsKey(word)?1:0)-(DE.containsKey(word)?1:0);
     }
     /**
      * Correct accidental all-caps from the last personal selection, but never

@@ -29,4 +29,14 @@ public final class LanguageContextTest {
         assertEquals("de",LanguageContext.detect("I am fine. Ich bin hier. "));
         assertEquals("en",LanguageContext.detect("Ich bin hier. I am fine. "));
     }
+    @Test public void startupDictionaryRoutesRealEnglishAndGermanBeforeAssetsFinish() {
+        PredictionModel model=new PredictionModel();
+        model.learnTyped("myword","happy","very");
+        CommonLexiconCase.seed(model);
+        assertEquals("en",LanguageContext.detect("happy birthday ",model));
+        assertEquals("en",LanguageContext.detect("happy birthday "));
+        assertEquals("de",LanguageContext.detect("guten morgen ",model));
+        assertTrue(model.predict("hap","","",java.util.Map.of(),"en").contains("happy"));
+        assertEquals("myword",model.predictPersonal("","happy","very","en").get(0));
+    }
 }

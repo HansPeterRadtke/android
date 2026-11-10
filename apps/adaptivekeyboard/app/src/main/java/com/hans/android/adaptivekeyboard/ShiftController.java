@@ -7,28 +7,21 @@ public final class ShiftController {
     public enum Mode { LOWER, AUTO, MANUAL_LOWER, ONCE, LOCKED }
     private Mode mode=Mode.LOWER;
     private long previousPress=-10000;
-    private boolean previousWasAuto=false;
     public Mode mode() {return mode;}
-    public boolean active() {return mode!=Mode.LOWER;}
+    public boolean active() {return mode==Mode.AUTO || mode==Mode.ONCE || mode==Mode.LOCKED;}
     public boolean locked() {return mode==Mode.LOCKED;}
     public boolean manual() {return mode==Mode.ONCE || mode==Mode.LOCKED ||
         mode==Mode.MANUAL_LOWER;}
     public void reset(boolean autoCap) {
         mode=autoCap?Mode.AUTO:Mode.LOWER;
         previousPress=-10000;
-        previousWasAuto=false;
     }
     public void press(long uptimeMs) {
-        Mode current=mode;
-        boolean rapid=uptimeMs-previousPress>=0 && uptimeMs-previousPress<=420;
-        if(current==Mode.LOCKED)mode=Mode.LOWER;
-        else if(rapid && (current==Mode.ONCE ||
-            (current==Mode.MANUAL_LOWER && previousWasAuto)))mode=Mode.LOCKED;
-        else if(current==Mode.AUTO)mode=Mode.MANUAL_LOWER;
-        else if(current==Mode.ONCE)mode=Mode.LOWER;
+        boolean rapid=uptimeMs>=previousPress && uptimeMs-previousPress<=420;
+        if(mode==Mode.ONCE && rapid)mode=Mode.LOCKED;
+        else if(mode==Mode.ONCE || mode==Mode.LOCKED)mode=Mode.MANUAL_LOWER;
         else mode=Mode.ONCE;
         previousPress=uptimeMs;
-        previousWasAuto=current==Mode.AUTO;
     }
     /** Auto capitalization cannot override explicit one-shot Shift or Caps Lock. */
     public void automatic(boolean atStart) {
