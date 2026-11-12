@@ -72,3 +72,8 @@ Version 0.35 repairs library playback and result visibility. Tapping a recording
 
 
 Version 0.94 corrects the complete-guideline audit findings in capture durability, acknowledgement proof, playback exclusion, automation controls, bounded diagnostics/cache, numeric validation and adaptive layouts. GUI_CONTRACT.md is authoritative. Publication follows the existing Explorer versioned/latest convention: voicebutton-0.94.apk and voicebutton-latest.apk, written atomically after hash verification. Older installers are retained. The earlier “exactly one debug APK” statements above describe historical releases.
+
+
+## Version 0.96: recording-first UI and paused action reconciliation (2026-11-12)
+
+Preserves 0.95's private Studio token configuration, manual versus automatic upload/transcription controls, compact layout, player and library behavior. Moves the recording overview to one current-file upload progress line (live acknowledged file bytes, phase, and count of other waiting recordings) and one subordinate transcription status. Whole historical backlogs no longer occupy the recorder screen. Restores Start/Pause/Resume enabled state on every service snapshot, with immediate acknowledgement and a bounded watchdog if an acknowledgement never arrives. Do not ship an older 0.92 branch over the released 0.95 baseline. Test restored paused actions, live audio capture, manual settings, local USB/emulator lifecycle and owner device before declaring a physical-phone acceptance.

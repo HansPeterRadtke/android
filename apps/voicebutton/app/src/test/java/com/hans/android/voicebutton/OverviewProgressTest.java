@@ -42,6 +42,25 @@ public class OverviewProgressTest {
         assertTrue(OverviewProgress.hasUnmeasuredUpload(Arrays.asList(value)));
     }
 
+    @Test public void perFileProgressIncludesNewLiveDurableAcknowledgements() {
+        ReliableSessionManifest value = new ReliableSessionManifest();
+        value.sessionId = "current";
+        ReliableSessionManifest.Segment first = new ReliableSessionManifest.Segment();
+        first.seq = 0;
+        first.mp3Bytes = 100L;
+        first.remoteAccepted = true;
+        ReliableSessionManifest.Segment second = new ReliableSessionManifest.Segment();
+        second.seq = 1;
+        second.mp3Bytes = 100L;
+        second.remotePartialBytes = 10L;
+        value.segments.add(first);
+        value.segments.add(second);
+        assertEquals(550, OverviewProgress.fileProgressPermille(value));
+        assertEquals(800, OverviewProgress.fileProgressPermille(value, 1, 60L));
+        assertEquals(550, OverviewProgress.fileProgressPermille(value, 9, 60L));
+        assertEquals(1000, OverviewProgress.fileProgressPermille(value, 1, 1000L));
+    }
+
     private static ReliableSessionManifest session(String id, boolean finished,
             boolean converted, boolean committed, long total, long durable) {
         ReliableSessionManifest value = new ReliableSessionManifest();

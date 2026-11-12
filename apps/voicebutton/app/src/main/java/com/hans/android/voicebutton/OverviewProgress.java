@@ -67,6 +67,11 @@ final class OverviewProgress {
     }
 
     static int fileProgressPermille(ReliableSessionManifest session) {
+        return fileProgressPermille(session, -1, 0L);
+    }
+
+    static int fileProgressPermille(ReliableSessionManifest session,
+                                   int liveSequence, long liveDurableBytes) {
         if (session == null) return -1;
         long total = 0L;
         long durable = 0L;
@@ -77,8 +82,15 @@ final class OverviewProgress {
                 continue;
             }
             total += segment.mp3Bytes;
-            durable += segment.remoteAccepted ? segment.mp3Bytes
+            long acknowledged = segment.remoteAccepted ? segment.mp3Bytes
                     : Math.max(0L, Math.min(segment.mp3Bytes, segment.remotePartialBytes));
+            // Foreground uploader publishes durable part acknowledgements more
+            // frequently than the persisted session-list refresh.
+            if (!segment.remoteAccepted && segment.seq == liveSequence) {
+                acknowledged = Math.max(acknowledged,
+                        Math.max(0L, Math.min(segment.mp3Bytes, liveDurableBytes)));
+            }
+            durable += acknowledged;
         }
         if (unmeasured || total <= 0L) return -1;
         return (int)Math.max(0L, Math.min(1000L, durable * 1000L / total));

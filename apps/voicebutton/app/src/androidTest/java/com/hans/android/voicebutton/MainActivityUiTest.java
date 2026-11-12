@@ -53,14 +53,26 @@ public class MainActivityUiTest {
     @Test public void idleOverviewMatchesRecordingContract() {
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             awaitText(R.id.voicebutton_status_title, "Ready to record");
-            scenario.onActivity(activity->{
-                for(int id:new int[]{R.id.voicebutton_upload_queue,R.id.voicebutton_transcription_queue}){
-                    View queue=activity.findViewById(id);assertTrue(queue instanceof android.widget.ListView);
-                    int count=((android.widget.ListView)queue).getAdapter().getCount();
-                    assertTrue(queue.getVisibility()==(count==0?View.GONE:View.VISIBLE));
-                    if(count==0)assertTrue(queue.getMeasuredHeight()==0||queue.getVisibility()==View.GONE);
-                }
-            });
+            // The recording cockpit must not display historical aggregate progress
+            // or complete archive queues ahead of the primary action.
+            onView(withId(R.id.voicebutton_backup_text))
+                    .check(matches(withEffectiveVisibility(GONE)));
+            onView(withId(R.id.voicebutton_upload_current))
+                    .check(matches(withEffectiveVisibility(GONE)));
+            onView(withId(R.id.voicebutton_transcription_summary))
+                    .check(matches(withEffectiveVisibility(GONE)));
+            onView(withId(R.id.voicebutton_transcription_progress))
+                    .check(matches(withEffectiveVisibility(GONE)));
+            onView(withId(R.id.voicebutton_transcription_current))
+                    .check(matches(withEffectiveVisibility(GONE)));
+            onView(withId(R.id.voicebutton_upload_queue))
+                    .check(matches(withEffectiveVisibility(GONE)));
+            onView(withId(R.id.voicebutton_transcription_queue))
+                    .check(matches(withEffectiveVisibility(GONE)));
+            onView(withId(R.id.voicebutton_active_upload))
+                    .check(matches(withEffectiveVisibility(GONE)));
+            onView(withId(R.id.voicebutton_secondary_transcription))
+                    .check(matches(withEffectiveVisibility(GONE)));
             onView(withId(R.id.voicebutton_primary)).check(matches(isDisplayed()));
             onView(withId(R.id.voicebutton_primary)).check(matches(withText("Start recording")));
             onView(withId(R.id.voicebutton_more)).check(matches(isDisplayed()));
@@ -79,6 +91,34 @@ public class MainActivityUiTest {
                 while (parent instanceof View) {
                     assertFalse(parent instanceof ScrollView);
                     parent = parent.getParent();
+                }
+            });
+        }
+    }
+
+    @Test public void unchangedRecordingSnapshotReenablesAnAccidentallyDisabledControl()
+            throws Exception {
+        try (ActivityScenario<MainActivity> scenario =
+                     ActivityScenario.launch(MainActivity.class)) {
+            awaitText(R.id.voicebutton_status_title, "Ready to record");
+            scenario.onActivity(activity -> {
+                try {
+                    android.widget.Button primary =
+                            activity.findViewById(R.id.voicebutton_primary);
+                    primary.setEnabled(false);
+                    java.lang.reflect.Field stateField =
+                            MainActivity.class.getDeclaredField("snapshot");
+                    stateField.setAccessible(true);
+                    RecordingService.Snapshot current =
+                            (RecordingService.Snapshot) stateField.get(activity);
+                    java.lang.reflect.Method render = MainActivity.class.getDeclaredMethod(
+                            "render", RecordingService.Snapshot.class);
+                    render.setAccessible(true);
+                    render.invoke(activity, current);
+                    assertTrue("Same-state rerender must reconcile enabled state",
+                            primary.isEnabled());
+                } catch (ReflectiveOperationException failure) {
+                    throw new AssertionError(failure);
                 }
             });
         }

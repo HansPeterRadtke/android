@@ -100,6 +100,13 @@ public final class MainActivity extends Activity {
     };
     private LinearLayout statusCard;
     private LinearLayout setupContainer;
+    private LinearLayout uploadActivityContainer;
+    private TextView uploadActivityTitle;
+    private TextView uploadActivityDetail;
+    private ProgressBar uploadActivityProgress;
+    private TextView transcriptionActivityText;
+    private String pendingPrimaryAction;
+    private long pendingPrimaryAtElapsedMs;
     private TextView statusTitle;
     private TextView statusDetail;
     private TextView serverHealthText;
@@ -365,6 +372,7 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         uploadQueueParams.setMargins(0, 0,
                 0, AndroidUi.dp(this, 8));
+        uploadQueueContainer.setVisibility(View.GONE);
         root.addView(uploadQueueContainer, uploadQueueParams);
 
         transcriptionSummaryText = AndroidUi.text(this,
@@ -420,6 +428,7 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         transcriptionQueueParams.setMargins(0, 0,
                 0, AndroidUi.dp(this, 8));
+        transcriptionQueueContainer.setVisibility(View.GONE);
         root.addView(transcriptionQueueContainer, transcriptionQueueParams);
 
         // Overall progress and per-file queue rows answer different questions.
@@ -508,6 +517,46 @@ public final class MainActivity extends Activity {
         root.addView(statusCard, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        // The recorder has one primary action. Pending transfer is scoped to
+        // the newly processed recording, not the historical speech backlog.
+        uploadActivityContainer = new LinearLayout(this);
+        uploadActivityContainer.setOrientation(LinearLayout.VERTICAL);
+        uploadActivityContainer.setPadding(AndroidUi.dp(this, 4),
+                AndroidUi.dp(this, 8), AndroidUi.dp(this, 4),
+                AndroidUi.dp(this, 6));
+        uploadActivityContainer.setVisibility(View.GONE);
+
+        uploadActivityTitle = AndroidUi.text(this, "", 16, true, AndroidUi.INK);
+        uploadActivityTitle.setId(R.id.voicebutton_active_upload);
+        AndroidUi.readableLine(this, uploadActivityTitle, 0, 4);
+        uploadActivityContainer.addView(uploadActivityTitle);
+
+        uploadActivityDetail = AndroidUi.small(this, "");
+        AndroidUi.readableLine(this, uploadActivityDetail, 0, 4);
+        uploadActivityContainer.addView(uploadActivityDetail);
+
+        uploadActivityProgress = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        uploadActivityProgress.setId(R.id.voicebutton_active_upload_bar);
+        uploadActivityProgress.setMax(1000);
+        uploadActivityProgress.setContentDescription("Current recording transfer");
+        LinearLayout.LayoutParams barParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 10));
+        barParams.setMargins(0, AndroidUi.dp(this, 5), 0, 0);
+        uploadActivityContainer.addView(uploadActivityProgress, barParams);
+
+
+        transcriptionActivityText = AndroidUi.small(this, "");
+        transcriptionActivityText.setId(R.id.voicebutton_secondary_transcription);
+        transcriptionActivityText.setTextColor(AndroidUi.MUTED);
+        AndroidUi.readableLine(this, transcriptionActivityText, 0, 4);
+        transcriptionActivityText.setVisibility(View.GONE);
+        LinearLayout.LayoutParams transcriptParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        transcriptParams.setMargins(0, AndroidUi.dp(this, 5),
+                0, AndroidUi.dp(this, 3));
+
+
         setupContainer = new LinearLayout(this);
         setupContainer.setId(R.id.voicebutton_setup);
         setupContainer.setOrientation(LinearLayout.VERTICAL);
@@ -569,12 +618,19 @@ public final class MainActivity extends Activity {
         information.setOrientation(wide?LinearLayout.HORIZONTAL:LinearLayout.VERTICAL);
         if(wide) {
             LinearLayout recording=new LinearLayout(this);recording.setOrientation(LinearLayout.VERTICAL);
-            recording.addView(statusCard);recording.addView(setupContainer);
+            recording.addView(statusCard);
+            recording.addView(uploadActivityContainer);
+            recording.addView(transcriptionActivityText, transcriptParams);
+            recording.addView(setupContainer);
             information.addView(recording,new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f));
             LinearLayout.LayoutParams right=new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f);
             right.setMarginStart(AndroidUi.dp(this,12));information.addView(transfers,right);
         } else {
-            information.addView(statusCard);information.addView(transfers);information.addView(setupContainer);
+            information.addView(statusCard);
+            information.addView(uploadActivityContainer);
+            information.addView(transcriptionActivityText, transcriptParams);
+            information.addView(transfers);
+            information.addView(setupContainer);
         }
         ScrollView informationScroll=new ScrollView(this);
         informationScroll.setTag("voicebutton-overview");
@@ -822,12 +878,12 @@ public final class MainActivity extends Activity {
     private void startWithFreshMicrophone() {
         final int previousId = selectedDeviceId;
         if (!inputRefreshRunning.compareAndSet(false, true)) {
-            showPrimaryPending("Checking microphone…");
+            showPrimaryPending("Checking microphone…", RecordingService.ACTION_START);
             waitForFreshMicrophoneThenStart(previousId);
             return;
         }
         inputsLoaded = true;
-        showPrimaryPending("Checking microphone…");
+        showPrimaryPending("Checking microphone…", RecordingService.ACTION_START);
         AudioInputOption previousSelection = findInputById(previousId);
         refreshInputForStart(previousId, previousSelection, 0);
     }
@@ -850,6 +906,7 @@ public final class MainActivity extends Activity {
             runOnUiThread(() -> {
                 if (previousBluetooth && !bluetoothEnumerated && profileConnected) {
                     inputRefreshRunning.set(false);
+                    pendingPrimaryAction = null;
                     primaryButton.setText("Start recording");
                     primaryButton.setContentDescription("Start recording");
                     primaryButton.setEnabled(true);
@@ -876,6 +933,7 @@ public final class MainActivity extends Activity {
 
     private void completeStartWithCurrentInputs(int previousId) {
         if (inputs.isEmpty() || selectedDeviceId == AudioInputOption.DEFAULT_DEVICE_ID) {
+            pendingPrimaryAction = null;
             primaryButton.setText("Start recording");
             primaryButton.setContentDescription("Start recording");
             primaryButton.setEnabled(false);
@@ -898,7 +956,7 @@ public final class MainActivity extends Activity {
                             "current_device_id", selectedDeviceId,
                             "current_label", selectedInputLabel()));
         }
-        showPrimaryPending("Starting…");
+        showPrimaryPending("Starting…", RecordingService.ACTION_START);
         sendAction(RecordingService.ACTION_START, null, true);
     }
 
@@ -1021,12 +1079,16 @@ public final class MainActivity extends Activity {
                 snapshot.openSession != null && snapshot.openSession.paused,
                 snapshot.interrupted != null);
         if (RecordingService.ACTION_RESUME.equals(resolvedAction)) {
-            showPrimaryPending("Resuming…");
+            if (!hasPermission(Manifest.permission.RECORD_AUDIO)) {
+                requestPermissionsIfNeeded();
+                return;
+            }
+            showPrimaryPending("Resuming…", RecordingService.ACTION_RESUME);
             sendAction(RecordingService.ACTION_RESUME, snapshot.openSession.sessionId, true);
             return;
         }
         if (RecordingService.ACTION_PAUSE.equals(resolvedAction)) {
-            showPrimaryPending("Pausing…");
+            showPrimaryPending("Pausing…", RecordingService.ACTION_PAUSE);
             sendAction(RecordingService.ACTION_PAUSE, snapshot.currentSessionId, false);
             return;
         }
@@ -1045,15 +1107,42 @@ public final class MainActivity extends Activity {
         startWithFreshMicrophone();
     }
 
-    private void showPrimaryPending(String label) {
+    private void showPrimaryPending(String label, String action) {
         if (primaryButton == null) return;
+        pendingPrimaryAction = action;
+        pendingPrimaryAtElapsedMs = android.os.SystemClock.elapsedRealtime();
+        final long requestStart = pendingPrimaryAtElapsedMs;
         primaryButton.setText(label);
         primaryButton.setContentDescription(label);
         primaryButton.setEnabled(false);
         if (primaryDisabledReasonText != null) {
-            primaryDisabledReasonText.setText("Recording request submitted. Protected capture is opening.");
+            primaryDisabledReasonText.setText(
+                    RecordingService.ACTION_PAUSE.equals(action)
+                            ? "Saving the microphone recording…"
+                            : RecordingService.ACTION_RESUME.equals(action)
+                                    ? "Reopening the saved recording…"
+                                    : "Opening the microphone recording…");
             primaryDisabledReasonText.setVisibility(View.VISIBLE);
         }
+        // Even if no further service callback arrives, revisit this disabled
+        // action after a bounded wait. The latest service snapshot still owns
+        // the authoritative action state; this never assumes a request worked.
+        uiHandler.postDelayed(() -> {
+            if (!action.equals(pendingPrimaryAction)
+                    || requestStart != pendingPrimaryAtElapsedMs) return;
+            RecordingService value = service;
+            render(value != null ? value.getSnapshot() : snapshot);
+            if (action.equals(pendingPrimaryAction)
+                    && requestStart == pendingPrimaryAtElapsedMs) {
+                pendingPrimaryAction = null;
+                render(value != null ? value.getSnapshot() : snapshot);
+                if (primaryDisabledReasonText != null) {
+                    primaryDisabledReasonText.setText(
+                            "No recording acknowledgement received. Check current status before retrying.");
+                    primaryDisabledReasonText.setVisibility(View.VISIBLE);
+                }
+            }
+        }, 16000L);
     }
 
     private void finishCurrent() {
@@ -1252,10 +1341,11 @@ public final class MainActivity extends Activity {
                 + "\n\nMicrophone: " + snapshot.routedInput
                 + "\nFolder: " + selectedFolderName
                 + "\n" + String.valueOf(serverHealthText.getText())
-                + "\n" + String.valueOf(transferText.getText())
-                + "\n" + String.valueOf(transcriptionSummaryText.getText())
-                + (transcriptionCurrentText.getText().length() == 0 ? ""
-                        : "\n" + transcriptionCurrentText.getText());
+                + (uploadActivityContainer.getVisibility() == View.VISIBLE
+                        ? "\n" + uploadActivityTitle.getText()
+                            + "\n" + uploadActivityDetail.getText() : "")
+                + (transcriptionActivityText.getVisibility() == View.VISIBLE
+                        ? "\n" + transcriptionActivityText.getText() : "");
         new MaterialAlertDialogBuilder(this).setTitle("Current status")
                 .setMessage(message).setPositiveButton("Back", null).show();
     }
@@ -1450,31 +1540,12 @@ public final class MainActivity extends Activity {
                     effectiveState, snapshot.recording, snapshot.paused,
                     snapshot.recordingErrorActive, open != null)
                     ? View.VISIBLE : View.GONE);
-            if (snapshot.recording) primaryButton.setText("Pause recording");
-            else if (open != null && open.paused) primaryButton.setText("Resume recording");
-            else if (snapshot.recordingErrorActive) primaryButton.setText("Pause recovery");
-            else if (snapshot.interrupted != null) primaryButton.setText("Recover recording");
-            else primaryButton.setText("Start recording");
-            boolean hasRecordPermission = hasPermission(Manifest.permission.RECORD_AUDIO);
-            boolean hasMicrophone = !inputs.isEmpty();
-            boolean canAttemptMicrophone = PrimaryActionPolicy.canAttemptMicrophone(
-                    hasMicrophone, inputRefreshRunning.get(), hasRecordPermission);
-            boolean primaryEnabled = PrimaryActionPolicy.isEnabled(
-                    snapshot.recording, effectiveState, open != null,
-                    open != null && open.paused, snapshot.interrupted != null,
-                    canAttemptMicrophone);
-            primaryButton.setEnabled(primaryEnabled);
-            primaryButton.setContentDescription(primaryButton.getText());
-            String disabledReason = primaryEnabled ? "" : PrimaryActionPolicy.disabledReason(
-                    snapshot.recording, effectiveState, open != null,
-                    open != null && open.paused, snapshot.interrupted != null,
-                    hasMicrophone, hasRecordPermission);
-            setTextIfChanged(primaryDisabledReasonText, disabledReason);
-            primaryDisabledReasonText.setVisibility(disabledReason.isEmpty()
-                    ? View.GONE : View.VISIBLE);
             configureSecondaryAction(open);
             updateSetupButtons();
         }
+        // Current input permissions and confirmed Pause/Resume status can
+        // change without changing the screen's cached structural key.
+        renderPrimaryAction(effectiveState, open);
         setTextIfChanged(durationText, RecordingUi.formatDuration(snapshot.durationMs));
         durationText.setVisibility(MainScreenText.shouldShowTimer(
                 effectiveState, snapshot.recording, snapshot.paused, open != null)
@@ -1501,96 +1572,117 @@ public final class MainActivity extends Activity {
         renderUploadOperations();
     }
 
+    private void renderPrimaryAction(String state, ReliableSessionManifest open) {
+        if (pendingPrimaryAction != null) {
+            boolean confirmed = (RecordingService.ACTION_RESUME.equals(pendingPrimaryAction)
+                    || RecordingService.ACTION_START.equals(pendingPrimaryAction))
+                    && snapshot.recording && "RECORDING".equals(state);
+            confirmed |= RecordingService.ACTION_PAUSE.equals(pendingPrimaryAction)
+                    && !snapshot.recording && open != null && open.paused;
+            boolean failed = "FAILED".equals(state);
+            boolean expired = android.os.SystemClock.elapsedRealtime()
+                    - pendingPrimaryAtElapsedMs > 15000L;
+            if (!confirmed && !failed && !expired) {
+                primaryButton.setEnabled(false);
+                return;
+            }
+            pendingPrimaryAction = null;
+        }
+        String label;
+        if (snapshot.recording) label = "Pause recording";
+        else if (open != null && open.paused) label = "Resume recording";
+        else if (snapshot.recordingErrorActive) label = "Pause recovery";
+        else if (snapshot.interrupted != null) label = "Recover recording";
+        else label = "Start recording";
+        setTextIfChanged(primaryButton, label);
+        primaryButton.setContentDescription(label);
+        boolean hasRecordPermission = hasPermission(Manifest.permission.RECORD_AUDIO);
+        boolean hasMicrophone = !inputs.isEmpty();
+        boolean canAttemptMicrophone = PrimaryActionPolicy.canAttemptMicrophone(
+                hasMicrophone, inputRefreshRunning.get(), hasRecordPermission);
+        boolean enabled = PrimaryActionPolicy.isEnabled(snapshot.recording, state,
+                open != null, open != null && open.paused,
+                snapshot.interrupted != null, canAttemptMicrophone);
+        primaryButton.setEnabled(enabled);
+        String reason = enabled ? "" : PrimaryActionPolicy.disabledReason(
+                snapshot.recording, state, open != null,
+                open != null && open.paused, snapshot.interrupted != null,
+                hasMicrophone, hasRecordPermission);
+        setTextIfChanged(primaryDisabledReasonText, reason);
+        primaryDisabledReasonText.setVisibility(reason.isEmpty()
+                ? View.GONE : View.VISIBLE);
+    }
+
     private void renderUploadOperations() {
-        if (uploadQueueContainer == null) return;
-        transferText.setVisibility(View.VISIBLE);
-        transferText.setMaxLines(Integer.MAX_VALUE);
-        progressBar.setVisibility(View.VISIBLE);
-        int remaining=OverviewProgress.uploadFilesRemaining(snapshot.sessions);
-        boolean unknown=OverviewProgress.hasUnmeasuredUpload(snapshot.sessions);
-        int overall=remaining==0?1000:snapshot.uploadProgressPermille;
-        transferText.setText("Uploads · "+(unknown?"preparing":((overall+5)/10)+"%")+" · "+remaining+" pending");
-        progressBar.setIndeterminate(unknown);
-        if(!unknown)progressBar.setProgress(overall);
+        if (uploadActivityContainer == null) return;
+        // These older widgets represent whole-catalog work. They are not
+        // the current recording's progress and must not dominate the screen.
+        transferText.setVisibility(View.GONE);
+        progressBar.setVisibility(View.GONE);
         uploadCurrentText.setVisibility(View.GONE);
         uploadCurrentProgressBar.setVisibility(View.GONE);
-        uploadQueueContainer.beginUpdate();
-
-        // The durable local ledger, not an unrelated status list, owns completion.
-        java.util.Set<String> serverCommitted = java.util.Collections.emptySet();
-        java.util.HashSet<String> rendered = new java.util.HashSet<>();
-        if("waiting_quarantined_recordings".equals(snapshot.liveUploadOperation)||"session_quarantined".equals(snapshot.liveUploadOperation)) {
-            addOperationMessage(uploadQueueContainer,"Backup incomplete · recovery needed in Library. Keep local audio.",AndroidUi.ORANGE);
+        uploadQueueContainer.setVisibility(View.GONE);
+        java.util.Set<String> committed = java.util.Collections.emptySet();
+        CurrentUploadPresentation.State state = CurrentUploadPresentation.from(
+                snapshot.sessions, committed, snapshot.liveUploadSessionId,
+                snapshot.liveUploadOperation, snapshot.liveUploadSequence,
+                snapshot.liveUploadDurableBytes);
+        if (state == null) {
+            state = CurrentUploadPresentation.activeWithoutManifest(
+                    snapshot.liveUploadSessionId, snapshot.liveUploadOperation);
         }
-        if(!AppSettings.uploadPermitted(this)) {
-            addOperationMessage(uploadQueueContainer,"Upload off · saved on phone. More → Send pending recordings.",AndroidUi.MUTED);
-        }
-
-        // Start showing the upload pipeline as soon as recording stops, before the
-        // session-list cache has necessarily caught up. This prevents short uploads
-        // from happening entirely between two UI snapshots.
-        String activeSessionId = snapshot.liveUploadSessionId == null
-                ? "" : snapshot.liveUploadSessionId;
-        boolean finalizingCurrent = ("FINISHING".equals(snapshot.state)
+        boolean quarantined = "waiting_quarantined_recordings".equals(
+                snapshot.liveUploadOperation) || "session_quarantined".equals(
+                snapshot.liveUploadOperation);
+        boolean finalizing = ("FINISHING".equals(snapshot.state)
                 || "COMPRESSING".equals(snapshot.state))
                 && snapshot.currentSessionId != null
                 && !snapshot.currentSessionId.isEmpty();
-        if (activeSessionId.isEmpty() && finalizingCurrent) {
-            activeSessionId = snapshot.currentSessionId;
-        }
-        if (!activeSessionId.isEmpty() && !serverCommitted.contains(activeSessionId)) {
-            ReliableSessionManifest activeManifest = null;
-            for (ReliableSessionManifest session : snapshot.sessions) {
-                if (activeSessionId.equals(session.sessionId)) {
-                    activeManifest = session;
-                    break;
-                }
-            }
-            String name = activeManifest == null
-                    ? "Current recording" : OverviewProgress.fileName(activeManifest);
-            String op = snapshot.liveUploadOperation == null
-                    ? "" : snapshot.liveUploadOperation;
-            boolean hasLiveBytes = snapshot.liveUploadTotalBytes > 0L;
-            int permille = hasLiveBytes
-                    ? Math.max(0, Math.min(1000, snapshot.liveUploadProgressPermille)) : 0;
-            boolean indeterminate = !hasLiveBytes;
-            String state;
-            if (finalizingCurrent || "stopped".equals(op) || "idle".equals(op)
-                    || op.isEmpty()) {
-                state = "Preparing file for upload";
-                indeterminate = true;
-            } else if ("retry_backoff".equals(op)) {
-                state = "Retrying upload";
-            } else if (op.contains("commit")) {
-                state = "Committing on Jetson";
-                if (hasLiveBytes) permille = 1000;
-            } else if (op.contains("reconcil")) {
-                state = "Verifying Jetson copy";
-            } else {
-                state = "Uploading";
-            }
-            addOperationRow(uploadQueueContainer, name, state,
-                    permille, indeterminate, false);
-            rendered.add(activeSessionId);
-        }
 
-        List<ReliableSessionManifest> pending = OverviewProgress.pendingUploads(
-                snapshot.sessions, serverCommitted);
-        for (ReliableSessionManifest session : pending) {
-            if (rendered.contains(session.sessionId)) continue;
-            int permille = OverviewProgress.fileProgressPermille(session);
-            boolean accepted = OverviewProgress.allSegmentsAccepted(session);
-            boolean indeterminate = !session.conversionFinished || permille < 0;
-            String state;
-            if (!session.conversionFinished) state = "Preparing file for upload";
-            else if (accepted && !session.remoteCommitted) state = "Committing on Jetson";
-            else if (permille > 0) state = "Waiting to resume upload";
-            else state = "Waiting to upload";
-            if (accepted && !session.remoteCommitted) permille = 1000;
-            addOperationRow(uploadQueueContainer, OverviewProgress.fileName(session),
-                    state, permille, indeterminate, false);
+        if (state == null && !quarantined && !finalizing) {
+            uploadActivityContainer.setVisibility(View.GONE);
+            return;
         }
-        uploadQueueContainer.commitUpdate();
+        if (state == null) {
+            setTextIfChanged(uploadActivityTitle, quarantined
+                    ? "Backup needs attention" : "Preparing current recording");
+            setTextIfChanged(uploadActivityDetail, quarantined
+                    ? "Unreadable local audio needs recovery in Library. Keep the saved files."
+                    : "Finalizing saved audio before transmission");
+            uploadActivityDetail.setTextColor(quarantined ? AndroidUi.ORANGE : AndroidUi.MUTED);
+            uploadActivityProgress.setIndeterminate(true);
+            uploadActivityProgress.setContentDescription(uploadActivityTitle.getText());
+            uploadActivityContainer.setVisibility(View.VISIBLE);
+            return;
+        }
+        setTextIfChanged(uploadActivityTitle, "Upload: " + state.fileName);
+        boolean uploadAllowed = AppSettings.uploadPermitted(this);
+        String detail = !uploadAllowed
+                ? "Automatic upload off · audio saved on phone · More → Send pending recordings"
+                : quarantined
+                    ? "Backup needs attention · audio saved on phone"
+                    : state.phase;
+        if (state.progressPermille >= 0) {
+            detail += " · " + ((state.progressPermille + 5) / 10)
+                    + "% of this recording sent";
+        } else if (uploadAllowed && !quarantined) {
+            detail += " · awaiting measurable file size";
+        }
+        if (state.otherFilesWaiting > 0) {
+            detail += " · " + state.otherFilesWaiting
+                    + (state.otherFilesWaiting == 1 ? " more recording waiting"
+                    : " more recordings waiting");
+        }
+        setTextIfChanged(uploadActivityDetail, detail);
+        uploadActivityDetail.setTextColor(
+                !uploadAllowed || state.retrying || quarantined
+                        ? AndroidUi.ORANGE : AndroidUi.MUTED);
+        uploadActivityProgress.setIndeterminate(state.progressPermille < 0);
+        if (state.progressPermille >= 0) {
+            uploadActivityProgress.setProgress(state.progressPermille);
+        }
+        uploadActivityProgress.setContentDescription(state.fileName + " · " + detail);
+        uploadActivityContainer.setVisibility(View.VISIBLE);
     }
 
     private void applyTranscriptionStatus(
@@ -1635,62 +1727,68 @@ public final class MainActivity extends Activity {
             renderTranscriptionOperations(lastTranscriptionStatus,
                     " · " + formatStatusAge(age) + " old", true);
         } else {
-            transcriptionQueueContainer.beginUpdate();
-            transcriptionSummaryText.setVisibility(View.VISIBLE);
-            transcriptionSummaryText.setMaxLines(Integer.MAX_VALUE);
-            transcriptionSummaryText.setText("Transcription · unavailable\nCheck Internet · More → Retry synchronization");
-            transcriptionProgressBar.setVisibility(View.VISIBLE);
-            transcriptionProgressBar.setIndeterminate(true);
-            transcriptionSummaryText.setTextColor(AndroidUi.ORANGE);
-            transcriptionQueueContainer.commitUpdate();
+            setTextIfChanged(transcriptionActivityText,
+                    "Transcription status unavailable · check connection · More → Retry");
+            transcriptionActivityText.setTextColor(AndroidUi.ORANGE);
+            transcriptionActivityText.setVisibility(View.VISIBLE);
         }
     }
 
     private void renderTranscriptionOperations(
             ReliableUploadClient.TranscriptionStatus value,
             String staleSuffix, boolean stale) {
-        transcriptionSummaryText.setVisibility(View.VISIBLE);
-        transcriptionSummaryText.setMaxLines(Integer.MAX_VALUE);
-        transcriptionProgressBar.setVisibility(View.VISIBLE);
-        boolean unknown=value==null;
-        int overall=unknown?0:(value.notTranscribedCount==0?100:value.overallPercent);
-        transcriptionSummaryText.setText(unknown?"Transcription status unavailable":
-                "Transcription · "+overall+"% · "+value.notTranscribedCount+" pending"+(stale?"\nLast known"+staleSuffix+" · Retry in More":""));
-        transcriptionSummaryText.setTextColor(stale?AndroidUi.ORANGE:AndroidUi.INK);
-        transcriptionProgressBar.setIndeterminate(unknown||stale);
-        if(!unknown&&!stale)transcriptionProgressBar.setProgress(overall*10);
+        if (transcriptionActivityText == null) return;
+        transcriptionSummaryText.setVisibility(View.GONE);
+        transcriptionProgressBar.setVisibility(View.GONE);
         transcriptionCurrentText.setVisibility(View.GONE);
         transcriptionCurrentProgressBar.setVisibility(View.GONE);
-        transcriptionQueueContainer.beginUpdate();
-        if (value == null || value.pending.isEmpty()) {
-            transcriptionQueueContainer.commitUpdate();
+        transcriptionQueueContainer.setVisibility(View.GONE);
+        if (value == null || (value.pending.isEmpty() && value.notTranscribedCount == 0)) {
+            transcriptionActivityText.setVisibility(View.GONE);
             return;
         }
-        for (ReliableUploadClient.CurrentTranscription item : value.pending) {
-            String name = item.displayName == null || item.displayName.isEmpty()
-                    ? item.sessionId : item.displayName;
-            String state = item.state == null ? "" : item.state;
-            boolean running = "RUNNING".equals(state);
-            boolean failed = "FAILED".equals(state);
-            String phase = item.phase == null ? "" : item.phase.toLowerCase(java.util.Locale.ROOT);
-            boolean realFrameProgress = running && item.framesTotal > 0L;
-            boolean loading = running && ("loading".equals(phase)
-                    || "starting".equals(phase) || !realFrameProgress);
-            boolean indeterminate = (!running && !failed) || loading;
-            int permille = realFrameProgress
-                    ? Math.max(0, Math.min(1000, item.percent * 10)) : 0;
-            String label;
-            if (loading && "loading".equals(phase)) label = "Loading transcription model";
-            else if (loading) label = "Starting transcription";
-            else if (running) label = "Transcribing";
-            else if (failed) label = "Transcription failed; audio retained. Use More → Transcribe uploaded recordings to retry.";
-            else if ("MANUAL".equals(state)) label = "Automatic transcription is off. Use More → Transcribe uploaded recordings.";
-            else label = "Waiting for transcription";
-            // Snapshot age is already shown once in the section summary.
-            addOperationRow(transcriptionQueueContainer, name, label,
-                    permille, indeterminate, failed);
+        if (value.pending.isEmpty()) {
+            setTextIfChanged(transcriptionActivityText,
+                    "Transcription: " + value.notTranscribedCount
+                    + " waiting" + (stale ? staleSuffix : ""));
+            transcriptionActivityText.setTextColor(stale ? AndroidUi.ORANGE : AndroidUi.MUTED);
+            transcriptionActivityText.setVisibility(View.VISIBLE);
+            return;
         }
-        transcriptionQueueContainer.commitUpdate();
+        ReliableUploadClient.CurrentTranscription focus = value.pending.get(0);
+        for (ReliableUploadClient.CurrentTranscription candidate : value.pending) {
+            if ("RUNNING".equals(candidate.state)) {
+                focus = candidate;
+                break;
+            }
+        }
+        String name = focus.displayName == null || focus.displayName.isEmpty()
+                ? "recording" : focus.displayName;
+        String phase = focus.phase == null ? ""
+                : focus.phase.toLowerCase(java.util.Locale.ROOT);
+        String text;
+        if ("RUNNING".equals(focus.state) && !stale) {
+            if ("loading".equals(phase)) text = "Transcript: loading model · " + name;
+            else if ("starting".equals(phase) || focus.framesTotal <= 0L) {
+                text = "Transcript: starting · " + name;
+            } else {
+                text = "Transcript: " + name + " · "
+                        + Math.max(0, Math.min(100, focus.percent)) + "%";
+            }
+        } else if ("FAILED".equals(focus.state)) {
+            text = "Transcription failed: " + name + " · More → Transcribe recordings";
+        } else if ("MANUAL".equals(focus.state)) {
+            text = "Automatic transcription off · More → Transcribe recordings";
+        } else {
+            text = "Transcript waiting: " + name;
+        }
+        if (value.pending.size() > 1) text += " · " + (value.pending.size() - 1) + " more";
+        if (stale && staleSuffix != null) text += staleSuffix;
+        setTextIfChanged(transcriptionActivityText, text);
+        transcriptionActivityText.setTextColor(
+                stale || "FAILED".equals(focus.state)
+                        ? AndroidUi.ORANGE : AndroidUi.MUTED);
+        transcriptionActivityText.setVisibility(View.VISIBLE);
     }
 
     private void addOperationHeader(LinearLayout container, String title) {

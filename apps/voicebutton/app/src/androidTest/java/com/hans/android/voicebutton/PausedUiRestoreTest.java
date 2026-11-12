@@ -4,6 +4,7 @@ import static androidx.test.espresso.Espresso.onView;
 import static androidx.test.espresso.assertion.ViewAssertions.matches;
 import static androidx.test.espresso.matcher.ViewMatchers.Visibility.GONE;
 import static androidx.test.espresso.matcher.ViewMatchers.isDisplayed;
+import static androidx.test.espresso.matcher.ViewMatchers.isEnabled;
 import static androidx.test.espresso.matcher.ViewMatchers.withEffectiveVisibility;
 import static androidx.test.espresso.matcher.ViewMatchers.withId;
 import static androidx.test.espresso.matcher.ViewMatchers.withText;
@@ -66,6 +67,11 @@ public class PausedUiRestoreTest {
             awaitText(R.id.voicebutton_primary, "Resume recording");
             onView(withId(R.id.voicebutton_finish)).check(matches(isDisplayed()));
             onView(withId(R.id.voicebutton_primary)).check(matches(isDisplayed()));
+            onView(withId(R.id.voicebutton_primary)).check(matches(isEnabled()));
+            onView(withId(R.id.voicebutton_upload_queue))
+                    .check(matches(withEffectiveVisibility(GONE)));
+            onView(withId(R.id.voicebutton_transcription_queue))
+                    .check(matches(withEffectiveVisibility(GONE)));
             onView(withId(R.id.voicebutton_setup)).check(matches(withEffectiveVisibility(GONE)));
             onView(withId(R.id.voicebutton_local_protection)).check(matches(isDisplayed()));
         }

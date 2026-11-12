@@ -20,4 +20,7 @@
     <item name="voicebutton_transcription_current" type="id" />
     <item name="voicebutton_transcription_current_progress" type="id" />
     <item name="voicebutton_transcription_queue" type="id" />
+    <item name="voicebutton_active_upload" type="id" />
+    <item name="voicebutton_active_upload_bar" type="id" />
+    <item name="voicebutton_secondary_transcription" type="id" />
 </resources>
