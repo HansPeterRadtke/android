@@ -318,6 +318,212 @@ public class OutgoingMessageUiTest {
     set(activity, "historyPrefs", wrapped);
   }
 
+
+  // Exercise the actual Transcribe button, service socket facade and uploader.
+  // Both transports are in memory and the isolated APK has only a loopback URL.
+  private static final class RecordingWire implements WebSocket {
+    final List<String> controls = new CopyOnWriteArrayList<>();
+    final java.io.ByteArrayOutputStream audio = new java.io.ByteArrayOutputStream();
+    final CountDownLatch waiting = new CountDownLatch(1);
+    volatile boolean backpressure;
+
+    @Override public boolean send(String message) {
+      try { controls.add(new JSONObject(message).getString("type")); }
+      catch (Exception failure) { throw new AssertionError(failure); }
+      return true;
+    }
+    @Override public synchronized boolean send(okio.ByteString bytes) {
+      byte[] data = bytes.toByteArray();
+      audio.write(data, 0, data.length);
+      return true;
+    }
+    @Override public long queueSize() {
+      if (!backpressure) return 0;
+      waiting.countDown();
+      return Integer.MAX_VALUE;
+    }
+    @Override public boolean close(int code, String reason) { return true; }
+    @Override public void cancel() { }
+    @Override public okhttp3.Request request() {
+      return new okhttp3.Request.Builder().url("ws://localhost/test").build();
+    }
+    int count(String control) { return java.util.Collections.frequency(controls, control); }
+    void assertNoSubmission() {
+      for (String type : new String[]{"text_turn", "submit", "commit_turn"})
+        assertEquals(type, 0, count(type));
+    }
+  }
+
+  private static final String GREETING = "{\"type\":\"hello\",\"commit_protocol\":1}";
+
+  private static void prepareManualTransport(ActivityScenario<MainActivity> screen) {
+    assertTrue("Use the isolated voice APK", BuildConfig.GUIDELINE_TEST);
+    await(() -> {
+      AtomicBoolean attached = new AtomicBoolean();
+      screen.onActivity(activity -> attached.set(get(activity, "boundVoiceListener") != null));
+      return attached.get();
+    }, "The voice screen did not attach");
+    screen.onActivity(activity -> {
+      VoiceForegroundService service = (VoiceForegroundService) get(activity, "voiceService");
+      set(service, "networkGeneration", (Long) get(service, "networkGeneration") + 1L);
+      set(service, "connectionDesired", false);
+      set(service, "networkConnecting", false);
+      set(service, "networkConnected", false);
+      set(service, "networkSocket", null);
+      set(activity, "autoTranscribe", false);
+      set(activity, "autoSend", false);
+      // The UI session exists but has not received the server greeting yet.
+      VoiceConnectionTracker tracker = (VoiceConnectionTracker) get(activity, "connectionTracker");
+      tracker.onOpen(tracker.currentGeneration(), System.currentTimeMillis());
+      set(activity, "webSocket", service.facade());
+      set(activity, "serverHelloReady", false);
+    });
+  }
+
+  private static void prepareManualRecording(ActivityScenario<MainActivity> screen, byte[] pcm) {
+    prepareManualTransport(screen);
+    screen.onActivity(activity -> {
+      activity.getSharedPreferences("voice_agent_history", android.content.Context.MODE_PRIVATE).edit()
+          .putBoolean("transcribe_automatically_v1", false).putBoolean("send_automatically_v3", false).apply();
+      java.io.ByteArrayOutputStream recording =
+          (java.io.ByteArrayOutputStream) get(activity, "manualRecordingBuffer");
+      recording.reset();
+      recording.write(pcm, 0, pcm.length);
+      set(activity, "manualRecordingAvailable", true);
+      invoke(activity, "persistManualRecording", new Class<?>[]{});
+      invoke(activity, "updateTranscriptPanel", new Class<?>[]{});
+    });
+  }
+
+  private static void openWire(MainActivity activity, RecordingWire wire) {
+    VoiceForegroundService service = (VoiceForegroundService) get(activity, "voiceService");
+    set(service, "networkSocket", wire);
+    set(service, "networkConnected", true);
+    set(service, "lastHello", GREETING);
+    WebSocketListener listener = (WebSocketListener) get(activity, "boundVoiceListener");
+    listener.onOpen(service.facade(), null);
+    listener.onMessage(service.facade(), GREETING);
+  }
+
+  private static void loseWire(MainActivity activity) {
+    VoiceForegroundService service = (VoiceForegroundService) get(activity, "voiceService");
+    set(service, "networkSocket", null);
+    set(service, "networkConnected", false);
+    WebSocketListener listener = (WebSocketListener) get(activity, "boundVoiceListener");
+    listener.onFailure(service.facade(), new java.io.IOException("fixture disconnect"), null);
+  }
+
+  private static void awaitUploaders() {
+    await(() -> Thread.getAllStackTraces().keySet().stream()
+        .noneMatch(thread -> "manual-transcription-upload".equals(thread.getName()) && thread.isAlive()),
+        "The manual audio uploader did not finish");
+  }
+
+  @Test public void queuedTranscriptionUsesOneUploadAcrossGreetingsAndReconnect() {
+    byte[] pcm = new byte[8192];
+    for (int i = 0; i < pcm.length; i++) pcm[i] = (byte)(i * 31);
+    RecordingWire first = new RecordingWire(), replacement = new RecordingWire();
+    try (ActivityScenario<MainActivity> screen = ActivityScenario.launch(MainActivity.class)) {
+      prepareManualRecording(screen, pcm);
+      screen.onActivity(activity -> {
+        assertTrue(activity.findViewById(R.id.voice_transcribe).performClick());
+        openWire(activity, first);
+        VoiceForegroundService service = (VoiceForegroundService) get(activity, "voiceService");
+        ((WebSocketListener) get(activity, "boundVoiceListener")).onMessage(service.facade(), GREETING);
+      });
+      awaitUploaders();
+      assertEquals("Duplicate greeting replayed the recording", 1, first.count("begin_manual_utterance"));
+      assertEquals(1, first.count("end_utterance"));
+      assertArrayEquals(pcm, first.audio.toByteArray());
+      screen.onActivity(activity -> {
+        loseWire(activity);
+        openWire(activity, replacement);
+      });
+      awaitUploaders();
+      assertEquals(0, replacement.count("begin_manual_utterance"));
+      assertEquals(0, replacement.audio.size());
+      screen.onActivity(activity -> {
+        assertTrue(activity.findViewById(R.id.voice_transcribe).isEnabled());
+        assertTrue(activity.findViewById(R.id.voice_transcribe).performClick());
+      });
+      awaitUploaders();
+      assertEquals(1, replacement.count("end_utterance"));
+      assertArrayEquals(pcm, replacement.audio.toByteArray());
+      screen.onActivity(activity -> {
+        WebSocketListener listener = (WebSocketListener) get(activity, "boundVoiceListener");
+        listener.onMessage(first,
+            "{\"type\":\"asr\",\"event\":\"final\",\"turn_id\":\"old\",\"text\":\"Stale result.\"}");
+        assertEquals("", editor(activity).getText().toString());
+        assertFalse(activity.findViewById(R.id.voice_transcribe).isEnabled());
+        listener.onMessage(replacement,
+            "{\"type\":\"asr\",\"event\":\"final\",\"turn_id\":\"fixture\",\"text\":\"Blue paper.\"}");
+        assertEquals("Blue paper.", editor(activity).getText().toString());
+        assertTrue((Boolean) get(activity, "manualRecordingAvailable"));
+      });
+      first.assertNoSubmission();
+      replacement.assertNoSubmission();
+    }
+  }
+
+  @Test public void recreationPreservesOnlyAnUnstartedTranscription() {
+    byte[] pcm = new byte[4096];
+    java.util.Arrays.fill(pcm, (byte) 17);
+    RecordingWire first = new RecordingWire(), replacement = new RecordingWire();
+    try (ActivityScenario<MainActivity> screen = ActivityScenario.launch(MainActivity.class)) {
+      prepareManualRecording(screen, pcm);
+      screen.onActivity(activity -> assertTrue(activity.findViewById(R.id.voice_transcribe).performClick()));
+      screen.recreate();
+      prepareManualTransport(screen);
+      screen.onActivity(activity -> openWire(activity, first));
+      awaitUploaders();
+      assertEquals(1, first.count("begin_manual_utterance"));
+      assertArrayEquals(pcm, first.audio.toByteArray());
+      assertEquals(1, first.count("end_utterance"));
+
+      // The server could already have finalized the first upload.
+      screen.recreate();
+      prepareManualTransport(screen);
+      screen.onActivity(activity -> openWire(activity, replacement));
+      awaitUploaders();
+      screen.onActivity(activity -> {
+        assertTrue((Boolean) get(activity, "manualRecordingAvailable"));
+        assertTrue(activity.findViewById(R.id.voice_transcribe).isEnabled());
+      });
+      assertEquals(1, first.count("begin_manual_utterance"));
+      assertEquals(0, replacement.count("begin_manual_utterance"));
+      assertEquals(0, replacement.audio.size());
+      first.assertNoSubmission();
+      replacement.assertNoSubmission();
+    }
+  }
+
+  @Test public void interruptedUploadCannotFinishOnReplacementSocket() throws Exception {
+    byte[] pcm = new byte[8192];
+    RecordingWire first = new RecordingWire(), replacement = new RecordingWire();
+    first.backpressure = true;
+    try (ActivityScenario<MainActivity> screen = ActivityScenario.launch(MainActivity.class)) {
+      prepareManualRecording(screen, pcm);
+      screen.onActivity(activity -> {
+        openWire(activity, first);
+        assertTrue(activity.findViewById(R.id.voice_transcribe).performClick());
+      });
+      assertTrue("Uploader never encountered backpressure", first.waiting.await(20, TimeUnit.SECONDS));
+      screen.onActivity(activity -> {
+        loseWire(activity);
+        openWire(activity, replacement);
+      });
+      first.backpressure = false;
+      awaitUploaders();
+      assertEquals(1, first.count("begin_manual_utterance"));
+      assertEquals(0, first.count("end_utterance"));
+      assertEquals(0, replacement.count("begin_manual_utterance"));
+      assertEquals(0, replacement.audio.size());
+      assertEquals(0, replacement.count("end_utterance"));
+      first.assertNoSubmission();
+      replacement.assertNoSubmission();
+    } finally { first.backpressure = false; }
+  }
+
   private static final class Fixture {
     final List<JSONObject> messages = new CopyOnWriteArrayList<>();
     long generation;

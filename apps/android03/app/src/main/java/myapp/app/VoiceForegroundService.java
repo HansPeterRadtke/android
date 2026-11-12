@@ -255,6 +255,7 @@ public final class VoiceForegroundService extends Service {
 
   public boolean isCapturing() { return capturing.get(); }
   public boolean isConnected() { return networkConnected; }
+  WebSocket connectedSocket() { return networkConnected ? networkSocket : null; }
   public String microphoneLabel() { return microphoneLabel; }
   public String captureError() { return captureError; }
   public WebSocket facade() { return facade; }
@@ -481,7 +482,7 @@ public final class VoiceForegroundService extends Service {
 
                 } catch(Exception ignored) {}
                 WebSocketListener listener=activityListener;
-                if (listener != null) listener.onMessage(facade,withUiMediaGeneration(text));
+                if (listener != null) listener.onMessage(socket,withUiMediaGeneration(text));
               }
 
               @Override public void onMessage(WebSocket socket, ByteString data) {

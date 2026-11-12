@@ -137,7 +137,7 @@ public class ConnectedVoiceWorkflowTest {
         // Assert the exact fixture recognition in durable, acknowledged history.
         recognized.set("Can you hear me? Please say hello.");
       } else {
-        awaitScreen(screen, activity -> !(Boolean) get(activity, "manualTranscribePending")
+        awaitScreen(screen, activity -> get(activity, "manualTranscription") == null
             && ((EditText) activity.findViewById(R.id.voice_draft)).getText().length() > 0,
             90000, "Real ASR did not reach the editable draft");
         screen.onActivity(activity -> {

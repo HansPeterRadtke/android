@@ -87,8 +87,8 @@ public class DraftStateUiTest {
         byte[] pcm = new byte[32000];
         ((java.io.ByteArrayOutputStream) get(screen, "manualRecordingBuffer")).write(pcm, 0, pcm.length);
         set(screen, "manualRecordingAvailable", true);
+        invoke(screen, "transcribeManualRecording", new Class<?>[]{});
         set(screen, "manualTranscriptPendingSubmission", true);
-        set(screen, "manualTranscribePending", true);
         set(screen, "lastFinalAsrTurnId", "current-recording");
         set(screen, "pendingTurnId", "current-recording");
         VoicePcmPlayerView player = screen.findViewById(R.id.voice_user_player);
@@ -99,7 +99,7 @@ public class DraftStateUiTest {
           invoke(screen, "handleWsJson", new Class<?>[]{String.class, long.class}, ack.toString(), 0L);
         } catch (Exception failure) { throw new AssertionError(failure); }
         assertTrue("An unrelated ACK erased unsent audio", (Boolean) get(screen, "manualRecordingAvailable"));
-        assertTrue("An unrelated ACK cancelled transcription state", (Boolean) get(screen, "manualTranscribePending"));
+        assertTrue("An unrelated ACK cancelled transcription state", get(screen, "manualTranscription") != null);
         assertTrue((Boolean) get(screen, "manualTranscriptPendingSubmission"));
         assertEquals("current-recording", get(screen, "pendingTurnId"));
         assertEquals(32000, ((java.io.ByteArrayOutputStream) get(screen, "manualRecordingBuffer")).size());

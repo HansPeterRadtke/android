@@ -141,6 +141,7 @@ public class MainActivity extends Activity {
     }
     @Override public void onServiceDisconnected(ComponentName name) {
       voiceService = null;
+      interruptStartedManualTranscription();
       voiceServiceBound = false;
       voiceServiceBindingRequested = false;
       connectionTracker.onClosed(connectionTracker.currentGeneration());
@@ -211,7 +212,16 @@ public class MainActivity extends Activity {
   private final AtomicBoolean running = new AtomicBoolean(false);
   private final AtomicBoolean connectionWanted = new AtomicBoolean(false);
   private volatile boolean captureStartPending = false;
-  private volatile boolean manualTranscribePending = false;
+  // Main thread owns request transitions. The upload thread only checks identity.
+  private static final class ManualTranscription {
+    byte[] queuedPcm;
+    volatile WebSocket socket; // Set exactly once, before any frame can be sent.
+
+    ManualTranscription(byte[] pcm) { queuedPcm = pcm; }
+  }
+  private volatile ManualTranscription manualTranscription;
+  private boolean manualTranscriptionInterrupted;
+  private WebSocket manualGreetingSocket;
   private volatile boolean manualTranscriptPendingSubmission = false;
   private volatile boolean typedSendPending = false;
   // An accepted WebSocket frame is not a server acknowledgement.
@@ -382,6 +392,12 @@ public class MainActivity extends Activity {
     connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
     buildScreen();
     restoreComposerState(savedInstanceState);
+    Object retained = getLastNonConfigurationInstance();
+    if (retained instanceof ManualTranscription) {
+      manualTranscription = (ManualTranscription) retained;
+      manualTranscriptionInterrupted = false;
+      updateTranscriptPanel();
+    }
     registerNetworkObserver();
     refreshPreferredMicrophonePreviewAsync();
     startConnectionMonitor();
@@ -719,7 +735,8 @@ public class MainActivity extends Activity {
       running.set(false);setForegroundMode(ForegroundMode.MICROPHONE_ERROR,service.captureError());return;
     }
     manualTranscriptPendingSubmission = false;
-    manualTranscribePending = false;
+    manualTranscription = null;
+    manualTranscriptionInterrupted = false;
     historyPrefs.edit().remove(MANUAL_ARCHIVE_PREF_KEY).apply();
     setForegroundMode(autoTranscribe?(connectionTracker.isOpen()?ForegroundMode.VERIFYING:ForegroundMode.CONNECTING)
         :ForegroundMode.RECORDING_LOCAL,null);
@@ -848,6 +865,7 @@ public class MainActivity extends Activity {
     webSocket = null;
     wsConnecting.set(false);
     connectionTracker.onClosed(generation);
+    interruptStartedManualTranscription();
     manualSendAwaitingAck = false;
     appendDiagnostic("Connection replaced: " + reason);
     if (socket != null) socket.cancel();
@@ -860,6 +878,7 @@ public class MainActivity extends Activity {
     webSocket = null;
     wsConnecting.set(false);
     connectionTracker.onClosed(generation);
+    interruptStartedManualTranscription();
     manualSendAwaitingAck = false;
     if (reconnectRunnable != null) mainHandler.removeCallbacks(reconnectRunnable);
     reconnectScheduledGeneration = -1L;
@@ -891,6 +910,7 @@ public class MainActivity extends Activity {
     @Override public void onOpen(WebSocket socket, Response response) {
       if (!current(socket) || !connectionTracker.onOpen(generation, System.currentTimeMillis())) return;
       webSocket = socket;
+      serverHelloReady = false;
       wsConnecting.set(false);
       serverCanCommit=false;
       appendDiagnostic("WebSocket connected.");
@@ -911,9 +931,12 @@ public class MainActivity extends Activity {
       if (!current(socket)) return;
       // All text/UI state transitions must run in wire order on Android's main
       // thread; the previous background callback posted inconsistent UI updates.
+      VoiceForegroundService service = voiceService;
+      WebSocket source = service != null && socket == service.facade() ? currentVoiceSocket() : socket;
       runOnUiThread(() -> {
-        if (connectionTracker.owns(generation) && connectionTracker.isOpen()) {
-          handleWsJson(text, generation);
+        if (connectionTracker.owns(generation) && connectionTracker.isOpen()
+            && source == currentVoiceSocket()) {
+          handleWsJson(text, generation, source);
         }
       });
     }
@@ -932,6 +955,7 @@ public class MainActivity extends Activity {
 
     @Override public void onClosed(WebSocket socket, int code, String reason) {
       if (!connectionTracker.onClosed(generation)) return;
+      interruptStartedManualTranscription();
       if (webSocket == socket) webSocket = null;
       wsConnecting.set(false);
       // Transport loss cannot be treated as confirmed delivery. Retain text for
@@ -947,6 +971,7 @@ public class MainActivity extends Activity {
 
     @Override public void onFailure(WebSocket socket, Throwable failure, Response response) {
       if (!connectionTracker.onClosed(generation)) return;
+      interruptStartedManualTranscription();
       if (webSocket == socket) webSocket = null;
       wsConnecting.set(false);
       manualSendAwaitingAck = false;
@@ -961,6 +986,10 @@ public class MainActivity extends Activity {
   }
 
   private void handleWsJson(String text, long listenerGeneration) {
+    handleWsJson(text, listenerGeneration, currentVoiceSocket());
+  }
+
+  private void handleWsJson(String text, long listenerGeneration, WebSocket source) {
     try {
       JSONObject obj = new JSONObject(text);
       String type = obj.optString("type", "");
@@ -986,6 +1015,7 @@ public class MainActivity extends Activity {
       }
       if ("hello".equals(type)) {
         serverHelloReady = true;
+        manualGreetingSocket = source;
         serverCanCommit=obj.optInt("commit_protocol",0)==1;
         sendClientState();
         serverVersion = obj.optString("version", "");
@@ -1007,8 +1037,13 @@ public class MainActivity extends Activity {
         updateServiceHealth();
         // OkHttp callbacks are NOT the UI thread. submitDraft reads/updates Views.
         if (typedSendPending) runOnUiThread(this::submitDraft);
-        if (manualTranscribePending) transcribeManualRecording();
-        if (!running.get() && foregroundMode != ForegroundMode.THINKING && !manualTranscribePending && !manualSendAwaitingAck) setForegroundMode(ForegroundMode.READY, getString(R.string.detail_ready_text));
+        resumeManualTranscription();
+        if (manualTranscriptionInterrupted) {
+          setForegroundMode(ForegroundMode.REVIEW, getString(R.string.manual_transcription_interrupted));
+        } else if (!running.get() && foregroundMode != ForegroundMode.THINKING
+            && manualTranscription == null && !manualSendAwaitingAck) {
+          setForegroundMode(ForegroundMode.READY, getString(R.string.detail_ready_text));
+        }
       } else if ("history".equals(type)) {
         replaceConversationHistory(obj.optJSONArray("turns"));
       } else if ("state".equals(type)) {
@@ -1050,9 +1085,10 @@ public class MainActivity extends Activity {
           pendingTurnId = obj.optString("turn_id", "");
           latestUserTurnId = pendingTurnId;
           replayUserAvailable = obj.optBoolean("has_user_audio", false);
-          if (manualTranscribePending) {
+          ManualTranscription request = manualTranscription;
+          if (request != null && request.socket != null && request.socket == source) {
             manualTranscriptPendingSubmission = true;
-            manualTranscribePending = false;
+            manualTranscription = null;
           }
           lastFinalAsrText = heard;
           lastFinalAsrTurnId = pendingTurnId;
@@ -1065,7 +1101,7 @@ public class MainActivity extends Activity {
         String submitted = obj.optString("text", "");
         String turnId = obj.optString("turn_id", "");
         boolean acknowledgesCurrentRecording = manualTranscriptPendingSubmission
-            && !manualTranscribePending && !running.get()
+            && manualTranscription == null && !running.get()
             && !turnId.isEmpty() && turnId.equals(lastFinalAsrTurnId);
         if (!submitted.trim().isEmpty()) {
           conversationTextModel.confirmUser(turnId, submitted);
@@ -1105,7 +1141,7 @@ public class MainActivity extends Activity {
           clearManualRecording();
         }
         updateTranscriptPanel();
-        if (!manualTranscribePending) setForegroundMode(ForegroundMode.THINKING, null);
+        if (manualTranscription == null) setForegroundMode(ForegroundMode.THINKING, null);
       } else if ("assistant".equals(type)) {
         String reply = obj.optString("text", "");
         String turnId = obj.optString("turn_id", "");
@@ -2185,7 +2221,8 @@ public class MainActivity extends Activity {
       // Selection changes ownership immediately, before the asynchronous read.
       // An old ACK must not clear media and invalidate this pending selection.
       manualTranscriptPendingSubmission = false;
-      manualTranscribePending = false;
+      manualTranscription = null;
+      manualTranscriptionInterrupted = false;
     }
     final int maxBytes = appConfig.manualRecordingMaxBytes;
     new Thread(() -> {
@@ -2257,7 +2294,8 @@ public class MainActivity extends Activity {
     historyPrefs.edit().remove(MANUAL_ARCHIVE_PREF_KEY).apply();
     synchronized (manualRecordingLock) { manualRecordingBuffer.reset(); }
     manualRecordingAvailable = false;
-    manualTranscribePending = false;
+    manualTranscription = null;
+    manualTranscriptionInterrupted = false;
     manualTranscriptPendingSubmission = false;
     if (selected == null || selected.isEmpty()) deleteManualRecordingFile();
     VoiceForegroundService service = voiceService;
@@ -2280,58 +2318,102 @@ public class MainActivity extends Activity {
     updateTranscriptPanel();
   }
 
+  private WebSocket currentVoiceSocket() {
+    VoiceForegroundService service = voiceService;
+    return service == null ? null : service.connectedSocket();
+  }
+
   private void transcribeManualRecording() {
-    if (!manualRecordingAvailable || running.get()) return;
+    if (!manualRecordingAvailable || running.get() || manualTranscription != null) return;
     byte[] pcm;
     synchronized (manualRecordingLock) { pcm = manualRecordingBuffer.toByteArray(); }
     if (pcm.length == 0) return;
-    WebSocket socket = webSocket;
-    if (socket == null || !connectionTracker.isOpen() || !serverHelloReady) {
-      manualTranscribePending = true;
+    manualTranscription = new ManualTranscription(pcm);
+    manualTranscriptionInterrupted = false;
+    manualTranscriptPendingSubmission = false;
+    updateTranscriptPanel();
+    resumeManualTranscription();
+    if (manualTranscription != null && manualTranscription.socket == null) {
       connectionWanted.set(true);
       setForegroundMode(ForegroundMode.CONNECTING, getString(R.string.transcribe_needs_connection));
       if (hasUsableNetwork()) connectWebSocket();
+    }
+  }
+
+  private void resumeManualTranscription() {
+    ManualTranscription request = manualTranscription;
+    if (request == null) return;
+    WebSocket socket = currentVoiceSocket();
+    if (request.socket != null) {
+      if (request.socket != socket) interruptManualTranscription(request);
       return;
     }
-    manualTranscribePending = true;
+    if (socket == null || socket != manualGreetingSocket || !connectionTracker.isOpen() || !serverHelloReady) return;
+    if (running.get()) {
+      interruptManualTranscription(request);
+      return;
+    }
+    // The service facade follows reconnects. Keep the actual socket for the
+    // entire utterance so its remaining bytes can never reach a new session.
+    request.socket = socket;
+    byte[] pcm = request.queuedPcm;
+    request.queuedPcm = null;
     setForegroundMode(ForegroundMode.TRANSCRIBING, null);
-    updateTranscriptPanel();
-    Thread uploader = new Thread(() -> {
+    new Thread(() -> {
       try {
+        checkManualUpload(request);
         JSONObject begin = new JSONObject();
         begin.put("type", "begin_manual_utterance");
         begin.put("reason", "manual_transcribe");
         if (!socket.send(begin.toString())) throw new IOException("Manual upload start rejected");
         int chunk = Math.max(2, appConfig.sampleRate * 2 * appConfig.frameMs / 1000);
         for (int offset = 0; offset < pcm.length; offset += chunk) {
-          if (socket != webSocket || !connectionTracker.isOpen()) throw new IOException("Connection changed during upload");
-          long deadline = System.currentTimeMillis() + Math.max(appConfig.connectTimeoutMs, 15000L);
+          long deadline = android.os.SystemClock.elapsedRealtime() + Math.max(appConfig.connectTimeoutMs, 15000L);
           while (socket.queueSize() > appConfig.maxQueuedAudioBytes / 2L) {
-            if (System.currentTimeMillis() >= deadline) throw new IOException("Manual audio upload backpressure timeout");
+            checkManualUpload(request);
+            if (android.os.SystemClock.elapsedRealtime() >= deadline)
+              throw new IOException("Manual audio upload backpressure timeout");
             Thread.sleep(10L);
           }
+          checkManualUpload(request);
           int length = Math.min(chunk, pcm.length - offset);
           if (!socket.send(ByteString.of(pcm, offset, length))) throw new IOException("Manual audio upload rejected");
         }
+        checkManualUpload(request);
         JSONObject end = new JSONObject();
         end.put("type", "end_utterance");
         end.put("reason", "manual_transcribe");
         if (!socket.send(end.toString())) throw new IOException("Manual upload end rejected");
-      } catch (InterruptedException interrupted) {
-        Thread.currentThread().interrupt();
-        mainHandler.post(() -> {
-          manualTranscribePending = false;
-          updateTranscriptPanel();
-        });
       } catch (Exception failure) {
-        appendDiagnostic("Manual transcription upload failed: " + failure.getClass().getSimpleName());
+        if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
         mainHandler.post(() -> {
-          setForegroundMode(ForegroundMode.RECONNECTING, getString(R.string.transcribe_needs_connection));
-          updateTranscriptPanel();
+          if (request != manualTranscription) return;
+          appendDiagnostic("Manual transcription upload interrupted: " + failure.getClass().getSimpleName());
+          interruptManualTranscription(request);
         });
       }
-    }, "manual-transcription-upload");
-    uploader.start();
+    }, "manual-transcription-upload").start();
+  }
+
+  private void checkManualUpload(ManualTranscription request) throws IOException {
+    if (request != manualTranscription || request.socket != currentVoiceSocket()) {
+      throw new IOException("Manual upload connection changed");
+    }
+  }
+
+  private void interruptManualTranscription(ManualTranscription request) {
+    if (request != manualTranscription) return;
+    manualTranscription = null;
+    manualTranscriptionInterrupted = true;
+    setForegroundMode(ForegroundMode.REVIEW, getString(R.string.manual_transcription_interrupted));
+    updateTranscriptPanel();
+  }
+
+  private void interruptStartedManualTranscription() {
+    ManualTranscription request = manualTranscription;
+    if (request != null && request.socket != null) {
+      runOnUiThread(() -> interruptManualTranscription(request));
+    }
   }
 
   private void applyComponentHealth(JSONObject components) {
@@ -2471,7 +2553,7 @@ public class MainActivity extends Activity {
   }
 
   private boolean automaticSpeechToAgent() {
-    return autoTranscribe && autoSend && !manualTranscribePending;
+    return autoTranscribe && autoSend && manualTranscription == null;
   }
 
   private void showSpeechPartial(String heard) {
@@ -2556,7 +2638,7 @@ public class MainActivity extends Activity {
       sendDraftButton.setEnabled(VoiceDraftPolicy.canSubmit(text));
       boolean showTranscribe = !autoTranscribe && manualRecordingAvailable && !running.get();
       transcribeButton.setVisibility(showTranscribe ? View.VISIBLE : View.GONE);
-      transcribeButton.setEnabled(showTranscribe && !manualTranscribePending);
+      transcribeButton.setEnabled(showTranscribe && manualTranscription == null);
     });
   }
 
@@ -3113,6 +3195,15 @@ public class MainActivity extends Activity {
     return Math.round(value * getResources().getDisplayMetrics().density);
   }
 
+  @Override public Object onRetainNonConfigurationInstance() {
+    // Transfer an unstarted tap during screen recreation. Only the live owner
+    // can prove it never sent a frame; a saved bundle cannot establish that.
+    ManualTranscription request = manualTranscription;
+    if (request == null || request.socket != null) return null;
+    manualTranscription = null;
+    return request;
+  }
+
   @Override protected void onSaveInstanceState(Bundle state) {
     Bundle composer = new Bundle();
     composer.putString("text", draftEdit.getText().toString());
@@ -3123,7 +3214,10 @@ public class MainActivity extends Activity {
     composer.putString("turn", pendingTurnId);
     composer.putString("final_turn", lastFinalAsrTurnId);
     composer.putString("final_text", lastFinalAsrText);
-    composer.putBoolean("manual_transcribing", manualTranscribePending);
+    // A saved Activity snapshot may predate an upload that later reached the server.
+    // Restore the recording for review, never an instruction to transmit it again.
+    composer.putBoolean("manual_transcription_interrupted",
+        manualTranscriptionInterrupted || manualTranscription != null);
     composer.putBoolean("manual_submission", manualTranscriptPendingSubmission);
     state.putBundle("voice_composer_v1", composer);
     super.onSaveInstanceState(state);
@@ -3139,7 +3233,8 @@ public class MainActivity extends Activity {
       pendingTurnId = composer.getString("turn", "");
       lastFinalAsrTurnId = composer.getString("final_turn", "");
       lastFinalAsrText = composer.getString("final_text", "");
-      manualTranscribePending = composer.getBoolean("manual_transcribing");
+      manualTranscriptionInterrupted = composer.getBoolean("manual_transcription_interrupted")
+          || composer.getBoolean("manual_transcribing");
       manualTranscriptPendingSubmission = composer.getBoolean("manual_submission");
       draftEdit.setText(composer.getString("text", ""));
       int length = draftEdit.length();
@@ -3168,6 +3263,7 @@ public class MainActivity extends Activity {
     VoiceWebSocketListener listener=boundVoiceListener;
     if (service!=null && listener!=null) service.detach(listener);
     boundVoiceListener=null;
+    interruptStartedManualTranscription();
     connectionTracker.onClosed(connectionTracker.currentGeneration());
     wsConnecting.set(false);
     if (reconnectRunnable != null) mainHandler.removeCallbacks(reconnectRunnable);

@@ -156,6 +156,7 @@
     <string name="player_available_value">Available\n%1$s</string>
     <string name="recording_ready">Recording ready. Replay it, transcribe it, or record again.</string>
     <string name="recording_limit">Recording stopped at the local safety limit.</string>
+    <string name="manual_transcription_interrupted">Recording kept. Check the draft before transcribing again.</string>
     <string name="transcribe_needs_connection">Connect to the local voice service before transcribing.</string>
 <string name="health_ready_word">ready</string>
     <string name="health_unavailable_word">unavailable</string>
