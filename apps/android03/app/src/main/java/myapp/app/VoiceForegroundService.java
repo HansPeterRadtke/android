@@ -88,6 +88,8 @@ public final class VoiceForegroundService extends Service {
   private volatile VoicePcmPlayback activePlayback;
   private volatile int playbackGeneration=-1;
   private final VoicePlaybackReceipts playbackReceipts=new VoicePlaybackReceipts();
+  private volatile boolean playbackReceiptAckSupported;
+  private final VoicePlaybackAckWatchdog playbackAckWatchdog=new VoicePlaybackAckWatchdog();
   private volatile String playbackTurn="";
   private volatile String playbackStream="";
   private volatile long playbackOffset;
@@ -271,6 +273,7 @@ public final class VoiceForegroundService extends Service {
           && !requestedConversation.equals(conversationId)) {
         conversationId = requestedConversation;
         playbackReceipts.clear(); // Never report a different conversation's audio as heard.
+        playbackAckWatchdog.allConfirmed();
         requestReconnect("conversation_identity_changed");
       }
       connectionDesired = true;
@@ -437,6 +440,7 @@ public final class VoiceForegroundService extends Service {
                 networkConnected=true;
                 networkConnecting=false;
                 playbackGeneration=-1;
+                playbackReceiptAckSupported=false;
                 serverCanCommit=false;lastHello="";
                 emitClientState();
                 WebSocketListener listener=activityListener;
@@ -450,13 +454,28 @@ public final class VoiceForegroundService extends Service {
                   String type=value.optString("type");
                   if ("hello".equals(type)) {
                     lastHello=text;serverCanCommit=value.optInt("commit_protocol",0)==1;
+                    playbackReceiptAckSupported=value.optInt("playback_receipt_ack_protocol",0)==1;
                     synchronized(sessionLock) {
-                      playbackReceipts.flush(VoiceForegroundService.this::sendText);
+                      playbackReceipts.flush(VoiceForegroundService.this::sendText,
+                                             networkGeneration,playbackReceiptAckSupported);
                     }
+                    if (playbackReceiptAckSupported) schedulePlaybackAckWatchdog();
+                    else playbackAckWatchdog.allConfirmed();
                     emitClientState();
                     WebSocketListener listener=activityListener;
                     if (listener != null) forwardPendingSubmissionAck(listener);
                     else resumeDetachedSubmission();
+                  }
+                  else if ("playback_ack".equals(type) && playbackReceiptAckSupported) {
+                    // A reply sent by the server only after durable playback
+                    // confirmation, not a local WebSocket-queue acknowledgment.
+                    Object rawGeneration=value.opt("generation");
+                    if (rawGeneration instanceof Integer || rawGeneration instanceof Long) {
+                      boolean confirmed=playbackReceipts.confirm(value.optString("turn_id"),
+                          ((Number)rawGeneration).intValue(),value.optString("stream_id"));
+                      if (confirmed && playbackReceipts.pendingCount()==0)
+                        playbackAckWatchdog.allConfirmed();
+                    }
                   }
                   else if ("history".equals(type)) lastHistory=text;
                   else if ("state".equals(type)) lastState=text;
@@ -510,6 +529,33 @@ public final class VoiceForegroundService extends Service {
         scheduleReconnect(generation);
       }
     }
+  }
+
+  private void schedulePlaybackAckWatchdog() {
+    if (!playbackReceiptAckSupported || playbackReceipts.pendingCount()==0) return;
+    long generation=networkGeneration;
+    long ticket=playbackAckWatchdog.schedule(generation);
+    if (ticket>0) checkPlaybackAckAfter(generation,ticket,6500L);
+  }
+
+  private void checkPlaybackAckAfter(long generation,long ticket,long delayMs) {
+    main.postDelayed(() -> {
+      if (terminating || generation!=networkGeneration || !connectionDesired
+          || !networkConnected || !playbackReceiptAckSupported) return;
+      if (playbackReceipts.pendingCount()==0) {
+        playbackAckWatchdog.allConfirmed();
+        return;
+      }
+      VoicePcmPlayback player=activePlayback;
+      if (capturing.get() || (player!=null && player.isPlaying())) {
+        // Do not interrupt a user's live recording or another spoken response.
+        checkPlaybackAckAfter(generation,ticket,2500L);
+        return;
+      }
+      if (playbackAckWatchdog.expire(generation,ticket,true))
+        requestReconnect("playback_receipt_server_ack_timeout");
+      else updateNotification("Voice playback confirmation remains pending");
+    },delayMs);
   }
 
   private void transportLost(long generation, Throwable failure, int code, String reason) {
@@ -897,7 +943,12 @@ public final class VoiceForegroundService extends Service {
             ack.put("stream_id",stream);
             synchronized(sessionLock) {
               playbackReceipts.remember(turn,generation,stream,ack.toString());
-              playbackReceipts.flush(VoiceForegroundService.this::sendText);
+              // A replacement socket is not ready until its matching hello
+              // announces whether it supports server-confirmed delivery.
+              if (networkConnected && !lastHello.isEmpty())
+                playbackReceipts.flush(VoiceForegroundService.this::sendText,
+                                       networkGeneration,playbackReceiptAckSupported);
+              if (playbackReceiptAckSupported) schedulePlaybackAckWatchdog();
             }
           } catch(Exception ignored) {}
         }

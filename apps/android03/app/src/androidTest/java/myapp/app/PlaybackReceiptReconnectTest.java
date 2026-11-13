@@ -36,6 +36,10 @@ public final class PlaybackReceiptReconnectTest {
   @Test public void completedOfflineAudioIsConfirmedAfterFreshGreetedSocket() throws Exception {
     String enabled=InstrumentationRegistry.getArguments().getString("voiceReceiptChain","");
     Assume.assumeTrue("Only an explicitly isolated fixture",BuildConfig.GUIDELINE_TEST && "1".equals(enabled));
+    String receiptMode=InstrumentationRegistry.getArguments().getString("voiceReceiptAckMode","legacy");
+    assertTrue("Only declared isolated modes are accepted",
+        "legacy".equals(receiptMode) || "confirmed".equals(receiptMode)
+            || "drop_ack_once".equals(receiptMode));
     String encoded=InstrumentationRegistry.getArguments().getString("voiceReceiptCert","");
     assertFalse("Expected the fixture's pinned public certificate",encoded.isEmpty());
     assertFalse("No production credential is used by this test",BuildConfig.VOICE_AUTH_TOKEN.isEmpty());
@@ -90,8 +94,9 @@ public final class PlaybackReceiptReconnectTest {
       assertFalse("Test must never activate microphone",service.isCapturing());
       set(service,"connectionDesired",true);
       service.requestReconnect("fixture_reopen_after_playback");
-      await(() -> connections.get()==2 && receipts.pendingCount()==0,16000,
-          "Fresh hello did not flush the pending playback confirmation");
+      int expectedConnections="drop_ack_once".equals(receiptMode)?3:2;
+      await(() -> connections.get()==expectedConnections && receipts.pendingCount()==0,22000,
+          "Server acknowledgement or reconnect did not clear the playback confirmation");
       assertFalse("No voice capture is permitted",service.isCapturing());
     } finally {
       set(service,"connectionDesired",false);

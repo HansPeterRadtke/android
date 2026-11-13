@@ -3,24 +3,43 @@ package myapp.app;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/** Connection-local delivery queue for playback confirmations. No audio is replayed here. */
+/** Rendered audio confirmations retained across reconnect until the server has saved them. */
 final class VoicePlaybackReceipts {
-  private final LinkedHashMap<String, String> pending = new LinkedHashMap<>();
+  private static final class Receipt {
+    final String payload;
+    long lastQueuedConnection = -1;
+    Receipt(String payload) { this.payload=payload; }
+  }
+  private final LinkedHashMap<String, Receipt> pending = new LinkedHashMap<>();
 
-  synchronized void remember(String turn, int generation, String stream, String json) {
-    if (turn.isEmpty() || stream.isEmpty() || generation < 0) return;
-    String key=turn+"\u0000"+generation+"\u0000"+stream;
-    pending.put(key,json);
-    // Never silently discard an unconfirmed receipt to make space.
+  private static String key(String turn,int generation,String stream) {
+    if (turn==null || turn.isEmpty() || stream==null || stream.isEmpty() || generation<0) return "";
+    return turn+"\u0000"+generation+"\u0000"+stream;
   }
 
-  synchronized void flush(java.util.function.Function<String,Boolean> sender) {
-    java.util.Iterator<Map.Entry<String,String>> iterator=pending.entrySet().iterator();
+  synchronized void remember(String turn,int generation,String stream,String json) {
+    String id=key(turn,generation,stream);
+    if (id.isEmpty()) return;
+    // Duplicate completion callbacks never overwrite the delivery state.
+    if (!pending.containsKey(id)) pending.put(id,new Receipt(json));
+  }
+
+  /** Legacy send-only servers do not acknowledge. New servers do, so retain until ACK. */
+  synchronized void flush(java.util.function.Function<String,Boolean> sender,
+                          long networkGeneration,boolean requireServerAck) {
+    java.util.Iterator<Map.Entry<String,Receipt>> iterator=pending.entrySet().iterator();
     while (iterator.hasNext()) {
-      Map.Entry<String,String> entry=iterator.next();
-      if (!Boolean.TRUE.equals(sender.apply(entry.getValue()))) break;
-      iterator.remove();
+      Receipt receipt=iterator.next().getValue();
+      if (requireServerAck && receipt.lastQueuedConnection==networkGeneration) continue;
+      if (!Boolean.TRUE.equals(sender.apply(receipt.payload))) break;
+      if (requireServerAck) receipt.lastQueuedConnection=networkGeneration;
+      else iterator.remove();
     }
+  }
+
+  synchronized boolean confirm(String turn,int generation,String stream) {
+    String id=key(turn,generation,stream);
+    return !id.isEmpty() && pending.remove(id)!=null;
   }
 
   synchronized int pendingCount() { return pending.size(); }

@@ -10,17 +10,22 @@ from pathlib import Path
 import websockets
 
 
-async def main(cert_path, key_path, wav_path, result_path):
+async def main(cert_path, key_path, wav_path, result_path, protocol_mode="legacy"):
+    if protocol_mode not in ("legacy", "confirmed", "drop_ack_once"):
+        raise ValueError("Unknown isolated receipt protocol mode")
     with wave.open(str(wav_path), "rb") as wave_file:
         assert (wave_file.getnchannels(), wave_file.getsampwidth(), wave_file.getframerate()) == (1, 2, 16000)
         pcm = wave_file.readframes(wave_file.getnframes())
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_context.load_cert_chain(cert_path, key_path)
-    result = {"connections": 0, "receipt_connections": [], "received_types": [], "received_other_actions": [],
+    result = {"connections": 0, "receipt_connections": [], "ack_connections": [],
+              "protocol_mode": protocol_mode, "received_types": [], "received_other_actions": [],
               "recording_frames": len(pcm) // 2, "audio_bytes": len(pcm), "first_disconnect": False}
     received = asyncio.Event()
     hello = {"type": "hello", "commit_protocol": 0, "media_protocols": [0], "conversation_id": "fixture",
              "output": "pcm_s16le_16000_mono"}
+    if protocol_mode != "legacy":
+        hello["playback_receipt_ack_protocol"] = 1
 
     async def handler(socket):
         result["connections"] += 1
@@ -38,7 +43,20 @@ async def main(cert_path, key_path, wav_path, result_path):
                     if (value.get("turn_id") == "fixture-turn" and value.get("stream_id") == "fixture-stream"
                         and value.get("generation") == 11):
                         result["receipt_connections"].append(index)
-                        received.set()
+                        if protocol_mode == "drop_ack_once" and index == 2:
+                            # The server read and saved a receipt, but the ACK
+                            # disappeared before reaching Android. The client
+                            # must retry it on a fresh connection, without a
+                            # second speech upload or a SWAAG command.
+                            await socket.close(code=1012, reason="fixture_lost_receipt_ack")
+                        elif protocol_mode != "legacy":
+                            await socket.send(json.dumps({"type": "playback_ack",
+                                "turn_id": "fixture-turn", "generation": 11,
+                                "stream_id": "fixture-stream"}))
+                            result["ack_connections"].append(index)
+                            received.set()
+                        else:
+                            received.set()
                     else:
                         result["received_other_actions"].append("wrong_playback_receipt")
                 elif kind not in ("client_state", "history_get", "ping"):
@@ -75,7 +93,10 @@ async def main(cert_path, key_path, wav_path, result_path):
         finally:
             Path(result_path).write_text(json.dumps(result, indent=2) + "\n")
             print("FIXTURE_RESULT", json.dumps(result), flush=True)
-    if result["receipt_connections"] != [2] or result["received_other_actions"]:
+    expected_receipts = [2, 3] if protocol_mode == "drop_ack_once" else [2]
+    expected_acks = [3] if protocol_mode == "drop_ack_once" else ([2] if protocol_mode == "confirmed" else [])
+    if (result["receipt_connections"] != expected_receipts
+        or result["ack_connections"] != expected_acks or result["received_other_actions"]):
         raise SystemExit(1)
 
 
