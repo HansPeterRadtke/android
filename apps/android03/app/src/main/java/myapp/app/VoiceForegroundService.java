@@ -87,6 +87,7 @@ public final class VoiceForegroundService extends Service {
   private VoicePcmPlayback userPlayback;
   private volatile VoicePcmPlayback activePlayback;
   private volatile int playbackGeneration=-1;
+  private final VoicePlaybackReceipts playbackReceipts=new VoicePlaybackReceipts();
   private volatile String playbackTurn="";
   private volatile String playbackStream="";
   private volatile long playbackOffset;
@@ -269,6 +270,7 @@ public final class VoiceForegroundService extends Service {
       if (requestedConversation != null && !requestedConversation.isEmpty()
           && !requestedConversation.equals(conversationId)) {
         conversationId = requestedConversation;
+        playbackReceipts.clear(); // Never report a different conversation's audio as heard.
         requestReconnect("conversation_identity_changed");
       }
       connectionDesired = true;
@@ -448,6 +450,9 @@ public final class VoiceForegroundService extends Service {
                   String type=value.optString("type");
                   if ("hello".equals(type)) {
                     lastHello=text;serverCanCommit=value.optInt("commit_protocol",0)==1;
+                    synchronized(sessionLock) {
+                      playbackReceipts.flush(VoiceForegroundService.this::sendText);
+                    }
                     emitClientState();
                     WebSocketListener listener=activityListener;
                     if (listener != null) forwardPendingSubmissionAck(listener);
@@ -882,13 +887,18 @@ public final class VoiceForegroundService extends Service {
       playbackFramed=value.optInt("media_protocol",0)==1;
       final String turn=playbackTurn;
       final String stream=playbackStream;
+      final String receiptConversation=conversationId;
       final boolean reply="audio".equals(value.optString("type"));
       player.setCompletionListener(()->{
-        if(reply) {
+        if(reply && receiptConversation.equals(conversationId)) {
           try {
             JSONObject ack=new JSONObject(); ack.put("type","playback_completed");
             ack.put("turn_id",turn); ack.put("generation",generation);
-            ack.put("stream_id",stream); sendText(ack.toString());
+            ack.put("stream_id",stream);
+            synchronized(sessionLock) {
+              playbackReceipts.remember(turn,generation,stream,ack.toString());
+              playbackReceipts.flush(VoiceForegroundService.this::sendText);
+            }
           } catch(Exception ignored) {}
         }
         if(activePlayback==player && playbackGeneration==generation && playbackStream.equals(stream))activePlayback=null;
