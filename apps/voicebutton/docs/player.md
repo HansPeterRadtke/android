@@ -33,3 +33,12 @@ The playback service owns the sleep deadline using monotonic elapsed time and a 
 Automatic waveforms can be disabled in Automation and privacy, including service restoration. Generate waveform now remains available in the Player menu. Studio cache writes obey the configured byte budget and disk reserve. Clearing cache refuses while a render is running and preserves the active playback file. Responses and decoded waveform dimensions have explicit bounds.
 
 Studio build credentials come from VOICEBUTTON_THOR_TOKEN or the private JSON file selected by VOICEBUTTON_PRIVATE_BUILD_CONFIG (default /data/var/build-config/voicebutton-studio.json, key thor_player_token). The private file is outside Git and mode 0600. Missing credentials disable authenticated Studio access; local playback remains available. The resulting client APK necessarily contains its configured credential. Removing the tracked literal does not erase historical Git revisions or rotate installed clients.
+
+
+## Version 0.98 — end-to-end Library and Player usability
+
+Recorder has direct Library navigation. Library shows an explicit Actions button for each recording and folder, not only a hidden long-press; New folder is available in the bottom action row, and folder navigation updates cannot be overwritten by stale background callbacks. Every async create/rename/move/copy presents pending and completion/error feedback, and measured copy operations show actual transferred bytes in a progress bar. App recording deletion is offered only after Jetson has confirmed the full backup.
+
+Player has a true no-source state: Play, Stop, Seek and Skip remain disabled until a file is actually ready, while Library and explicit last-playback restoration are available. Folder moves display complete paths and pin the selected file across asynchronous pickers. Source modification failure is shown in persistent UI state, not only a Toast. File detail labels are user-facing instead of raw session IDs. Waveform failures no longer overwrite actual player status. Settings group playback speed, skips, audio/sleep and processing mode for easier scanning. Source-engine and Studio behavior is otherwise unchanged.
+
+Waveform generation also has a separate named progress bar when the Thor callback provides completed and expected bytes or units; otherwise it shows indeterminate activity and a truthful phase. The waveform indicator consumes no space once the image is ready or a failure is reported. This does not replace or confuse the separate Studio speed rendering bar.

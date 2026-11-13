@@ -16,6 +16,10 @@ import java.io.OutputStream;
 final class FileOperations {
     private FileOperations() {}
 
+    interface TransferListener {
+        void onCopy(long copiedBytes, long expectedBytes);
+        void onVerifying();
+    }
 
     static void persistPermissions(Context context, Uri uri, int returnedFlags) {
         if ((returnedFlags & Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0) {
@@ -48,6 +52,12 @@ final class FileOperations {
 
     static Uri move(Context context, Uri sourceUri, Uri destinationTree,
                     String requestedName) throws Exception {
+        return move(context, sourceUri, destinationTree, requestedName, null);
+    }
+
+    static Uri move(Context context, Uri sourceUri, Uri destinationTree,
+                    String requestedName, TransferListener progress)
+            throws Exception {
         DocumentFile source = document(context, sourceUri);
         DocumentFile destination = DocumentFile.fromTreeUri(context, destinationTree);
         if (destination == null || !destination.isDirectory() || !destination.canWrite()) {
@@ -58,20 +68,52 @@ final class FileOperations {
         String type = source.getType() == null ? "application/octet-stream" : source.getType();
         DocumentFile target = destination.createFile(type, name);
         if (target == null) throw new java.io.IOException("Could not create the destination file");
+        if (sourceUri.equals(target.getUri())) {
+            // Some providers can return the same document when asked to create
+            // a duplicate. Never copy over or delete that original URI.
+            throw new IOException("Destination resolves to the original file; move cancelled");
+        }
+        boolean deletionAttempted = false;
         try {
-            copy(context, sourceUri, target.getUri());
-            // Provider length is optional and is never proof of a successful move.
-            // Reopen both streams after closing the copy and verify every byte.
+            copy(context, sourceUri, target.getUri(), progress);
+            if (progress != null) progress.onVerifying();
+            // A reported length is neither success nor a checksum. Verify the
+            // bytes independently before ever attempting source deletion.
             verifyIdentical(context, sourceUri, target.getUri());
-            if (!source.delete()) throw new java.io.IOException("The copy succeeded but the source could not be deleted");
+            deletionAttempted = true;
+            if (!source.delete()) throw new java.io.IOException(
+                    "The verified destination was retained; source deletion was not confirmed");
             return target.getUri();
         } catch (Exception failure) {
-            target.delete();
+            // Before deletion, the source is intact and a partial target can be
+            // removed. After deletion is attempted, retain the verified target:
+            // providers may report a failed delete after removing the source.
+            if (!deletionAttempted) target.delete();
             throw failure;
         }
     }
 
     static void copy(Context context, Uri source, Uri destination) throws Exception {
+        copy(context, source, destination, null);
+    }
+
+    static void copy(Context context, Uri source, Uri destination,
+                     TransferListener progress) throws Exception {
+        copy(context, source, destination, progress, 0L);
+    }
+
+    static void copy(Context context, Uri source, Uri destination,
+                     TransferListener progress, long knownSourceBytes)
+            throws Exception {
+        long expected = Math.max(0L, knownSourceBytes);
+        if (progress != null && expected == 0L) {
+            DocumentFile metadata = DocumentFile.fromSingleUri(context, source);
+            if (metadata != null) {
+                try { expected = Math.max(0L, metadata.length()); }
+                catch (Exception ignored) { expected = 0L; }
+            }
+        }
+        final long expectedBytes = expected;
         InputStream rawIn = context.getContentResolver().openInputStream(source);
         OutputStream rawOut = context.getContentResolver().openOutputStream(destination, "w");
         if (rawIn == null || rawOut == null) {
@@ -83,13 +125,24 @@ final class FileOperations {
              BufferedOutputStream out = new BufferedOutputStream(rawOut)) {
             byte[] buffer = new byte[1024 * 1024];
             int read;
+            long copied = 0L;
+            long lastFeedbackNs = 0L;
             while ((read = in.read(buffer)) != -1) {
                 if (Thread.currentThread().isInterrupted()) {
                     throw new java.io.InterruptedIOException("File operation cancelled");
                 }
                 out.write(buffer, 0, read);
+                copied += read;
+                long now = System.nanoTime();
+                if (progress != null && (lastFeedbackNs == 0L
+                        || now - lastFeedbackNs >= 200_000_000L
+                        || (expectedBytes > 0L && copied >= expectedBytes))) {
+                    progress.onCopy(copied, expectedBytes);
+                    lastFeedbackNs = now;
+                }
             }
             out.flush();
+            if (progress != null) progress.onCopy(copied, expectedBytes);
         }
     }
 

@@ -26,4 +26,27 @@
     <item name="voicebutton_active_transcription_bar" type="id" />
     <item name="voicebutton_transcription_overall_label" type="id" />
     <item name="voicebutton_transcription_overall_bar" type="id" />
+    <item name="voicebutton_library_shortcut" type="id" />
+    <item name="voicebutton_operation_feedback" type="id" />
+    <item name="voicebutton_operation_progress" type="id" />
+    <item name="voicebutton_library_status" type="id" />
+    <item name="voicebutton_library_primary_action" type="id" />
+    <item name="voicebutton_library_more" type="id" />
+    <item name="voicebutton_library_item_actions" type="id" />
+    <item name="voicebutton_player_title" type="id" />
+    <item name="voicebutton_player_status" type="id" />
+    <item name="voicebutton_player_seek" type="id" />
+    <item name="voicebutton_player_skip_back" type="id" />
+    <item name="voicebutton_player_play" type="id" />
+    <item name="voicebutton_player_skip_forward" type="id" />
+    <item name="voicebutton_player_stop" type="id" />
+    <item name="voicebutton_player_library" type="id" />
+    <item name="voicebutton_library_operation_progress" type="id" />
+    <item name="voicebutton_player_file_action" type="id" />
+    <item name="voicebutton_player_file_progress" type="id" />
+    <item name="voicebutton_library_up" type="id" />
+    <item name="voicebutton_library_path" type="id" />
+    <item name="voicebutton_library_list" type="id" />
+    <item name="voicebutton_library_back" type="id" />
+    <item name="voicebutton_player_waveform_progress" type="id" />
 </resources>

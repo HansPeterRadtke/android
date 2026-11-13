@@ -87,9 +87,12 @@ public final class AudioLibraryActivity extends Activity {
     private DocumentFile pendingMove;
     private TextView pathText;
     private TextView stateText;
+    private android.widget.ProgressBar fileTaskProgress;
     private Button recordingsModeButton;
     private Button filesModeButton;
     private Button upButton;
+    private android.window.OnBackInvokedCallback backCallback;
+    private Button primaryLibraryAction;
     private ListView list;
 
     @Override protected void onCreate(Bundle state) {
@@ -104,6 +107,12 @@ public final class AudioLibraryActivity extends Activity {
         restoreScrollFirst = preferences.getInt(SCROLL_FIRST, 0);
         restoreScrollTop = preferences.getInt(SCROLL_TOP, 0);
         buildScreen();
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            backCallback = this::navigateBack;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    backCallback);
+        }
         restoreCachedItems();
         if (recordingsMode) showRecordings(); else restorePhoneLocation();
     }
@@ -117,7 +126,16 @@ public final class AudioLibraryActivity extends Activity {
         if (recordingsMode) showRecordings(); else refreshFiles();
     }
 
+    @Override protected void onPause() {
+        saveLibraryState();
+        super.onPause();
+    }
+
     @Override protected void onDestroy() {
+        if (android.os.Build.VERSION.SDK_INT >= 33 && backCallback != null) {
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
+            backCallback = null;
+        }
         playbackGeneration.incrementAndGet();
         playbackPreparation.shutdownNow();
         worker.shutdownNow();
@@ -133,6 +151,7 @@ public final class AudioLibraryActivity extends Activity {
 
         LinearLayout toolbar = row();
         Button back = VoiceButtonMaterial.toolbarButton(this, "Back");
+        back.setId(R.id.voicebutton_library_back);
         back.setOnClickListener(v -> navigateBack());
         Button home = VoiceButtonMaterial.toolbarButton(this, "Home");
         home.setOnClickListener(v -> home());
@@ -145,9 +164,18 @@ public final class AudioLibraryActivity extends Activity {
         root.addView(title);
         if (getResources().getConfiguration().screenHeightDp < 520) title.setVisibility(View.GONE);
         stateText = AndroidUi.small(this, "Choose audio to play");
-        AndroidUi.stableLine(this, stateText, 30);
+        stateText.setId(R.id.voicebutton_library_status);
+        AndroidUi.readableLine(this, stateText, 0, 4);
+        stateText.setContentDescription("Library status");
+        stateText.setMinHeight(AndroidUi.dp(this, 28));
         root.addView(stateText);
-        if (getResources().getConfiguration().screenHeightDp < 520) stateText.setVisibility(View.GONE);
+        fileTaskProgress = new android.widget.ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        fileTaskProgress.setId(R.id.voicebutton_library_operation_progress);
+        fileTaskProgress.setMax(1000);
+        fileTaskProgress.setVisibility(View.GONE);
+        root.addView(fileTaskProgress, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8)));
 
         LinearLayout modes = row();
         recordingsModeButton = AndroidUi.modeButton(this, "App recordings", true);
@@ -163,8 +191,10 @@ public final class AudioLibraryActivity extends Activity {
 
         LinearLayout navigation = row();
         upButton = VoiceButtonMaterial.toolbarButton(this, "Up");
+        upButton.setId(R.id.voicebutton_library_up);
         upButton.setOnClickListener(v -> up());
         pathText = AndroidUi.body(this, "App recording folders");
+        pathText.setId(R.id.voicebutton_library_path);
         pathText.setSingleLine(false);
         pathText.setEllipsize(null);
         pathText.setMinHeight(AndroidUi.dp(this, 48));
@@ -176,6 +206,7 @@ public final class AudioLibraryActivity extends Activity {
         root.addView(navigation);
 
         list = new ListView(this);
+        list.setId(R.id.voicebutton_library_list);
         list.setAdapter(adapter);
         list.setDividerHeight(1);
         list.setOnItemClickListener((parent, view, position, id) ->
@@ -186,35 +217,61 @@ public final class AudioLibraryActivity extends Activity {
         });
         list.setOnScrollListener(new AbsListView.OnScrollListener() {
             @Override public void onScrollStateChanged(AbsListView view, int state) {
-                saveLibraryState();
+                if (state == AbsListView.OnScrollListener.SCROLL_STATE_IDLE) {
+                    saveLibraryState();
+                }
             }
             @Override public void onScroll(AbsListView view, int first,
                                            int visible, int total) {
-                if (visible > 0) saveLibraryState();
+                // Scrolling must not serialize JSON and write preferences every
+                // animation frame. Persist only after scrolling stops/onPause.
+                if (visible > 0) {
+                    restoreScrollFirst = first;
+                    View firstRow = list.getChildAt(0);
+                    restoreScrollTop = firstRow == null ? 0 : firstRow.getTop();
+                }
             }
         });
         root.addView(list, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
+        LinearLayout libraryActions = row();
+        primaryLibraryAction = VoiceButtonMaterial.secondaryButton(this, "New folder");
+        primaryLibraryAction.setId(R.id.voicebutton_library_primary_action);
+        primaryLibraryAction.setOnClickListener(v -> {
+            if (recordingsMode) {
+                if (store == null) {
+                    stateText.setText("Folders are still loading. Retry when ready.");
+                } else {
+                    createFolder(appFolderFilter == null ? "" : appFolderFilter.id);
+                }
+            } else {
+                chooseRoot();
+            }
+        });
+        libraryActions.addView(primaryLibraryAction, half());
         Button more = VoiceButtonMaterial.toolbarButton(this, "More");
+        more.setId(R.id.voicebutton_library_more);
         more.setOnClickListener(v -> showLibraryMenu());
-        root.addView(more, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 48)));
+        libraryActions.addView(more, half());
+        root.addView(libraryActions);
+        updateModeButtons();
         setContentView(root);
     }
 
     private void showLibraryMenu() {
         String[] actions = recordingsMode
-                ? new String[]{"Manage app folders", "Choose phone folder",
-                        "Open any phone file", "About library"}
-                : new String[]{"Choose phone folder", "Open any phone file",
-                        "App recordings", "About library"};
-        new MaterialAlertDialogBuilder(this).setTitle("More")
+                ? new String[]{"Manage current app folder", "Create root folder",
+                        "Choose phone folder", "Open any phone file", "Library help"}
+                : new String[]{"Choose a different phone folder", "Open any phone file",
+                        "App recordings", "Library help"};
+        new MaterialAlertDialogBuilder(this).setTitle("Library options")
                 .setItems(actions, (dialog, which) -> {
                     if (recordingsMode) {
                         if (which == 0) manageAppFolders();
-                        else if (which == 1) chooseRoot();
-                        else if (which == 2) openAnyFile();
+                        else if (which == 1) createFolder("");
+                        else if (which == 2) chooseRoot();
+                        else if (which == 3) openAnyFile();
                         else showLibraryAbout();
                     } else {
                         if (which == 0) chooseRoot();
@@ -229,12 +286,16 @@ public final class AudioLibraryActivity extends Activity {
 
     private void showLibraryAbout() {
         new MaterialAlertDialogBuilder(this).setTitle("Library")
-                .setMessage("Tap an item to open it. Long-press an item for rename, move, or delete actions. Folder management and phone-file import stay in More so navigation remains clear.")
+                .setMessage("Tap a recording or folder to open it. Use its Actions button for rename, move or deletion. New folder creates a folder here. Switch between App recordings and Phone files at the top; use the file picker to select another phone storage folder.")
                 .setPositiveButton("Back", null).show();
     }
 
     private void showRecordings() {
+        // Any deliberate folder/mode change invalidates an earlier asynchronous
+        // playback preparation, preventing a late unexpected Player launch.
+        playbackGeneration.incrementAndGet();
         recordingsMode = true;
+        stateText.setText("Loading recording folders…");
         currentDirectory = null;
         directoryStack.clear();
         directoryNameStack.clear();
@@ -259,7 +320,8 @@ public final class AudioLibraryActivity extends Activity {
                     }
                 }
                 final ReliableSessionStore.Folder currentFolder = current;
-                appFolderFilter = currentFolder;
+                // Background lookups never mutate the active view. Only the
+                // generation-checked main-thread callback may navigate.
                 List<ReliableSessionManifest> manifests = store.list();
                 String parentId = currentFolder == null ? "" : currentFolder.id;
                 List<ReliableSessionStore.Folder> visibleFolders =
@@ -287,7 +349,7 @@ public final class AudioLibraryActivity extends Activity {
                     }
                 }
                 runOnUiThread(() -> {
-                    if (generation != loadGeneration.get()) return;
+                    if (generation != loadGeneration.get() || !recordingsMode) return;
                     appFolderFilter = currentFolder;
                     upButton.setEnabled(currentFolder != null);
                     pathText.setText(currentFolder == null
@@ -302,12 +364,16 @@ public final class AudioLibraryActivity extends Activity {
                         if (item.appFolder != null) childCount++;
                         else if (item.recording != null) recordingCount++;
                     }
-                    stateText.setText(childCount + " folders · "
-                            + recordingCount + " recordings");
+                    if (items.isEmpty()) {
+                        stateText.setText("This folder is empty · use New folder or choose another folder.");
+                    } else {
+                        stateText.setText(childCount + " folders · "
+                                + recordingCount + " recordings");
+                    }
                 });
             } catch (Exception failure) {
                 runOnUiThread(() -> {
-                    if (generation == loadGeneration.get()) {
+                    if (generation == loadGeneration.get() && recordingsMode) {
                         stateText.setText("Could not load recordings: "
                                 + failure.getMessage());
                     }
@@ -317,6 +383,8 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     private void showPhoneRoot() {
+        playbackGeneration.incrementAndGet();
+        loadGeneration.incrementAndGet(); // Invalidate App recordings callbacks.
         recordingsMode = false; updateModeButtons();
         String raw = preferences.getString(ROOT_URI, "");
         if (raw == null || raw.isEmpty()) {
@@ -336,6 +404,7 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     private void restorePhoneLocation() {
+        loadGeneration.incrementAndGet();
         recordingsMode = false; updateModeButtons();
         directoryStack.clear(); directoryNameStack.clear();
         try {
@@ -371,7 +440,7 @@ public final class AudioLibraryActivity extends Activity {
         pathText.setText(currentDirectoryName);
         upButton.setEnabled(directoryStack.size() > 1);
         stateText.setText(adapter.getCount() > 0
-                ? "Refreshing folder…" : "Reading folder…");
+                ? "Refreshing phone folder…" : "Reading phone folder…");
         saveLibraryState();
         int generation = loadGeneration.incrementAndGet();
         worker.execute(() -> {
@@ -390,12 +459,17 @@ public final class AudioLibraryActivity extends Activity {
                     if (generation != loadGeneration.get()) return;
                     adapter.replace(items); restoreListPosition();
                     saveVisibleCache(items); saveLibraryState();
-                    stateText.setText(items.size() + " items");
+                    stateText.setText(items.isEmpty()
+                            ? "This phone folder is empty · choose another folder."
+                            : items.size() + " items");
                 });
             } catch (Exception failure) {
                 runOnUiThread(() -> {
-                    if (generation == loadGeneration.get()) stateText.setText(
-                            "Could not read folder: " + failure.getMessage());
+                    if (generation == loadGeneration.get() && !recordingsMode) {
+                        stateText.setText(
+                                "Could not read phone folder: " + failure.getMessage()
+                                + " · choose another folder from the bottom control.");
+                    }
                 });
             }
         });
@@ -408,6 +482,7 @@ public final class AudioLibraryActivity extends Activity {
             return;
         }
         if (item.directory) {
+            playbackGeneration.incrementAndGet();
             currentDirectory = item.document;
             currentDirectoryName = item.title;
             directoryStack.add(item.document.getUri());
@@ -428,6 +503,7 @@ public final class AudioLibraryActivity extends Activity {
             }
             return;
         }
+        playbackGeneration.incrementAndGet();
         launchPlayer(item, item.source);
     }
 
@@ -435,7 +511,8 @@ public final class AudioLibraryActivity extends Activity {
         ReliableSessionManifest manifest = item.recording;
         if (manifest == null) return;
         int generation = playbackGeneration.incrementAndGet();
-        stateText.setText("Preparing " + item.title + " for playback…");
+        showFileOperation("Preparing " + item.title + " for playback…",
+                0L, 0L, true);
         Intent service = new Intent(this, RecordingService.class)
                 .setAction(RecordingService.ACTION_PREPARE_PLAYBACK)
                 .putExtra(RecordingService.EXTRA_SESSION_ID,
@@ -443,8 +520,8 @@ public final class AudioLibraryActivity extends Activity {
         try {
             ContextCompat.startForegroundService(this, service);
         } catch (RuntimeException failure) {
-            stateText.setText("Could not start playback preparation: "
-                    + String.valueOf(failure.getMessage()));
+            showFileOperation("Could not start playback preparation: "
+                    + String.valueOf(failure.getMessage()), 0L, 0L, false);
             return;
         }
         playbackPreparation.execute(() -> {
@@ -466,7 +543,8 @@ public final class AudioLibraryActivity extends Activity {
                     runOnUiThread(() -> {
                         if (generation != playbackGeneration.get()
                                 || isFinishing() || isDestroyed()) return;
-                        stateText.setText("Opening " + item.title);
+                        showFileOperation("Opening " + item.title,
+                                0L, 0L, false);
                         launchPlayer(item, source);
                     });
                     return;
@@ -481,8 +559,8 @@ public final class AudioLibraryActivity extends Activity {
                         runOnUiThread(() -> {
                             if (generation != playbackGeneration.get()
                                     || isFinishing() || isDestroyed()) return;
-                            stateText.setText("Could not prepare playback: "
-                                    + exact);
+                            showFileOperation("Could not prepare playback: "
+                                    + exact, 0L, 0L, false);
                         });
                         return;
                     }
@@ -497,7 +575,9 @@ public final class AudioLibraryActivity extends Activity {
             runOnUiThread(() -> {
                 if (generation == playbackGeneration.get()
                         && !isFinishing() && !isDestroyed()) {
-                    stateText.setText("Playback preparation did not complete; local durable audio remains preserved");
+                    showFileOperation("Playback preparation did not complete; "
+                            + "local durable audio remains preserved",
+                            0L, 0L, false);
                 }
             });
         });
@@ -551,9 +631,32 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     private void manage(LibraryItem item) {
-        if (item.appFolder != null) renameFolder(item.appFolder);
+        if (item.appFolder != null) manageAppFolderItem(item.appFolder);
         else if (item.recording != null) manageRecording(item);
         else if (item.document != null) manageDocument(item);
+    }
+
+    private void manageAppFolderItem(ReliableSessionStore.Folder folder) {
+        String[] actions = {
+                "Open this folder", "Create subfolder", "Rename folder", "Move folder"
+        };
+        new MaterialAlertDialogBuilder(this).setTitle(folder.path)
+                .setItems(actions, (dialog, which) -> {
+                    if (which == 0) {
+                        appFolderFilter = folder;
+                        restoreScrollFirst = 0;
+                        restoreScrollTop = 0;
+                        showRecordings();
+                    } else if (which == 1) {
+                        // A cancelled dialog must never navigate or change
+                        // the selected folder behind the user's back.
+                        createFolderAt(folder.id, folder.path);
+                    } else if (which == 2) {
+                        renameFolder(folder);
+                    } else {
+                        moveFolder(folder);
+                    }
+                }).setNegativeButton("Cancel", null).show();
     }
 
     private void manageRecording(LibraryItem item) {
@@ -566,16 +669,106 @@ public final class AudioLibraryActivity extends Activity {
         }).setNegativeButton("Back", null).show();
     }
 
+    private interface NameOperation<T> {
+        T apply(String newName) throws Exception;
+    }
+
+    private <T> void editName(String title, String initialName,
+                              String pendingMessage, NameOperation<T> action,
+                              java.util.function.Consumer<T> onSuccess) {
+        EditText input = nameInput(initialName);
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle(title)
+                .setView(input)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Save", null)
+                .create();
+        dialog.setOnShowListener(ignored ->
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                        .setOnClickListener(view -> {
+                            String name = input.getText().toString().trim();
+                            if (name.isEmpty()) {
+                                input.setError("Enter a name");
+                                return;
+                            }
+                            dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                                    .setEnabled(false);
+                            showFileOperation(pendingMessage, 0L, 0L, true);
+                            worker.execute(() -> {
+                                try {
+                                    T result = action.apply(name);
+                                    runOnUiThread(() -> {
+                                        showFileOperation("Saved " + name, 0L, 0L, false);
+                                        dialog.dismiss();
+                                        onSuccess.accept(result);
+                                    });
+                                } catch (Exception failure) {
+                                    runOnUiThread(() -> {
+                                        showFileOperation("Cannot save: "
+                                                + failure.getMessage(),
+                                                0L, 0L, false);
+                                        input.setError(String.valueOf(failure.getMessage()));
+                                        dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                                                .setEnabled(true);
+                                    });
+                                }
+                            });
+                        }));
+        dialog.show();
+    }
+
+    private void showFileOperation(String message, long completed,
+                                   long total, boolean active) {
+        stateText.setText(message);
+        if (!active) {
+            fileTaskProgress.setVisibility(View.GONE);
+            return;
+        }
+        if (total > 0L) {
+            int permille = (int)Math.max(0L, Math.min(1000L,
+                    1000L * Math.min(total, completed) / total));
+            fileTaskProgress.setIndeterminate(false);
+            fileTaskProgress.setProgress(permille);
+        } else {
+            fileTaskProgress.setIndeterminate(true);
+        }
+        fileTaskProgress.setContentDescription(message);
+        fileTaskProgress.setVisibility(View.VISIBLE);
+    }
+
+    private FileOperations.TransferListener fileTransferProgress(String fileName) {
+        return new FileOperations.TransferListener() {
+            @Override public void onCopy(long copiedBytes, long expectedBytes) {
+                runOnUiThread(() -> {
+                    if (!isFinishing() && !isDestroyed()) {
+                        showFileOperation("Copying " + fileName,
+                                copiedBytes, expectedBytes, true);
+                    }
+                });
+            }
+
+            @Override public void onVerifying() {
+                runOnUiThread(() -> {
+                    if (!isFinishing() && !isDestroyed()) {
+                        showFileOperation("Verifying copied file content…",
+                                0L, 0L, true);
+                    }
+                });
+            }
+        };
+    }
+
     private void renameRecording(LibraryItem item) {
-        EditText input = nameInput(item.title);
-        new MaterialAlertDialogBuilder(this).setTitle("Rename recording").setView(input)
-                .setNegativeButton("Back", null).setPositiveButton("Rename", (d,w) -> worker.execute(() -> {
-                    try { store.renameSession(item.recording.sessionId, input.getText().toString()); runOnUiThread(this::showRecordings); }
-                    catch (Exception failure) { error(failure); }
-                })).show();
+        if (item == null || item.recording == null) return;
+        editName("Rename recording",
+                RecordingUi.title(item.recording),
+                "Renaming recording…",
+                name -> store.renameSession(item.recording.sessionId, name),
+                changed -> showRecordings());
     }
 
     private void moveRecording(LibraryItem item) {
+        showFileOperation("Loading available destination folders…", 0L, 0L, true);
         worker.execute(() -> {
             try {
                 List<ReliableSessionStore.Folder> folders = store.listFolders();
@@ -583,19 +776,45 @@ public final class AudioLibraryActivity extends Activity {
                 for (int i = 0; i < names.length; i++) {
                     names[i] = folders.get(i).path;
                 }
-                runOnUiThread(() -> new MaterialAlertDialogBuilder(this).setTitle("Move recording").setItems(names, (d,w) -> worker.execute(() -> {
-                    try { store.moveSession(item.recording.sessionId, folders.get(w).id); runOnUiThread(this::showRecordings); }
-                    catch (Exception failure) { error(failure); }
-                })).setNegativeButton("Back", null).show());
+                runOnUiThread(() -> {
+                    showFileOperation("Choose destination for " + item.title,
+                            0L, 0L, false);
+                    new MaterialAlertDialogBuilder(this).setTitle("Move recording")
+                            .setItems(names, (d,w) -> {
+                                if (folders.get(w).id.equals(item.recording.folderId)) {
+                                    stateText.setText("Recording is already in this folder.");
+                                    return;
+                                }
+                                showFileOperation("Moving recording…", 0L, 0L, true);
+                                worker.execute(() -> {
+                                    try {
+                                        store.moveSession(item.recording.sessionId,
+                                                folders.get(w).id);
+                                        runOnUiThread(() -> {
+                                            showFileOperation("Recording moved", 0L, 0L, false);
+                                            showRecordings();
+                                        });
+                                    } catch (Exception failure) { error(failure); }
+                                });
+                            }).setNegativeButton("Cancel", null).show();
+                });
             } catch (Exception failure) { error(failure); }
         });
     }
 
     private void confirmDeleteRecording(LibraryItem item) {
         if (item == null || item.recording == null) return;
+        if (!item.recording.recordingFinished || !item.recording.remoteCommitted) {
+            new MaterialAlertDialogBuilder(this)
+                    .setTitle("Phone copy cannot be deleted yet")
+                    .setMessage("Finish recording and wait for Jetson to confirm the "
+                            + "complete audio backup. This phone copy is still required.")
+                    .setPositiveButton("Back", null).show();
+            return;
+        }
         new MaterialAlertDialogBuilder(this)
-                .setTitle("Delete local recording?")
-                .setMessage("This removes the phone copy only. The completed Jetson recording and transcript remain on the server.")
+                .setTitle("Delete this phone copy?")
+                .setMessage("Jetson has confirmed a completed backup. Only this phone copy will be deleted; the server recording and transcript remain available.")
                 .setNegativeButton("Back", null)
                 .setPositiveButton("Delete local copy", (dialog, which) -> worker.execute(() -> {
                     try {
@@ -620,10 +839,11 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     private void renameDocument(LibraryItem item) {
-        EditText input=nameInput(item.title);
-        new MaterialAlertDialogBuilder(this).setTitle(item.directory?"Rename folder":"Rename file").setView(input).setNegativeButton("Back",null).setPositiveButton("Rename",(d,w)->worker.execute(()->{
-            try{FileOperations.rename(this,item.document.getUri(),input.getText().toString());runOnUiThread(this::refreshFiles);}catch(Exception failure){error(failure);}
-        })).show();
+        if (item.document == null) return;
+        editName(item.directory ? "Rename folder" : "Rename file",
+                item.title, "Renaming phone file…",
+                name -> FileOperations.rename(this, item.document.getUri(), name),
+                ignored -> refreshFiles());
     }
 
     private void confirmDelete(LibraryItem item) {
@@ -633,7 +853,10 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     private void manageAppFolders() {
-        if (store == null) return;
+        if (store == null) {
+            stateText.setText("Recording folders are still loading.");
+            return;
+        }
         ReliableSessionStore.Folder current = appFolderFilter;
         String[] actions = current == null
                 ? new String[]{"Create root folder"}
@@ -656,50 +879,33 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     private void createFolder(String parentFolderId) {
-        EditText input = nameInput("");
         String location = parentFolderId == null || parentFolderId.isEmpty()
-                ? "Recordings" : appFolderFilter.path;
-        new MaterialAlertDialogBuilder(this)
-                .setTitle("Create folder in " + location)
-                .setView(input)
-                .setNegativeButton("Back", null)
-                .setPositiveButton("Create", (dialog, which) ->
-                        worker.execute(() -> {
-                            try {
-                                ReliableSessionStore.Folder created =
-                                        store.createFolder(
-                                                input.getText().toString(),
-                                                parentFolderId);
-                                runOnUiThread(() -> {
-                                    appFolderFilter = created;
-                                    showRecordings();
-                                });
-                            } catch (Exception failure) {
-                                error(failure);
-                            }
-                        })).show();
+                ? "Recordings" : appFolderFilter == null
+                        ? "Recordings" : appFolderFilter.path;
+        createFolderAt(parentFolderId, location);
+    }
+
+    private void createFolderAt(String parentFolderId, String location) {
+        if (store == null) {
+            stateText.setText("Recording folders are still loading.");
+            return;
+        }
+        editName("Create folder in " + location, "",
+                "Creating recording folder…",
+                name -> store.createFolder(name, parentFolderId),
+                created -> {
+                    appFolderFilter = created;
+                    showRecordings();
+                });
     }
 
     private void renameFolder(ReliableSessionStore.Folder folder) {
-        EditText input = nameInput(folder.name);
-        new MaterialAlertDialogBuilder(this)
-                .setTitle("Rename folder")
-                .setView(input)
-                .setNegativeButton("Back", null)
-                .setPositiveButton("Rename", (dialog, which) ->
-                        worker.execute(() -> {
-                            try {
-                                ReliableSessionStore.Folder renamed =
-                                        store.renameFolder(folder.id,
-                                                input.getText().toString());
-                                runOnUiThread(() -> {
-                                    appFolderFilter = renamed;
-                                    showRecordings();
-                                });
-                            } catch (Exception failure) {
-                                error(failure);
-                            }
-                        })).show();
+        editName("Rename folder", folder.name, "Renaming folder…",
+                name -> store.renameFolder(folder.id, name),
+                renamed -> {
+                    appFolderFilter = renamed;
+                    showRecordings();
+                });
     }
 
     private void moveFolder(ReliableSessionStore.Folder folder) {
@@ -751,43 +957,117 @@ public final class AudioLibraryActivity extends Activity {
         Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);intent.setType("*/*");intent.addCategory(Intent.CATEGORY_OPENABLE);intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);startActivityForResult(intent,REQUEST_FILE);
     }
 
-    @Override protected void onActivityResult(int requestCode,int resultCode,Intent data){super.onActivityResult(requestCode,resultCode,data);if(resultCode!=RESULT_OK||data==null||data.getData()==null)return;Uri uri=data.getData();FileOperations.persistPermissions(this, uri, data.getFlags());
+    @Override protected void onActivityResult(int requestCode,int resultCode,Intent data){
+        super.onActivityResult(requestCode,resultCode,data);
+        if(resultCode!=RESULT_OK||data==null||data.getData()==null){
+            if(requestCode==REQUEST_MOVE)pendingMove=null;
+            return;
+        }
+        Uri uri=data.getData();
+        FileOperations.persistPermissions(this, uri, data.getFlags());
         if(requestCode==REQUEST_ROOT){preferences.edit().putString(ROOT_URI,uri.toString()).apply();showPhoneRoot();}
         else if(requestCode==REQUEST_FILE){try{DocumentFile file=FileOperations.document(this,uri);LibraryItem item=LibraryItem.document(file,null);open(item,0);}catch(Exception failure){error(failure);}}
-        else if(requestCode==REQUEST_MOVE&&pendingMove!=null){DocumentFile moving=pendingMove;pendingMove=null;worker.execute(()->{try{FileOperations.move(this,moving.getUri(),uri,moving.getName());runOnUiThread(this::refreshFiles);}catch(Exception failure){error(failure);}});}
+        else if(requestCode==REQUEST_MOVE&&pendingMove!=null){
+            DocumentFile moving=pendingMove;pendingMove=null;
+            showFileOperation("Moving " + moving.getName() + "…", 0L, 0L, true);
+            worker.execute(()->{
+                try {
+                    FileOperations.move(this,moving.getUri(),uri,moving.getName(),
+                            fileTransferProgress(moving.getName()));
+                    runOnUiThread(()->{
+                        showFileOperation("File moved and verified", 0L, 0L, false);
+                        refreshFiles();
+                    });
+                } catch(Exception failure) {error(failure);}
+            });
+        }
     }
 
     private void up() {
         if (recordingsMode) {
-            if (appFolderFilter != null) {
+            ReliableSessionStore.Folder current = appFolderFilter;
+            if (current == null) {
+                finish();
+                return;
+            }
+            String parentId = current.parentId;
+            showFileOperation("Opening parent recording folder…",
+                    0L, 0L, true);
+            int generation = loadGeneration.incrementAndGet();
+            worker.execute(() -> {
+                ReliableSessionStore.Folder parent = null;
                 try {
-                    String parentId = appFolderFilter.parentId;
-                    appFolderFilter = parentId == null || parentId.isEmpty()
-                            ? null : store.getFolder(parentId);
+                    if (parentId != null && !parentId.isEmpty()) {
+                        parent = store.getFolder(parentId);
+                    }
                 } catch (Exception ignored) {
-                    appFolderFilter = null;
+                    // An unreadable old parent must never trap navigation.
+                    parent = null;
                 }
-                showRecordings();
-            } else finish();
+                final ReliableSessionStore.Folder resolved = parent;
+                runOnUiThread(() -> {
+                    if (generation != loadGeneration.get()
+                            || !recordingsMode || isFinishing()) return;
+                    appFolderFilter = resolved;
+                    showFileOperation("Opening recording folder…", 0L, 0L, false);
+                    showRecordings();
+                });
+            });
             return;
         }
-        if(directoryStack.size()<=1)return;
-        directoryStack.remove(directoryStack.size()-1);
-        if (!directoryNameStack.isEmpty())
-            directoryNameStack.remove(directoryNameStack.size()-1);
-        Uri uri=directoryStack.get(directoryStack.size()-1);
-        currentDirectory=DocumentFile.fromSingleUri(this,uri);
-        if(currentDirectory==null)currentDirectory=DocumentFile.fromTreeUri(this,uri);
+        if (directoryStack.size() <= 1) return;
+        playbackGeneration.incrementAndGet();
+        directoryStack.remove(directoryStack.size() - 1);
+        if (!directoryNameStack.isEmpty()) {
+            directoryNameStack.remove(directoryNameStack.size() - 1);
+        }
+        Uri uri = directoryStack.get(directoryStack.size() - 1);
+        currentDirectory = DocumentFile.fromSingleUri(this, uri);
+        if (currentDirectory == null) currentDirectory = DocumentFile.fromTreeUri(this, uri);
         currentDirectoryName = directoryNameStack.isEmpty()
-                ? "Phone files" : directoryNameStack.get(directoryNameStack.size()-1);
-        restoreScrollFirst = 0; restoreScrollTop = 0;
-        saveLibraryState(); refreshFiles();
+                ? "Phone files" : directoryNameStack.get(directoryNameStack.size() - 1);
+        restoreScrollFirst = 0;
+        restoreScrollTop = 0;
+        saveLibraryState();
+        refreshFiles();
     }
-    private void navigateBack(){if(!recordingsMode&&directoryStack.size()>1)up();else finish();}
+    private void navigateBack() {
+        if (recordingsMode && appFolderFilter != null) {
+            up();
+        } else if (!recordingsMode && directoryStack.size() > 1) {
+            up();
+        } else {
+            finish();
+        }
+    }
+
+    @Override public void onBackPressed() {
+        navigateBack();
+    }
     private void home(){Intent intent=new Intent(this,MainActivity.class);intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP|Intent.FLAG_ACTIVITY_SINGLE_TOP);startActivity(intent);}
-    private void updateModeButtons(){recordingsModeButton.setText(recordingsMode?"App recordings ✓":"App recordings");filesModeButton.setText(recordingsMode?"Phone files":"Phone files ✓");}
+    private void updateModeButtons() {
+        recordingsModeButton.setText(recordingsMode
+                ? "App recordings ✓" : "App recordings");
+        filesModeButton.setText(recordingsMode
+                ? "Phone files" : "Phone files ✓");
+        if (primaryLibraryAction != null) {
+            primaryLibraryAction.setText(recordingsMode
+                    ? "New folder" : "Choose folder");
+            primaryLibraryAction.setContentDescription(recordingsMode
+                    ? "Create an app recording folder here"
+                    : "Choose a phone storage folder");
+        }
+    }
     private EditText nameInput(String value){EditText input=new TextInputEditText(this);input.setSingleLine(true);input.setText(value);input.selectAll();return input;}
-    private void error(Exception failure){runOnUiThread(()->Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show());}
+    private void error(Exception failure) {
+        runOnUiThread(() -> {
+            String message = failure == null || failure.getMessage() == null
+                    ? "Unknown file operation error" : failure.getMessage();
+            showFileOperation("File operation failed: " + message,
+                    0L, 0L, false);
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+        });
+    }
 
     private void saveLibraryState() {
         if (preferences == null || list == null) return;
@@ -814,19 +1094,40 @@ public final class AudioLibraryActivity extends Activity {
     }
 
     private void saveVisibleCache(List<LibraryItem> items) {
+        // The recording folder hierarchy is reloaded from the authoritative
+        // local database. Only phone-provider lists use this preview cache.
+        if (recordingsMode || preferences == null) return;
+        final int generation = loadGeneration.get();
+        final String directoryUri = currentDirectory == null
+                ? "" : currentDirectory.getUri().toString();
+        final ArrayList<LibraryItem> snapshot = new ArrayList<>(items);
+        // A large phone folder can contain a thousand cached rows. Never
+        // serialize their JSON or query DocumentFile on the main/UI thread.
         try {
-            JSONObject root = new JSONObject();
-            root.put("schema", 2);
-            root.put("recordings_mode", recordingsMode);
-            root.put("app_folder_id", appFolderFilter == null ? "" : appFolderFilter.id);
-            root.put("directory_uri", currentDirectory == null
-                    ? "" : currentDirectory.getUri().toString());
-            JSONArray array = new JSONArray();
-            int limit = Math.min(items.size(), 1000);
-            for (int i = 0; i < limit; i++) array.put(items.get(i).toJson());
-            root.put("items", array);
-            preferences.edit().putString(CACHE, root.toString()).apply();
-        } catch (Exception ignored) {}
+            worker.execute(() -> {
+                try {
+                    JSONObject root = new JSONObject();
+                    root.put("schema", 2);
+                    root.put("recordings_mode", false);
+                    root.put("app_folder_id", "");
+                    root.put("directory_uri", directoryUri);
+                    JSONArray array = new JSONArray();
+                    int limit = Math.min(snapshot.size(), 1000);
+                    for (int i = 0; i < limit; i++) {
+                        if (generation != loadGeneration.get()) return;
+                        array.put(snapshot.get(i).toJson());
+                    }
+                    root.put("items", array);
+                    if (generation == loadGeneration.get() && !recordingsMode) {
+                        preferences.edit().putString(CACHE, root.toString()).apply();
+                    }
+                } catch (Exception failure) {
+                    // Cache failure must never obscure the live folder contents.
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // Activity closed; no new caching work is admitted.
+        }
     }
 
     private void restoreCachedItems() {
@@ -890,9 +1191,10 @@ public final class AudioLibraryActivity extends Activity {
             PlayerSource source = playable
                     ? PlayerSource.recording(file, fileName, file.length(),
                     manifest.sessionId, manifest.folderId) : null;
-            String detail = RecordingUi.title(manifest) + " · "
-                    + RecordingUi.humanState(manifest) + " · "
-                    + RecordingUi.formatBytes(RecordingUi.recordingBytes(manifest));
+            String detail = RecordingUi.humanState(manifest) + " · "
+                    + RecordingUi.formatBytes(RecordingUi.recordingBytes(manifest))
+                    + (manifest.remoteCommitted ? " · backup confirmed"
+                            : " · phone copy required");
             return new LibraryItem(fileName,detail,false,playable,null,manifest,null,source);
         }
         static LibraryItem document(DocumentFile file,Uri parent){
@@ -974,13 +1276,19 @@ public final class AudioLibraryActivity extends Activity {
             } else {
                 LinearLayout row = new LinearLayout(AudioLibraryActivity.this);
                 row.setOrientation(LinearLayout.VERTICAL);
-                row.setPadding(AndroidUi.dp(AudioLibraryActivity.this, 12),
-                        AndroidUi.dp(AudioLibraryActivity.this, 9),
-                        AndroidUi.dp(AudioLibraryActivity.this, 12),
-                        AndroidUi.dp(AudioLibraryActivity.this, 9));
+                row.setPadding(AndroidUi.dp(AudioLibraryActivity.this, 8),
+                        AndroidUi.dp(AudioLibraryActivity.this, 6),
+                        AndroidUi.dp(AudioLibraryActivity.this, 6),
+                        AndroidUi.dp(AudioLibraryActivity.this, 6));
                 row.setBackgroundColor(Color.WHITE);
+                LinearLayout contents = new LinearLayout(AudioLibraryActivity.this);
+                contents.setOrientation(LinearLayout.HORIZONTAL);
+                contents.setGravity(Gravity.CENTER_VERTICAL);
+                LinearLayout labels = new LinearLayout(AudioLibraryActivity.this);
+                labels.setOrientation(LinearLayout.VERTICAL);
+
                 TextView name = AndroidUi.text(AudioLibraryActivity.this,
-                        "", 16, false, AndroidUi.INK);
+                        "", 16, true, AndroidUi.INK);
                 name.setSingleLine(false);
                 name.setHorizontallyScrolling(false);
                 name.setEllipsize(null);
@@ -989,28 +1297,33 @@ public final class AudioLibraryActivity extends Activity {
                 detail.setSingleLine(false);
                 detail.setHorizontallyScrolling(false);
                 detail.setEllipsize(null);
-                row.addView(name);
-                row.addView(detail);
-                holder = new RowHolder(row, name, detail);
+                labels.addView(name);
+                labels.addView(detail);
+                contents.addView(labels, new LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                Button actions = VoiceButtonMaterial.toolbarButton(
+                        AudioLibraryActivity.this, "Actions");
+                actions.setId(R.id.voicebutton_library_item_actions);
+                actions.setMinHeight(AndroidUi.dp(AudioLibraryActivity.this, 48));
+                actions.setMinWidth(AndroidUi.dp(AudioLibraryActivity.this, 72));
+                actions.setFocusable(false);
+                LinearLayout.LayoutParams actionParams =
+                        new LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT);
+                actionParams.setMarginStart(AndroidUi.dp(AudioLibraryActivity.this, 7));
+                contents.addView(actions, actionParams);
+                row.addView(contents);
+                holder = new RowHolder(row, name, detail, actions);
                 row.setTag(holder);
                 convert = row;
             }
             LibraryItem item = items.get(position);
-            String completeName = (item.directory ? "Folder · " : "") + item.title;
-            FileNameParts parts = FileNameParts.split(completeName, 44);
-            SpannableStringBuilder styledName = new SpannableStringBuilder(
-                    parts.complete());
-            int headEnd = parts.head.length();
-            if (headEnd > 0) {
-                styledName.setSpan(new StyleSpan(Typeface.BOLD), 0, headEnd,
-                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            }
-            if (headEnd < styledName.length()) {
-                styledName.setSpan(new RelativeSizeSpan(0.84f), headEnd,
-                        styledName.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            }
-            holder.name.setText(styledName);
+            holder.name.setText((item.directory ? "Folder · " : "") + item.title);
             holder.detail.setText(item.detail);
+            holder.actions.setContentDescription("Actions for " + item.title);
+            holder.actions.setOnClickListener(v -> manage(item));
             return convert;
         }
     }
@@ -1019,10 +1332,13 @@ public final class AudioLibraryActivity extends Activity {
         final LinearLayout row;
         final TextView name;
         final TextView detail;
-        RowHolder(LinearLayout row, TextView name, TextView detail) {
+        final Button actions;
+        RowHolder(LinearLayout row, TextView name, TextView detail,
+                  Button actions) {
             this.row = row;
             this.name = name;
             this.detail = detail;
+            this.actions = actions;
         }
     }
 

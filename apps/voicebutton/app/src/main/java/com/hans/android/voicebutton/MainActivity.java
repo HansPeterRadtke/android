@@ -115,6 +115,9 @@ public final class MainActivity extends Activity {
     private TextView statusDetail;
     private TextView serverHealthText;
     private TextView primaryDisabledReasonText;
+    private TextView backgroundActionText;
+    private ProgressBar backgroundActionProgress;
+    private final AtomicBoolean manualTranscriptionRunning = new AtomicBoolean(false);
     private ProgressBar progressBar;
     private TextView transferText;
     private TextView uploadCurrentText;
@@ -320,6 +323,19 @@ public final class MainActivity extends Activity {
         moreButton.setOnClickListener(v -> showMoreMenu());
         header.addView(moreButton, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        Button libraryShortcut = materialToolbarButton("Library");
+        libraryShortcut.setId(R.id.voicebutton_library_shortcut);
+        libraryShortcut.setMinWidth(AndroidUi.dp(this, 80));
+        libraryShortcut.setContentDescription("Open recordings, folders and phone files");
+        libraryShortcut.setOnClickListener(v -> openLibrary());
+        header.addView(libraryShortcut, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        // On ordinary narrow phones, functional navigation is more important
+        // than repeating the app's brand beside three toolbar actions.
+        if (getResources().getConfiguration().screenWidthDp < 480
+                || getResources().getConfiguration().fontScale > 1.3f) {
+            title.setVisibility(View.GONE);
+        }
         root.addView(header);
 
         transferText = AndroidUi.text(this, "", 14, false, AndroidUi.MUTED);
@@ -610,6 +626,16 @@ public final class MainActivity extends Activity {
                 0, AndroidUi.dp(this, 3));
 
 
+        backgroundActionText = AndroidUi.small(this, "");
+        backgroundActionText.setId(R.id.voicebutton_operation_feedback);
+        AndroidUi.readableLine(this, backgroundActionText, 0, 4);
+        backgroundActionText.setVisibility(View.GONE);
+        backgroundActionProgress = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        backgroundActionProgress.setId(R.id.voicebutton_operation_progress);
+        backgroundActionProgress.setMax(1000);
+        backgroundActionProgress.setVisibility(View.GONE);
+
         setupContainer = new LinearLayout(this);
         setupContainer.setId(R.id.voicebutton_setup);
         setupContainer.setOrientation(LinearLayout.VERTICAL);
@@ -674,6 +700,9 @@ public final class MainActivity extends Activity {
             recording.addView(statusCard);
             recording.addView(uploadActivityContainer);
             recording.addView(transcriptionActivityContainer, transcriptParams);
+            recording.addView(backgroundActionText);
+            recording.addView(backgroundActionProgress, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8)));
             recording.addView(setupContainer);
             information.addView(recording,new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f));
             LinearLayout.LayoutParams right=new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f);
@@ -682,6 +711,9 @@ public final class MainActivity extends Activity {
             information.addView(statusCard);
             information.addView(uploadActivityContainer);
             information.addView(transcriptionActivityContainer, transcriptParams);
+            information.addView(backgroundActionText);
+            information.addView(backgroundActionProgress, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8)));
             information.addView(transfers);
             information.addView(setupContainer);
         }
@@ -726,6 +758,19 @@ public final class MainActivity extends Activity {
                     android.os.SystemClock.elapsedRealtime() - started);
             runOnUiThread(() -> {
                 folderRefreshRunning.set(false);
+                if (!exactFailure.isEmpty()) {
+                    // Failed discovery is not evidence that previously selected
+                    // folders disappeared. Keep the durable selection and list.
+                    updateSetupButtons();
+                    showBackgroundAction(
+                            "Could not refresh recording folders · previous selection kept. "
+                                    + "Retry from Options or Library.", -2);
+                    diag(PhoneDiagnostics.ERROR, "folder.local_refresh_failed",
+                            snapshot.currentSessionId, exactFailure,
+                            PhoneDiagnostics.fields("known_folder_count", folders.size(),
+                                    "duration_ms", duration));
+                    return;
+                }
                 folders.clear();
                 folders.addAll(loaded);
                 boolean selectedExists = false;
@@ -774,15 +819,25 @@ public final class MainActivity extends Activity {
                 break;
             }
         }
+        if (folders.isEmpty()) {
+            refreshFolders();
+            new MaterialAlertDialogBuilder(this)
+                    .setTitle("Recording folders not loaded")
+                    .setMessage("Refreshing the local folder list. The previously "
+                            + "selected recording folder is preserved.")
+                    .setPositiveButton("Back", null).show();
+            return;
+        }
         final ReliableSessionStore.Folder selectedFolder = selected;
-        String[] labels = new String[folders.size() + 2];
+        String[] labels = new String[folders.size() + (selectedFolder == null ? 1 : 2)];
         for (int i = 0; i < folders.size(); i++) {
             labels[i] = folders.get(i).path;
         }
         labels[folders.size()] = "Create root folder…";
-        labels[folders.size() + 1] = selectedFolder == null
-                ? "Create root folder…"
-                : "Create subfolder in " + selectedFolder.path + "…";
+        if (selectedFolder != null) {
+            labels[folders.size() + 1] =
+                    "Create subfolder in " + selectedFolder.path + "…";
+        }
         new MaterialAlertDialogBuilder(this).setTitle("Recording folder")
                 .setItems(labels, (dialog, which) -> {
                     if (which < folders.size()) {
@@ -1257,36 +1312,76 @@ public final class MainActivity extends Activity {
 
     private void showMoreMenu() {
         String[] actions = {
-                "Player and files",
-                "Current status details",
-                "Refresh microphones",
-                "Retry synchronization",
-                "Copy support summary",
-                "Export full diagnostics",
-                "About",
+                "Recordings, folders and phone files",
+                "Choose folder for next recording",
+                "Send or retry pending uploads",
+                "Transcribe uploaded recordings",
                 "Automation and privacy",
-                "Send pending recordings",
-                "Transcribe uploaded recordings"
+                "Current recording and transfer status",
+                "Diagnostics and help"
         };
-        new MaterialAlertDialogBuilder(this).setTitle("More")
+        new MaterialAlertDialogBuilder(this).setTitle("Voice Button options")
                 .setItems(actions, (dialog, which) -> {
-                    if (which == 0) openPlayer();
-                    else if (which == 1) showStatusDetails();
-                    else if (which == 2) refreshInputs();
-                    else if (which == 3) retrySynchronization();
-                    else if (which == 4) copySupportSummary();
-                    else if (which == 5) exportFullDiagnostics();
-                    else if(which==6)showAbout();
-                    else if(which==7)AppSettings.show(this,()->{if(service!=null)service.applyAutomationSettings();renderUploadOperations();});
-                    else if(which==8)retrySynchronization();
-                    else requestManualTranscription();
-                }).setNegativeButton("Back", null).show();
+                    switch (which) {
+                        case 0: openLibrary(); break;
+                        case 1: showFolderPicker(); break;
+                        case 2: retrySynchronization(); break;
+                        case 3: requestManualTranscription(); break;
+                        case 4:
+                            AppSettings.show(this, () -> {
+                                if (service != null) service.applyAutomationSettings();
+                                renderUploadOperations();
+                            });
+                            break;
+                        case 5: showStatusDetails(); break;
+                        default: showDiagnosticsMenu(); break;
+                    }
+                }).setNegativeButton("Close", null).show();
+    }
+
+    private void showDiagnosticsMenu() {
+        String[] actions = {
+                "Refresh microphone list",
+                "Copy support summary",
+                "Export detailed diagnostics",
+                "About Voice Button"
+        };
+        new MaterialAlertDialogBuilder(this).setTitle("Diagnostics and help")
+                .setItems(actions, (dialog, which) -> {
+                    if (which == 0) refreshInputs();
+                    else if (which == 1) copySupportSummary();
+                    else if (which == 2) exportFullDiagnostics();
+                    else showAbout();
+                }).setNegativeButton("Close", null).show();
+    }
+
+    private void openLibrary() {
+        startActivity(new Intent(this, AudioLibraryActivity.class));
+    }
+
+    private void showBackgroundAction(String text, int progressPermille) {
+        if (backgroundActionText == null) return;
+        backgroundActionText.setText(text);
+        backgroundActionText.setContentDescription(text);
+        backgroundActionText.setVisibility(View.VISIBLE);
+        if (progressPermille == -2) {
+            backgroundActionProgress.setVisibility(View.GONE);
+        } else {
+            backgroundActionProgress.setIndeterminate(progressPermille < 0);
+            if (progressPermille >= 0) {
+                backgroundActionProgress.setProgress(
+                        Math.min(1000, Math.max(0, progressPermille)));
+            }
+            backgroundActionProgress.setContentDescription(text);
+            backgroundActionProgress.setVisibility(View.VISIBLE);
+        }
     }
 
     private void retrySynchronization() {
         AppSettings.requestUpload(this);
+        showBackgroundAction("Upload retry requested · follow the recording upload bar.", -2);
         diag(PhoneDiagnostics.INFO, "ui.synchronization_retry_requested", null,
-                "The user requested synchronization only",
+                "Manual upload/retry was requested",
                 PhoneDiagnostics.fields("recording", snapshot.recording,
                         "state", snapshot.state,
                         "pending_bytes", snapshot.uploadPendingBytes));
@@ -1296,15 +1391,60 @@ public final class MainActivity extends Activity {
     }
 
     private void requestManualTranscription() {
-        uiWorker.execute(()->{
+        if (!manualTranscriptionRunning.compareAndSet(false, true)) {
+            showBackgroundAction("Transcription requests already being submitted.", -1);
+            return;
+        }
+        showBackgroundAction("Checking uploaded recordings for transcription…", -1);
+        uiWorker.execute(() -> {
+            int submitted = 0;
             try {
-                ReliableUploadClient client=new ReliableUploadClient(BuildConfig.VOICE_BASE_URL,"VoiceButton/"+BuildConfig.VERSION_NAME+" Android");
-                ReliableSessionStore local=new ReliableSessionStore(getApplicationContext());
-                int submitted=0;
-                for(ReliableSessionManifest manifest:local.list())if(manifest.remoteCommitted){client.requestTranscription(manifest);submitted++;}
-                final int count=submitted;
-                runOnUiThread(()->Toast.makeText(this,"Requested transcription for "+count+" uploaded recordings",Toast.LENGTH_LONG).show());
-            }catch(Exception failure){runOnUiThread(()->Toast.makeText(this,"Could not request transcription. Check Internet and retry: "+failure.getMessage(),Toast.LENGTH_LONG).show());}
+                ReliableUploadClient client = new ReliableUploadClient(
+                        BuildConfig.VOICE_BASE_URL,
+                        "VoiceButton/" + BuildConfig.VERSION_NAME + " Android");
+                ReliableSessionStore local =
+                        ReliableSessionStore.openForBrowsing(getApplicationContext());
+                List<ReliableSessionManifest> eligible = new ArrayList<>();
+                for (ReliableSessionManifest manifest : local.list()) {
+                    if (manifest.remoteCommitted) eligible.add(manifest);
+                }
+                int total = eligible.size();
+                if (total == 0) {
+                    runOnUiThread(() -> showBackgroundAction(
+                            "No server-committed recordings need a manual request.", -2));
+                    return;
+                }
+                runOnUiThread(() -> showBackgroundAction(
+                        "Submitting transcription requests · 0 of " + total, 0));
+                for (ReliableSessionManifest manifest : eligible) {
+                    client.requestTranscription(manifest);
+                    submitted++;
+                    final int current = submitted;
+                    if (submitted % 5 == 0 || submitted == total) {
+                        final int permille = (int)(1000L * current / total);
+                        runOnUiThread(() -> showBackgroundAction(
+                                "Submitting transcription requests · "
+                                        + current + " of " + total,
+                                permille));
+                    }
+                }
+                final int count = submitted;
+                runOnUiThread(() -> {
+                    showBackgroundAction("Submitted " + count
+                            + " transcription requests · processing progress is shown above.",
+                            -2);
+                    refreshTranscriptionStatusOnce();
+                });
+            } catch (Exception failure) {
+                final int alreadySubmitted = submitted;
+                final String message = String.valueOf(failure.getMessage());
+                runOnUiThread(() -> showBackgroundAction(
+                        "Transcription requests interrupted after " + alreadySubmitted
+                                + " submissions · " + message + " · retry in Options.",
+                        -2));
+            } finally {
+                manualTranscriptionRunning.set(false);
+            }
         });
     }
 

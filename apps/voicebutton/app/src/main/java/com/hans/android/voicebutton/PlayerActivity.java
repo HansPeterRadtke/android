@@ -89,6 +89,8 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
     private boolean userPlaybackIntent;
     private long userPlaybackIntentElapsedMs;
     private PlayerSource pendingExportSource;
+    private PlayerSource pendingMoveSource;
+    private Button stopButton;
     private final ServiceConnection playerConnection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
             PlayerPlaybackService.LocalBinder local =
@@ -97,6 +99,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             playerBound = true;
             player.attach(playerService);
             playerService.addListener(PlayerActivity.this);
+            updatePlaybackControls();
             VoiceButtonLocalTrace.log(PlayerActivity.this,
                     "ui.player.passive_restore_suppressed",
                     "pending_open", player.hasPendingOpen(),
@@ -110,6 +113,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             player.detach();
             playerService = null;
             playerBound = false;
+            updatePlaybackControls();
         }
     };
 
@@ -123,11 +127,14 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
     private TextView titleText;
     private TextView stateText;
+    private TextView fileActionText;
+    private ProgressBar fileActionProgress;
     private TextView timeText;
     private TextView modeText;
     private TextView speedText;
     private TextView studioText;
     private WaveformView waveformView;
+    private ProgressBar waveformProgress;
     private SeekBar seek;
     private ProgressBar studioProgress;
     private Button playButton;
@@ -208,16 +215,31 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         toolbar.addView(home, weighted());
         root.addView(toolbar);
 
-        titleText = AndroidUi.text(this, "Player", 21, true, AndroidUi.INK);
+        titleText = AndroidUi.text(this, "Player · no file selected", 21, true, AndroidUi.INK);
+        titleText.setId(R.id.voicebutton_player_title);
         titleText.setSingleLine(false);
         titleText.setHorizontallyScrolling(false);
         titleText.setEllipsize(null);
         titleText.setPadding(0, AndroidUi.dp(this, 3), 0, AndroidUi.dp(this, 3));
         root.addView(titleText);
-        stateText = AndroidUi.small(this, "Choose audio from Library");
+        stateText = AndroidUi.small(this, "Choose a recording or phone file from Library.");
+        stateText.setId(R.id.voicebutton_player_status);
         stateText.setSingleLine(false);
         stateText.setEllipsize(null);
         root.addView(stateText);
+
+        fileActionText = AndroidUi.small(this, "");
+        fileActionText.setId(R.id.voicebutton_player_file_action);
+        AndroidUi.readableLine(this, fileActionText, 0, 3);
+        fileActionText.setVisibility(View.GONE);
+        root.addView(fileActionText);
+        fileActionProgress = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        fileActionProgress.setId(R.id.voicebutton_player_file_progress);
+        fileActionProgress.setMax(1000);
+        fileActionProgress.setVisibility(View.GONE);
+        root.addView(fileActionProgress, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8)));
 
         waveformView = new WaveformView(this);
         waveformView.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
@@ -240,8 +262,17 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         });
         root.addView(waveformView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 64)));
+        waveformProgress = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        waveformProgress.setId(R.id.voicebutton_player_waveform_progress);
+        waveformProgress.setMax(1000);
+        waveformProgress.setVisibility(View.GONE);
+        waveformProgress.setContentDescription("Waveform generation progress");
+        root.addView(waveformProgress, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8)));
 
         seek = new SeekBar(this);
+        seek.setId(R.id.voicebutton_player_seek);
         seek.setMax(1000);
         seek.setContentDescription("Playback position");
         seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -271,11 +302,13 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
         LinearLayout transport = row();
         backSkipButton = VoiceButtonMaterial.secondaryButton(this, "−10s");
+        backSkipButton.setId(R.id.voicebutton_player_skip_back);
         backSkipButton.setOnClickListener(v -> {
             VoiceButtonLocalTrace.log(this, "ui.player.skip_tap", "direction", "back", "seconds", settings.skipBack, "state", playerSnapshot.state);
             player.skip(-settings.skipBack);
         });
         playButton = VoiceButtonMaterial.primaryButton(this, "Play");
+        playButton.setId(R.id.voicebutton_player_play);
         playButton.setOnClickListener(v -> {
             VoiceButtonLocalTrace.log(this, "ui.player.play_button_tap",
                     "snapshot_state", playerSnapshot.state,
@@ -302,6 +335,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             }
         });
         forwardSkipButton = VoiceButtonMaterial.secondaryButton(this, "+10s");
+        forwardSkipButton.setId(R.id.voicebutton_player_skip_forward);
         forwardSkipButton.setOnClickListener(v -> {
             VoiceButtonLocalTrace.log(this, "ui.player.skip_tap", "direction", "forward", "seconds", settings.skipForward, "state", playerSnapshot.state);
             player.skip(settings.skipForward);
@@ -347,6 +381,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         root.addView(studioText);
 
         Button library = VoiceButtonMaterial.secondaryButton(this, "Library");
+        library.setId(R.id.voicebutton_player_library);
         library.setOnClickListener(v -> openLibrary());
         LinearLayout navigation=row();
         navigation.addView(library,weighted());
@@ -365,7 +400,9 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             audio.setOrientation(LinearLayout.VERTICAL);
             LinearLayout options = new LinearLayout(this);
             options.setOrientation(LinearLayout.VERTICAL);
-            for (View child : new View[]{titleText, stateText, waveformView, seek, timeText}) {
+            for (View child : new View[]{
+                    titleText, stateText, fileActionText, fileActionProgress,
+                    waveformView, waveformProgress, seek, timeText}) {
                 root.removeView(child);
                 audio.addView(child);
             }
@@ -393,16 +430,18 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         root.addView(bodyScroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         root.addView(transport);
-        Button stop = VoiceButtonMaterial.secondaryButton(this, "Stop");
-        stop.setOnClickListener(v -> {
+        stopButton = VoiceButtonMaterial.secondaryButton(this, "Stop");
+        stopButton.setId(R.id.voicebutton_player_stop);
+        stopButton.setOnClickListener(v -> {
             userPlaybackIntent = false;
             player.stop();
             stateText.setText("Stopped");
             playButton.setText("Play");
         });
-        transport.addView(stop,weighted());
+        transport.addView(stopButton,weighted());
         setContentView(root);
         updateLabels();
+        updatePlaybackControls();
     }
 
     private void openSource(PlayerSource source, boolean autoplay) {
@@ -414,6 +453,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         waveformBitmapBytes = 0L;
         waveformView.setImageDrawable(null);
         waveformView.setVisibility(View.GONE);
+        waveformProgress.setVisibility(View.GONE);
         titleText.setText(source.title);
         stateText.setText("Opening " + source.kind);
         VoiceButtonLocalTrace.log(this, "ui.player.open_source",
@@ -429,16 +469,36 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                         "bytes", source.bytes,
                         "activity_thread", Thread.currentThread().getName()));
         player.open(source.uri, autoplay, settings.speed, settings.volume, settings.muted, settings.loop);
+        updatePlaybackControls();
         if(AppSettings.preferences(this).getBoolean("automatic_waveform",true))loadWaveform(source,generation);
         applySpeed(); updateQueueButtons();
     }
 
     private void loadWaveform(PlayerSource source, int generation) {
+        waveformProgress.setIndeterminate(true);
+        waveformProgress.setVisibility(View.VISIBLE);
+        studioText.setText("Preparing waveform…");
         waveformFuture = studioExecutor.submit(() -> {
             try {
                 File image = waveformClient.prepareWaveform(source, (phase, done, total) -> {
                     if (generation == sourceGeneration) {
-                        runOnUiThread(()->{if(generation==sourceGeneration&&!isFinishing())studioText.setText(phase);});
+                        runOnUiThread(() -> {
+                            if (generation != sourceGeneration || isFinishing()) return;
+                            String progressLabel = phase == null || phase.trim().isEmpty()
+                                    ? "Preparing waveform" : phase;
+                            if (total > 0L) {
+                                int permille = (int)Math.max(0L, Math.min(1000L,
+                                        (long)(1000.0 * Math.min(total, Math.max(0L, done))
+                                                / total)));
+                                waveformProgress.setIndeterminate(false);
+                                waveformProgress.setProgress(permille);
+                                progressLabel += " · " + ((permille + 5) / 10) + "%";
+                            } else {
+                                waveformProgress.setIndeterminate(true);
+                            }
+                            waveformProgress.setContentDescription(progressLabel);
+                            studioText.setText(progressLabel);
+                        });
                     }
                 });
                 BitmapFactory.Options bounds=new BitmapFactory.Options();bounds.inJustDecodeBounds=true;
@@ -457,13 +517,17 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                     waveformBitmapBytes = bitmap.getAllocationByteCount();
                     waveformView.setImageBitmap(bitmap);
                     waveformView.setVisibility(View.VISIBLE);
+                    waveformProgress.setVisibility(View.GONE);
                     stateText.setText(playerSnapshot.error.isEmpty()
                             ? playerSnapshot.state : playerSnapshot.error);
                 });
             } catch (Exception failure) {
                 runOnUiThread(() -> {
                     if (generation == sourceGeneration) {
-                        stateText.setText("Waveform unavailable; playback still works");
+                        waveformProgress.setVisibility(View.GONE);
+                        // A nonessential waveform failure must never overwrite
+                        // a genuine playback error or the current player state.
+                        studioText.setText("Waveform unavailable; playback still works");
                     }
                 });
             }
@@ -551,23 +615,47 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
     }
 
     private void showPlayerMenu() {
-        String[] actions = {
-                "Player settings",
-                "File actions",
-                "Memory and engine",
-                "Clear studio cache",
-                "About player",
-                "Generate waveform now"
-        };
-        new MaterialAlertDialogBuilder(this).setTitle("More")
+        final boolean selected = originalSource != null;
+        String[] actions = selected
+                ? new String[]{
+                    "File actions: export, rename, move or delete",
+                    "Playback speed and settings",
+                    "Generate waveform for this file",
+                    "Memory and playback diagnostics",
+                    "Clear Studio cache",
+                    "About player"}
+                : new String[]{
+                    "Choose a recording in Library",
+                    "Continue last playback",
+                    "Playback settings",
+                    "Memory and playback diagnostics",
+                    "Clear Studio cache",
+                    "About player"};
+        new MaterialAlertDialogBuilder(this).setTitle("Player options")
                 .setItems(actions, (dialog, which) -> {
-                    if (which == 0) showSettings();
-                    else if (which == 1) showFileActions();
-                    else if (which == 2) showMemory();
-                    else if (which == 3) clearStudioCache();
-                    else if(which==4)showPlayerAbout();
-                    else if(originalSource!=null)loadWaveform(originalSource,sourceGeneration);
-                }).setNegativeButton("Back", null).show();
+                    if (selected) {
+                        switch (which) {
+                            case 0: showFileActions(); break;
+                            case 1: showSettings(); break;
+                            case 2:
+                                loadWaveform(originalSource, sourceGeneration);
+                                studioText.setText("Generating waveform…");
+                                break;
+                            case 3: showMemory(); break;
+                            case 4: clearStudioCache(); break;
+                            default: showPlayerAbout(); break;
+                        }
+                    } else {
+                        switch (which) {
+                            case 0: openLibrary(); break;
+                            case 1: requestRestoreAndPlay(); break;
+                            case 2: showSettings(); break;
+                            case 3: showMemory(); break;
+                            case 4: clearStudioCache(); break;
+                            default: showPlayerAbout(); break;
+                        }
+                    }
+                }).setNegativeButton("Close", null).show();
     }
 
     private void showPlayerAbout() {
@@ -578,9 +666,13 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
     private void showSettings() {
         ScrollView scroll=new ScrollView(this); LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);int p=AndroidUi.dp(this,16);box.setPadding(p,p,p,p);scroll.addView(box);
+        box.addView(AndroidUi.text(this, "Playback speed", 18, true, AndroidUi.INK));
         EditText speed=field(box,"Current speed",settings.speed); EditText min=field(box,"Minimum speed",settings.speedMin); EditText max=field(box,"Maximum speed",settings.speedMax); EditText step=field(box,"Speed step",settings.speedStep);
+        box.addView(AndroidUi.text(this, "Seeking and navigation", 18, true, AndroidUi.INK));
         EditText back=field(box,"Skip backward seconds",settings.skipBack); EditText forward=field(box,"Skip forward seconds",settings.skipForward); EditText presets=textField(box,"Speed presets, comma separated",settings.presetsText());
+        box.addView(AndroidUi.text(this, "Volume and sleep", 18, true, AndroidUi.INK));
         EditText volume=field(box,"Volume 0 to 100",settings.volume); EditText sleep=field(box,"Sleep timer minutes, zero disables",settings.sleepMinutes);
+        box.addView(AndroidUi.text(this, "Playback engine and automatic behavior", 18, true, AndroidUi.INK));
         RadioGroup modes=new RadioGroup(this);RadioButton studio=radio("Studio — Rubber Band R3 fine",PlayerSettings.MODE_STUDIO.equals(settings.speedMode));RadioButton instant=radio("Instant — LibVLC pitch preserving",PlayerSettings.MODE_INSTANT.equals(settings.speedMode));modes.addView(studio);modes.addView(instant);box.addView(modes);
         CheckBox muted=check("Muted",settings.muted),loop=check("Loop current file",settings.loop),autoplay=check("Autoplay next file",settings.autoplay);box.addView(muted);box.addView(loop);box.addView(autoplay);
         AlertDialog dialog=new MaterialAlertDialogBuilder(this).setTitle("Player settings").setView(scroll).setNegativeButton("Back",null).setPositiveButton("Save",null).create();
@@ -611,6 +703,51 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         });
     }
 
+    private void showFileActionProgress(String label, long copied, long total,
+                                        boolean active) {
+        if (fileActionText == null) return;
+        boolean measured = total > 0L;
+        String message = label;
+        if (active && measured) {
+            int percent = (int)Math.min(100L,
+                    Math.max(0L, 100L * Math.min(total, copied) / total));
+            message += " · " + percent + "%";
+            fileActionProgress.setIndeterminate(false);
+            fileActionProgress.setProgress(percent * 10);
+            fileActionProgress.setVisibility(View.VISIBLE);
+        } else if (active) {
+            fileActionProgress.setIndeterminate(true);
+            fileActionProgress.setVisibility(View.VISIBLE);
+        } else {
+            fileActionProgress.setVisibility(View.GONE);
+        }
+        fileActionText.setText(message);
+        fileActionText.setContentDescription(message);
+        fileActionText.setVisibility(View.VISIBLE);
+    }
+
+    private FileOperations.TransferListener fileProgressListener(String name) {
+        return new FileOperations.TransferListener() {
+            @Override public void onCopy(long copiedBytes, long expectedBytes) {
+                runOnUiThread(() -> {
+                    if (!isFinishing() && !isDestroyed()) {
+                        showFileActionProgress("Copying " + name,
+                                copiedBytes, expectedBytes, true);
+                    }
+                });
+            }
+
+            @Override public void onVerifying() {
+                runOnUiThread(() -> {
+                    if (!isFinishing() && !isDestroyed()) {
+                        showFileActionProgress("Verifying copied content…",
+                                0L, 0L, true);
+                    }
+                });
+            }
+        };
+    }
+
     private void showFileActions() {
         if (originalSource==null){Toast.makeText(this,"Select a file first",Toast.LENGTH_SHORT).show();return;}
         String[] actions = studioActive
@@ -637,12 +774,16 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
     private void renameCurrent() {
         EditText input=new TextInputEditText(this);input.setSingleLine(true);input.setText(originalSource.title);input.selectAll();
         new MaterialAlertDialogBuilder(this).setTitle("Rename").setView(input).setNegativeButton("Back",null).setPositiveButton("Rename",(d,w)->{
-            String name=input.getText().toString();fileExecutor.execute(()->{
+            String name=input.getText().toString();
+            final PlayerSource renaming = originalSource;
+            if (renaming == null) return;
+            stateText.setText("Renaming " + renaming.title + "…");
+            fileExecutor.execute(()->{
                 try{
-                    if(PlayerSource.KIND_RECORDING.equals(originalSource.kind)){
-                        ReliableSessionStore store=new ReliableSessionStore(this);ReliableSessionManifest changed=store.renameSession(originalSource.sessionId,name);File file=RecordingUi.recordingFile(this,changed);PlayerSource updated=PlayerSource.recording(file,RecordingUi.title(changed),file.length(),changed.sessionId,changed.folderId);runOnUiThread(()->openSource(updated,false));
+                    if(PlayerSource.KIND_RECORDING.equals(renaming.kind)){
+                        ReliableSessionStore store=new ReliableSessionStore(this);ReliableSessionManifest changed=store.renameSession(renaming.sessionId,name);File file=RecordingUi.recordingFile(this,changed);PlayerSource updated=PlayerSource.recording(file,RecordingUi.title(changed),file.length(),changed.sessionId,changed.folderId);runOnUiThread(()->openSource(updated,false));
                     }else{
-                        Uri updated=FileOperations.rename(this,originalSource.uri,name);PlayerSource source=new PlayerSource(updated,name,originalSource.kind,originalSource.bytes,originalSource.sessionId,originalSource.folderId,originalSource.parentUri);runOnUiThread(()->openSource(source,false));
+                        Uri updated=FileOperations.rename(this,renaming.uri,name);PlayerSource source=new PlayerSource(updated,name,renaming.kind,renaming.bytes,renaming.sessionId,renaming.folderId,renaming.parentUri);runOnUiThread(()->openSource(source,false));
                     }
                 }catch(Exception failure){runOnUiThread(()->Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show());}
             });
@@ -651,17 +792,71 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
 
     private void moveCurrent() {
         if(PlayerSource.KIND_RECORDING.equals(originalSource.kind)){showRecordingFolderMove();return;}
+        pendingMoveSource = originalSource;
         Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);startActivityForResult(intent,REQUEST_MOVE);
     }
 
     private void showRecordingFolderMove() {
-        fileExecutor.execute(()->{
-            try{
-                ReliableSessionStore store=new ReliableSessionStore(this);java.util.List<ReliableSessionStore.Folder> folders=store.listFolders();String[] names=new String[folders.size()];for(int i=0;i<folders.size();i++)names[i]=folders.get(i).name;
-                runOnUiThread(()->new MaterialAlertDialogBuilder(this).setTitle("Move recording").setItems(names,(d,w)->fileExecutor.execute(()->{
-                    try{ReliableSessionManifest changed=store.moveSession(originalSource.sessionId,folders.get(w).id);File file=RecordingUi.recordingFile(this,changed);PlayerSource updated=PlayerSource.recording(file,RecordingUi.title(changed),file.length(),changed.sessionId,changed.folderId);runOnUiThread(()->openSource(updated,false));}catch(Exception failure){runOnUiThread(()->Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show());}
-                })).setNegativeButton("Back",null).show());
-            }catch(Exception failure){runOnUiThread(()->Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show());}
+        final PlayerSource moving = originalSource;
+        if (moving == null) return;
+        stateText.setText("Loading recording folders…");
+        fileExecutor.execute(() -> {
+            try {
+                ReliableSessionStore store = new ReliableSessionStore(this);
+                List<ReliableSessionStore.Folder> folders = store.listFolders();
+                String[] names = new String[folders.size()];
+                for (int i = 0; i < folders.size(); i++) {
+                    names[i] = folders.get(i).path;
+                }
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    stateText.setText("Choose a destination for " + moving.title);
+                    new MaterialAlertDialogBuilder(this)
+                            .setTitle("Move recording to folder")
+                            .setItems(names, (dialog, which) -> {
+                                ReliableSessionStore.Folder destination = folders.get(which);
+                                if (destination.id.equals(moving.folderId)) {
+                                    stateText.setText("Recording is already in that folder.");
+                                    return;
+                                }
+                                if (originalSource == null
+                                        || !moving.uri.equals(originalSource.uri)) {
+                                    stateText.setText("Selection changed; move cancelled for safety.");
+                                    return;
+                                }
+                                stateText.setText("Moving " + moving.title + " to "
+                                        + destination.path + "…");
+                                player.pause();
+                                fileExecutor.execute(() -> {
+                                    try {
+                                        ReliableSessionManifest changed = store.moveSession(
+                                                moving.sessionId, destination.id);
+                                        File file = RecordingUi.recordingFile(this, changed);
+                                        PlayerSource updated = PlayerSource.recording(
+                                                file, RecordingUi.title(changed),
+                                                file.length(), changed.sessionId,
+                                                changed.folderId);
+                                        runOnUiThread(() -> {
+                                            if (originalSource != null
+                                                    && moving.uri.equals(originalSource.uri)) {
+                                                openSource(updated, false);
+                                            }
+                                            stateText.setText("Recording moved to "
+                                                    + destination.path);
+                                        });
+                                    } catch (Exception failure) {
+                                        runOnUiThread(() -> stateText.setText(
+                                                "Could not move recording: "
+                                                        + failure.getMessage()));
+                                    }
+                                });
+                            })
+                            .setNegativeButton("Cancel", null).show();
+                });
+            } catch (Exception failure) {
+                runOnUiThread(() -> stateText.setText(
+                        "Could not list recording folders: " + failure.getMessage()));
+            }
         });
     }
 
@@ -675,54 +870,192 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
     }
 
     private void confirmDeleteCurrent() {
-        if (originalSource == null) return;
         final PlayerSource deleting = originalSource;
+        if (deleting == null) {
+            stateText.setText("Choose a file from Library before deleting.");
+            return;
+        }
         final boolean recording = PlayerSource.KIND_RECORDING.equals(deleting.kind);
-        String message = recording
-                ? "This removes the phone copy only. The completed Jetson recording and transcript remain on the server."
-                : "This removes the selected file from its Android storage provider.";
-        new MaterialAlertDialogBuilder(this)
-                .setTitle(recording ? "Delete local recording?" : "Delete file?")
-                .setMessage(message)
-                .setNegativeButton("Back", null)
-                .setPositiveButton(recording ? "Delete local copy" : "Delete", (dialog, which) -> {
-                    player.stop();
-                    fileExecutor.execute(() -> {
-                        try {
-                            if (recording) {
-                                ReliableSessionStore store = new ReliableSessionStore(this);
-                                store.deleteFinishedSession(deleting.sessionId);
-                            } else {
-                                FileOperations.delete(this, deleting.uri);
-                            }
-                            runOnUiThread(() -> {
-                                Toast.makeText(this, "Deleted", Toast.LENGTH_SHORT).show();
-                                finish();
-                            });
-                        } catch (Exception failure) {
-                            runOnUiThread(() -> Toast.makeText(this,
-                                    failure.getMessage(), Toast.LENGTH_LONG).show());
+        if (recording) {
+            stateText.setText("Checking whether the Jetson backup is confirmed…");
+            fileExecutor.execute(() -> {
+                try {
+                    ReliableSessionManifest manifest =
+                            ReliableSessionStore.openForBrowsing(this)
+                                    .load(deleting.sessionId);
+                    boolean safeToDelete = manifest.recordingFinished
+                            && manifest.remoteCommitted;
+                    runOnUiThread(() -> {
+                        if (isFinishing() || isDestroyed()) return;
+                        if (!safeToDelete) {
+                            stateText.setText(
+                                    "Phone copy required · Jetson backup is not confirmed");
+                            new MaterialAlertDialogBuilder(this)
+                                    .setTitle("Keep this phone copy")
+                                    .setMessage("Finish the recording and wait until Jetson has "
+                                            + "confirmed a complete copy. It is not safe to "
+                                            + "delete this recording from the phone yet.")
+                                    .setPositiveButton("Back", null).show();
+                        } else {
+                            showDeleteConfirmation(deleting, true);
                         }
                     });
-                }).show();
+                } catch (Exception failure) {
+                    runOnUiThread(() -> stateText.setText(
+                            "Cannot verify backup; phone copy retained: "
+                                    + failure.getMessage()));
+                }
+            });
+        } else {
+            showDeleteConfirmation(deleting, false);
+        }
+    }
+
+    private void showDeleteConfirmation(PlayerSource deleting, boolean recording) {
+        String message = recording
+                ? "Jetson has a confirmed complete copy. Only this phone copy "
+                    + "will be removed. The server audio and transcript remain available."
+                : "This permanently deletes the selected file from its "
+                    + "Android storage provider. This cannot be undone.";
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(recording ? "Delete confirmed phone copy?"
+                        : "Permanently delete this file?")
+                .setMessage(deleting.title + "\n\n" + message)
+                .setNegativeButton("Keep file", null)
+                .setPositiveButton(recording ? "Delete phone copy" : "Delete file",
+                        (dialog, which) -> {
+                            stateText.setText("Deleting " + deleting.title + "…");
+                            player.stop();
+                            fileExecutor.execute(() -> {
+                                try {
+                                    if (recording) {
+                                        ReliableSessionStore store =
+                                                new ReliableSessionStore(this);
+                                        store.deleteFinishedSession(deleting.sessionId);
+                                    } else {
+                                        FileOperations.delete(this, deleting.uri);
+                                    }
+                                    runOnUiThread(() -> {
+                                        Toast.makeText(this, "Deleted",
+                                                Toast.LENGTH_SHORT).show();
+                                        finish();
+                                    });
+                                } catch (Exception failure) {
+                                    runOnUiThread(() -> stateText.setText(
+                                            "Delete failed; check the file and try again: "
+                                                    + failure.getMessage()));
+                                }
+                            });
+                        }).show();
     }
 
     private void showFileDetails() {
-        String message = "Original type: " + originalSource.kind
-                + "\nOriginal URI: " + originalSource.uri
-                + "\nOriginal size: " + RecordingUi.formatBytes(originalSource.bytes)
-                + "\nFolder: " + originalSource.folderId;
-        if (studioActive) {
-            message += "\n\nCurrent playback: studio WAV " + formatSpeed(studioSpeed)
-                    + "\nStudio size: " + RecordingUi.formatBytes(activeSource.bytes);
+        final PlayerSource source = originalSource;
+        if (source == null) {
+            stateText.setText("Choose a file from Library for its details.");
+            return;
         }
-        new MaterialAlertDialogBuilder(this).setTitle(originalSource.title)
-                .setMessage(message).setPositiveButton("Back", null).show();
+        stateText.setText("Reading file details…");
+        fileExecutor.execute(() -> {
+            String location = PlayerSource.KIND_RECORDING.equals(source.kind)
+                    ? "App recordings" : "Phone storage";
+            String backup = "";
+            try {
+                if (PlayerSource.KIND_RECORDING.equals(source.kind)) {
+                    ReliableSessionStore store = ReliableSessionStore.openForBrowsing(this);
+                    ReliableSessionManifest manifest = store.load(source.sessionId);
+                    ReliableSessionStore.Folder folder = store.getFolder(manifest.folderId);
+                    location = "App recordings / " + folder.path;
+                    backup = manifest.remoteCommitted
+                            ? "\nJetson backup: confirmed"
+                            : "\nJetson backup: still pending; keep this phone copy";
+                }
+                final String message = "Location: " + location
+                        + "\nType: " + (PlayerSource.KIND_RECORDING.equals(source.kind)
+                                ? "App recording" : "Phone audio")
+                        + "\nSize: " + RecordingUi.formatBytes(source.bytes)
+                        + backup;
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    stateText.setText("File details ready");
+                    new MaterialAlertDialogBuilder(this).setTitle(source.title)
+                            .setMessage(message)
+                            .setPositiveButton("Back", null).show();
+                });
+            } catch (Exception failure) {
+                final String error = String.valueOf(failure.getMessage());
+                runOnUiThread(() -> stateText.setText(
+                        "Could not read file details: " + error));
+            }
+        });
     }
 
-    @Override protected void onActivityResult(int requestCode,int resultCode,Intent data){super.onActivityResult(requestCode,resultCode,data);if(resultCode!=RESULT_OK||data==null||data.getData()==null)return;Uri target=data.getData();FileOperations.persistPermissions(this, target, data.getFlags());
-        if(requestCode==REQUEST_MOVE){PlayerSource moving=originalSource;fileExecutor.execute(()->{try{Uri moved=FileOperations.move(this,moving.uri,target,moving.title);PlayerSource updated=new PlayerSource(moved,moving.title,moving.kind,moving.bytes,moving.sessionId,moving.folderId,target);runOnUiThread(()->openSource(updated,false));}catch(Exception failure){runOnUiThread(()->Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show());}});}
-        else if(requestCode==REQUEST_EXPORT){PlayerSource exporting=pendingExportSource;pendingExportSource=null;if(exporting==null)return;fileExecutor.execute(()->{try{FileOperations.copy(this,exporting.uri,target);runOnUiThread(()->Toast.makeText(this,"Export complete",Toast.LENGTH_LONG).show());}catch(Exception failure){runOnUiThread(()->Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show());}});}
+    @Override protected void onActivityResult(int requestCode, int resultCode,
+                                              Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            if (requestCode == REQUEST_MOVE) pendingMoveSource = null;
+            if (requestCode == REQUEST_EXPORT) pendingExportSource = null;
+            return;
+        }
+        Uri target = data.getData();
+        FileOperations.persistPermissions(this, target, data.getFlags());
+        if (requestCode == REQUEST_MOVE) {
+            final PlayerSource moving = pendingMoveSource;
+            pendingMoveSource = null;
+            if (moving == null || originalSource == null
+                    || !moving.uri.equals(originalSource.uri)) {
+                stateText.setText("The selected file changed. Move cancelled for safety.");
+                return;
+            }
+            showFileActionProgress("Preparing move: " + moving.title,
+                    0L, 0L, true);
+            fileExecutor.execute(() -> {
+                try {
+                    Uri moved = FileOperations.move(this, moving.uri, target,
+                            moving.title, fileProgressListener(moving.title));
+                    PlayerSource updated = new PlayerSource(moved, moving.title,
+                            moving.kind, moving.bytes, moving.sessionId,
+                            moving.folderId, target);
+                    runOnUiThread(() -> {
+                        if (!isFinishing() && !isDestroyed()) {
+                            showFileActionProgress(
+                                    "Move verified · opening new location", 0L, 0L, false);
+                            openSource(updated, false);
+                        }
+                    });
+                } catch (Exception failure) {
+                    runOnUiThread(() -> {
+                        showFileActionProgress(
+                                "Could not move file: " + failure.getMessage(),
+                                0L, 0L, false);
+                        stateText.setText("File move failed · original retained unless deletion was acknowledged");
+                    });
+                }
+            });
+        } else if (requestCode == REQUEST_EXPORT) {
+            final PlayerSource exporting = pendingExportSource;
+            pendingExportSource = null;
+            if (exporting == null) return;
+            showFileActionProgress("Exporting " + exporting.title, 0L, 0L, true);
+            fileExecutor.execute(() -> {
+                try {
+                    FileOperations.copy(this, exporting.uri, target,
+                            fileProgressListener(exporting.title), exporting.bytes);
+                    runOnUiThread(() -> {
+                        showFileActionProgress("Export complete", 0L, 0L, false);
+                        stateText.setText("Export completed");
+                        Toast.makeText(this, "Export complete", Toast.LENGTH_LONG).show();
+                    });
+                } catch (Exception failure) {
+                    runOnUiThread(() -> {
+                        showFileActionProgress("Export failed: "
+                                + failure.getMessage(), 0L, 0L, false);
+                        stateText.setText("Export failed");
+                    });
+                }
+            });
+        }
     }
 
     private void clearStudioCache() {
@@ -788,7 +1121,9 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
         studioActive = value.studioActive;
         studioSpeed = value.studioSpeed;
         logicalDurationMs = value.logicalLengthMs();
-        if (originalSource != null) {
+        if (originalSource == null) {
+            titleText.setText("Player · no file selected");
+        } else {
             titleText.setText(originalSource.title);
             if (previous == null || !previous.uri.equals(originalSource.uri)) {
                 int generation = ++sourceGeneration;
@@ -800,6 +1135,7 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                 waveformBitmapBytes = 0L;
                 waveformView.setImageDrawable(null);
                 waveformView.setVisibility(View.GONE);
+                waveformProgress.setVisibility(View.GONE);
                 if(AppSettings.preferences(this).getBoolean("automatic_waveform",true))loadWaveform(originalSource, generation);
             }
         }
@@ -821,9 +1157,11 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
                 && (PlayerTerminalPolicy.startIsPending(value.state)
                 || "ready".equals(value.state)
                 || "paused".equals(value.state));
-        String visibleState = value.error.isEmpty()
-                ? optimisticPlayback ? "Starting playback" : value.state
-                : value.error;
+        String visibleState = originalSource == null && value.error.isEmpty()
+                ? "Choose a recording or phone file from Library."
+                : value.error.isEmpty()
+                    ? optimisticPlayback ? "Starting playback" : value.state
+                    : value.error;
         stateText.setText(visibleState);
         playButton.setText((value.playing || optimisticPlayback) ? "Pause" : "Play");
         previousButton.setEnabled(value.queueIndex > 0);
@@ -838,9 +1176,40 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
             Toast.makeText(this, value.error, Toast.LENGTH_LONG).show();
         }
         updatePosition();
+        updatePlaybackControls();
     }
 
-    private void updatePosition(){long logical=logicalPosition(),length=logicalDuration();timeText.setText(formatTime(logical)+" / "+formatTime(length)+"\nRemaining "+formatTime(Math.max(0L,length-logical)));timeText.setContentDescription("Position "+formatTime(logical)+", total "+formatTime(length)+", remaining "+formatTime(Math.max(0L,length-logical)));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));boolean optimistic=userPlaybackIntent&&playerSnapshot.error.isEmpty()&&(PlayerTerminalPolicy.startIsPending(playerSnapshot.state)||"ready".equals(playerSnapshot.state)||"paused".equals(playerSnapshot.state));playButton.setText(player.isPlaying()||optimistic?"Pause":"Play");}
+    private void updatePlaybackControls() {
+        boolean hasSelectedFile = originalSource != null;
+        boolean ready = hasSelectedFile && player.isAttached()
+                && player.hasSource() && !player.hasPendingOpen()
+                && !CapturePlaybackGate.isCapturing();
+        boolean canSeek = ready && playerSnapshot.seekable
+                && logicalDuration() > 0L;
+        if (playButton != null) {
+            playButton.setEnabled(ready);
+            playButton.setContentDescription(ready
+                    ? "Play or pause the selected audio"
+                    : hasSelectedFile
+                        ? "Wait for the selected audio to be ready or pause recording"
+                        : "Choose a recording from Library before playback");
+        }
+        if (stopButton != null) {
+            stopButton.setEnabled(ready);
+            stopButton.setContentDescription(ready
+                    ? "Stop playback" : "No playback to stop");
+        }
+        if (backSkipButton != null) backSkipButton.setEnabled(canSeek);
+        if (forwardSkipButton != null) forwardSkipButton.setEnabled(canSeek);
+        if (seek != null) {
+            seek.setEnabled(canSeek);
+            seek.setContentDescription(canSeek
+                    ? "Seek in current recording"
+                    : "Playback timeline unavailable until the recording is loaded");
+        }
+    }
+
+    private void updatePosition(){long logical=logicalPosition(),length=logicalDuration();timeText.setText(formatTime(logical)+" / "+formatTime(length)+"\nRemaining "+formatTime(Math.max(0L,length-logical)));timeText.setContentDescription("Position "+formatTime(logical)+", total "+formatTime(length)+", remaining "+formatTime(Math.max(0L,length-logical)));if(!userSeeking)seek.setProgress(PlayerTimeline.progress(logical,length));boolean optimistic=userPlaybackIntent&&playerSnapshot.error.isEmpty()&&(PlayerTerminalPolicy.startIsPending(playerSnapshot.state)||"ready".equals(playerSnapshot.state)||"paused".equals(playerSnapshot.state));playButton.setText(player.isPlaying()||optimistic?"Pause":"Play");updatePlaybackControls();}
     private long logicalPosition(){return playerSnapshot.logicalTimeMs();}
     private long logicalDuration(){long value=playerSnapshot.logicalLengthMs();return value>0?value:logicalDurationMs;}
     private void updateLabels(){speedText.setText(formatSpeed(settings.speed));backSkipButton.setText("−"+formatSeconds(settings.skipBack));forwardSkipButton.setText("+"+formatSeconds(settings.skipForward));}
@@ -1010,7 +1379,13 @@ public final class PlayerActivity extends Activity implements PlayerPlaybackServ
     private LinearLayout row(){LinearLayout row=new LinearLayout(this);row.setOrientation(LinearLayout.HORIZONTAL);row.setGravity(Gravity.CENTER);return row;}
     private LinearLayout.LayoutParams weighted(){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f);p.setMargins(AndroidUi.dp(this,2),AndroidUi.dp(this,2),AndroidUi.dp(this,2),AndroidUi.dp(this,2));return p;}
     private Button compact(String text){return VoiceButtonMaterial.toolbarButton(this,text);}
-    private EditText field(LinearLayout box,String label,float value){return textField(box,label,String.format(Locale.US,"%g",value));}
+    private EditText field(LinearLayout box,String label,float value) {
+        EditText input=textField(box,label,String.format(Locale.US,"%g",value));
+        input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER
+                | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+                | android.text.InputType.TYPE_NUMBER_FLAG_SIGNED);
+        return input;
+    }
     private EditText textField(LinearLayout box,String label,String value){box.addView(AndroidUi.small(this,label));EditText input=new TextInputEditText(this);input.setSingleLine(true);input.setMinHeight(AndroidUi.dp(this,48));input.setText(value);box.addView(input);return input;}
     private RadioButton radio(String label,boolean checked){RadioButton b=new RadioButton(this);b.setId(View.generateViewId());b.setText(label);b.setMinHeight(AndroidUi.dp(this,48));b.setChecked(checked);return b;}
     private CheckBox check(String label,boolean checked){CheckBox b=new CheckBox(this);b.setText(label);b.setMinHeight(AndroidUi.dp(this,48));b.setChecked(checked);return b;}
