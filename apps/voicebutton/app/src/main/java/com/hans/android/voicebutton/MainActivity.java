@@ -104,7 +104,11 @@ public final class MainActivity extends Activity {
     private TextView uploadActivityTitle;
     private TextView uploadActivityDetail;
     private ProgressBar uploadActivityProgress;
+    private LinearLayout transcriptionActivityContainer;
     private TextView transcriptionActivityText;
+    private ProgressBar transcriptionActivityProgress;
+    private TextView transcriptionOverallText;
+    private ProgressBar transcriptionOverallProgress;
     private String pendingPrimaryAction;
     private long pendingPrimaryAtElapsedMs;
     private TextView statusTitle;
@@ -546,11 +550,60 @@ public final class MainActivity extends Activity {
         uploadActivityContainer.addView(uploadActivityProgress, barParams);
 
 
+        // Current transcription has its OWN measurable progress bar.
+        // The archive-wide progress is a second, visually subordinate bar;
+        // neither is ever substituted for the current recording's upload.
+        transcriptionActivityContainer = new LinearLayout(this);
+        transcriptionActivityContainer.setOrientation(LinearLayout.VERTICAL);
+        transcriptionActivityContainer.setPadding(AndroidUi.dp(this, 4),
+                AndroidUi.dp(this, 8), AndroidUi.dp(this, 4),
+                AndroidUi.dp(this, 4));
+        transcriptionActivityContainer.setVisibility(View.GONE);
+
         transcriptionActivityText = AndroidUi.small(this, "");
         transcriptionActivityText.setId(R.id.voicebutton_secondary_transcription);
-        transcriptionActivityText.setTextColor(AndroidUi.MUTED);
+        transcriptionActivityText.setTextColor(AndroidUi.INK);
         AndroidUi.readableLine(this, transcriptionActivityText, 0, 4);
         transcriptionActivityText.setVisibility(View.GONE);
+        transcriptionActivityContainer.addView(transcriptionActivityText);
+
+        transcriptionActivityProgress = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        transcriptionActivityProgress.setId(R.id.voicebutton_active_transcription_bar);
+        transcriptionActivityProgress.setMax(1000);
+        transcriptionActivityProgress.setContentDescription("Current recording transcription progress");
+        transcriptionActivityProgress.setVisibility(View.GONE);
+        LinearLayout.LayoutParams currentTranscriptionBarParams =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 10));
+        currentTranscriptionBarParams.setMargins(0, AndroidUi.dp(this, 5), 0, 0);
+        transcriptionActivityContainer.addView(
+                transcriptionActivityProgress, currentTranscriptionBarParams);
+
+        transcriptionOverallText = AndroidUi.small(this, "");
+        transcriptionOverallText.setId(R.id.voicebutton_transcription_overall_label);
+        transcriptionOverallText.setTextColor(AndroidUi.MUTED);
+        AndroidUi.readableLine(this, transcriptionOverallText, 0, 3);
+        transcriptionOverallText.setVisibility(View.GONE);
+        LinearLayout.LayoutParams overallTranscriptionLabelParams =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        overallTranscriptionLabelParams.setMargins(0, AndroidUi.dp(this, 10), 0, 0);
+        transcriptionActivityContainer.addView(
+                transcriptionOverallText, overallTranscriptionLabelParams);
+
+        transcriptionOverallProgress = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        transcriptionOverallProgress.setId(R.id.voicebutton_transcription_overall_bar);
+        transcriptionOverallProgress.setMax(1000);
+        transcriptionOverallProgress.setContentDescription("All recordings transcription progress");
+        transcriptionOverallProgress.setVisibility(View.GONE);
+        LinearLayout.LayoutParams overallTranscriptionBarParams =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, AndroidUi.dp(this, 8));
+        overallTranscriptionBarParams.setMargins(0, AndroidUi.dp(this, 4), 0, 0);
+        transcriptionActivityContainer.addView(
+                transcriptionOverallProgress, overallTranscriptionBarParams);
         LinearLayout.LayoutParams transcriptParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         transcriptParams.setMargins(0, AndroidUi.dp(this, 5),
@@ -620,7 +673,7 @@ public final class MainActivity extends Activity {
             LinearLayout recording=new LinearLayout(this);recording.setOrientation(LinearLayout.VERTICAL);
             recording.addView(statusCard);
             recording.addView(uploadActivityContainer);
-            recording.addView(transcriptionActivityText, transcriptParams);
+            recording.addView(transcriptionActivityContainer, transcriptParams);
             recording.addView(setupContainer);
             information.addView(recording,new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f));
             LinearLayout.LayoutParams right=new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f);
@@ -628,7 +681,7 @@ public final class MainActivity extends Activity {
         } else {
             information.addView(statusCard);
             information.addView(uploadActivityContainer);
-            information.addView(transcriptionActivityText, transcriptParams);
+            information.addView(transcriptionActivityContainer, transcriptParams);
             information.addView(transfers);
             information.addView(setupContainer);
         }
@@ -1345,7 +1398,9 @@ public final class MainActivity extends Activity {
                         ? "\n" + uploadActivityTitle.getText()
                             + "\n" + uploadActivityDetail.getText() : "")
                 + (transcriptionActivityText.getVisibility() == View.VISIBLE
-                        ? "\n" + transcriptionActivityText.getText() : "");
+                        ? "\n" + transcriptionActivityText.getText() : "")
+                + (transcriptionOverallText.getVisibility() == View.VISIBLE
+                        ? "\n" + transcriptionOverallText.getText() : "");
         new MaterialAlertDialogBuilder(this).setTitle("Current status")
                 .setMessage(message).setPositiveButton("Back", null).show();
     }
@@ -1727,68 +1782,69 @@ public final class MainActivity extends Activity {
             renderTranscriptionOperations(lastTranscriptionStatus,
                     " · " + formatStatusAge(age) + " old", true);
         } else {
-            setTextIfChanged(transcriptionActivityText,
-                    "Transcription status unavailable · check connection · More → Retry");
-            transcriptionActivityText.setTextColor(AndroidUi.ORANGE);
-            transcriptionActivityText.setVisibility(View.VISIBLE);
+            renderTranscriptionOperations(null, "", true);
         }
     }
 
     private void renderTranscriptionOperations(
             ReliableUploadClient.TranscriptionStatus value,
             String staleSuffix, boolean stale) {
-        if (transcriptionActivityText == null) return;
+        if (transcriptionActivityContainer == null) return;
+        // Old archive-size bars remain hidden; the new labelled bars use
+        // independent per-file frame and overall-server denominators.
         transcriptionSummaryText.setVisibility(View.GONE);
         transcriptionProgressBar.setVisibility(View.GONE);
         transcriptionCurrentText.setVisibility(View.GONE);
         transcriptionCurrentProgressBar.setVisibility(View.GONE);
         transcriptionQueueContainer.setVisibility(View.GONE);
-        if (value == null || (value.pending.isEmpty() && value.notTranscribedCount == 0)) {
-            transcriptionActivityText.setVisibility(View.GONE);
+
+        TranscriptionProgressPresentation.State state =
+                TranscriptionProgressPresentation.from(value, staleSuffix, stale);
+        boolean showCurrent = !state.currentLabel.isEmpty();
+        boolean showOverall = !state.overallLabel.isEmpty();
+        if (!showCurrent && !showOverall) {
+            transcriptionActivityContainer.setVisibility(View.GONE);
             return;
         }
-        if (value.pending.isEmpty()) {
-            setTextIfChanged(transcriptionActivityText,
-                    "Transcription: " + value.notTranscribedCount
-                    + " waiting" + (stale ? staleSuffix : ""));
-            transcriptionActivityText.setTextColor(stale ? AndroidUi.ORANGE : AndroidUi.MUTED);
+        if (showCurrent) {
+            setTextIfChanged(transcriptionActivityText, state.currentLabel);
+            transcriptionActivityText.setTextColor(state.currentError || state.stale
+                    ? AndroidUi.ORANGE : AndroidUi.INK);
             transcriptionActivityText.setVisibility(View.VISIBLE);
-            return;
-        }
-        ReliableUploadClient.CurrentTranscription focus = value.pending.get(0);
-        for (ReliableUploadClient.CurrentTranscription candidate : value.pending) {
-            if ("RUNNING".equals(candidate.state)) {
-                focus = candidate;
-                break;
-            }
-        }
-        String name = focus.displayName == null || focus.displayName.isEmpty()
-                ? "recording" : focus.displayName;
-        String phase = focus.phase == null ? ""
-                : focus.phase.toLowerCase(java.util.Locale.ROOT);
-        String text;
-        if ("RUNNING".equals(focus.state) && !stale) {
-            if ("loading".equals(phase)) text = "Transcript: loading model · " + name;
-            else if ("starting".equals(phase) || focus.framesTotal <= 0L) {
-                text = "Transcript: starting · " + name;
+            if (state.currentPermille >= 0) {
+                transcriptionActivityProgress.setIndeterminate(false);
+                transcriptionActivityProgress.setProgress(state.currentPermille);
+                transcriptionActivityProgress.setVisibility(View.VISIBLE);
+            } else if (state.currentProcessing) {
+                transcriptionActivityProgress.setIndeterminate(true);
+                transcriptionActivityProgress.setVisibility(View.VISIBLE);
             } else {
-                text = "Transcript: " + name + " · "
-                        + Math.max(0, Math.min(100, focus.percent)) + "%";
+                // A failed operation is stopped, not secretly still running.
+                transcriptionActivityProgress.setVisibility(View.GONE);
             }
-        } else if ("FAILED".equals(focus.state)) {
-            text = "Transcription failed: " + name + " · More → Transcribe recordings";
-        } else if ("MANUAL".equals(focus.state)) {
-            text = "Automatic transcription off · More → Transcribe recordings";
+            transcriptionActivityProgress.setContentDescription(state.currentLabel);
         } else {
-            text = "Transcript waiting: " + name;
+            transcriptionActivityText.setVisibility(View.GONE);
+            transcriptionActivityProgress.setVisibility(View.GONE);
         }
-        if (value.pending.size() > 1) text += " · " + (value.pending.size() - 1) + " more";
-        if (stale && staleSuffix != null) text += staleSuffix;
-        setTextIfChanged(transcriptionActivityText, text);
-        transcriptionActivityText.setTextColor(
-                stale || "FAILED".equals(focus.state)
-                        ? AndroidUi.ORANGE : AndroidUi.MUTED);
-        transcriptionActivityText.setVisibility(View.VISIBLE);
+        if (showOverall) {
+            setTextIfChanged(transcriptionOverallText, state.overallLabel);
+            transcriptionOverallText.setTextColor(state.stale
+                    ? AndroidUi.ORANGE : AndroidUi.MUTED);
+            transcriptionOverallText.setVisibility(View.VISIBLE);
+            if (state.overallPermille >= 0) {
+                transcriptionOverallProgress.setIndeterminate(false);
+                transcriptionOverallProgress.setProgress(state.overallPermille);
+            } else {
+                transcriptionOverallProgress.setIndeterminate(true);
+            }
+            transcriptionOverallProgress.setContentDescription(state.overallLabel);
+            transcriptionOverallProgress.setVisibility(View.VISIBLE);
+        } else {
+            transcriptionOverallText.setVisibility(View.GONE);
+            transcriptionOverallProgress.setVisibility(View.GONE);
+        }
+        transcriptionActivityContainer.setVisibility(View.VISIBLE);
     }
 
     private void addOperationHeader(LinearLayout container, String title) {

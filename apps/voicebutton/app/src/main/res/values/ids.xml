@@ -23,4 +23,7 @@
     <item name="voicebutton_active_upload" type="id" />
     <item name="voicebutton_active_upload_bar" type="id" />
     <item name="voicebutton_secondary_transcription" type="id" />
+    <item name="voicebutton_active_transcription_bar" type="id" />
+    <item name="voicebutton_transcription_overall_label" type="id" />
+    <item name="voicebutton_transcription_overall_bar" type="id" />
 </resources>

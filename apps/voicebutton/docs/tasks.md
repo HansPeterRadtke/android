@@ -77,3 +77,8 @@ Version 0.94 corrects the complete-guideline audit findings in capture durabilit
 ## Version 0.96: recording-first UI and paused action reconciliation (2026-11-12)
 
 Preserves 0.95's private Studio token configuration, manual versus automatic upload/transcription controls, compact layout, player and library behavior. Moves the recording overview to one current-file upload progress line (live acknowledged file bytes, phase, and count of other waiting recordings) and one subordinate transcription status. Whole historical backlogs no longer occupy the recorder screen. Restores Start/Pause/Resume enabled state on every service snapshot, with immediate acknowledgement and a bounded watchdog if an acknowledgement never arrives. Do not ship an older 0.92 branch over the released 0.95 baseline. Test restored paused actions, live audio capture, manual settings, local USB/emulator lifecycle and owner device before declaring a physical-phone acceptance.
+
+
+## Version 0.97: transcription progress correction (2026-11-13)
+
+Restore honest visible transcription progress bars on the recorder screen. Current-file progress is calculated from live Jetson processed and expected frame counts, with filename and percentage. A second, smaller labelled bar may show the server's overall committed-file progress, never instead of the current-file bar or upload bar. Use indeterminate progress for loading/unknown frames, last-known age for stale snapshots and explicit error state for failures. Keep previously repaired Pause/Resume logic, current-file upload progress and automation controls. Add unit and emulator tests for measured progress, distinct denominators, indeterminate loading, stale progress and complete archive state.
