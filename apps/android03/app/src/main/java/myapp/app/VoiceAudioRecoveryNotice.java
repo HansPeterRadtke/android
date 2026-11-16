@@ -17,6 +17,11 @@ final class VoiceAudioRecoveryNotice {
         && !artifactTurnId.isEmpty();
   }
 
+  static boolean isSavedRecordingState(String state, String reason) {
+    return "listening".equals(state)
+        && "recognition_unavailable_recording_saved".equals(reason);
+  }
+
   static boolean isSavedRecordingError(String stage, String code) {
     return "stt".equals(stage)
         && "speech_recognition_unavailable_recording_saved".equals(code);

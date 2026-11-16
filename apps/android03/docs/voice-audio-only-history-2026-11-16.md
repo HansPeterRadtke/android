@@ -26,6 +26,17 @@ transcript. The matching STT error code produces a plain message:
 'Recording saved, but transcription failed. Replay it or record again.
 Nothing was sent to SWAAG.'
 
+The subsequent server listening-state event also carries an explicit
+recognition_unavailable_recording_saved reason. The Activity now preserves
+the informative status detail across the ordered artifact, error and
+listening events. This repairs a separately observed UI logic problem:
+setForegroundMode(READY, detailOverride) intentionally discards its
+detailOverride and the old listening handler reset the status immediately.
+For this explicitly saved-recording case, the Activity uses TEXT_ONLY with
+the saved-audio explanation instead. Ordinary genuine silence, another
+listening reason, or a later successful operation does not latch the warning
+indefinitely. The dedicated strict state predicate has its own unit test.
+
 The normal conversation history renderer inserts the same system
 information for a status of asr_unavailable with has_user_audio true.
 No system message is inserted for genuine silence, plain failed network
@@ -35,14 +46,14 @@ unchanged. A history refresh replaces the text as usual instead of
 appending duplicate warning lines.
 
 A small pure Java VoiceAudioRecoveryNotice helper centralizes strict
-status/event/code checks; three new JUnit tests prevent accidental
+status/event/code checks; four new JUnit tests prevent accidental
 false notices for silence, non-ASR errors and absent audio IDs.
 All recorded audio remains private on the owner server, outside Git.
 
 ## Independent checks
 
 The Android debug Gradle build and unit tests completed offline using
-a local test token with -PvoiceGuidelineTest. The new build ran 73 JUnit
+a local test token with -PvoiceGuidelineTest. The final rebuild ran 74 JUnit
 tests with zero failures or skipped tests and produced a debug APK.
 The companion Jetson source passed its original PCM reconnect and
 replay acceptance and broader server tests independently.

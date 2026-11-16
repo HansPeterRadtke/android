@@ -26,6 +26,16 @@ public class VoiceAudioRecoveryNoticeTest {
         "final", "recognition_unavailable", true, "turn-123"));
   }
 
+  @Test public void listeningAfterSavedRecordingMustKeepItsWarning() {
+    assertTrue(VoiceAudioRecoveryNotice.isSavedRecordingState(
+        "listening", "recognition_unavailable_recording_saved"));
+    assertFalse(VoiceAudioRecoveryNotice.isSavedRecordingState(
+        "listening", "empty_final"));
+    assertFalse(VoiceAudioRecoveryNotice.isSavedRecordingState(
+        "awaiting_send", "recognition_unavailable_recording_saved"));
+    assertFalse(VoiceAudioRecoveryNotice.isSavedRecordingState("listening", ""));
+  }
+
   @Test public void genericSttAndSubmissionErrorsCannotMasqueradeAsSavedRecording() {
     assertTrue(VoiceAudioRecoveryNotice.isSavedRecordingError(
         "stt", "speech_recognition_unavailable_recording_saved"));

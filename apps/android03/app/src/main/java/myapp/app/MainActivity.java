@@ -1069,10 +1069,15 @@ public class MainActivity extends Activity {
           if(foregroundMode==ForegroundMode.SPEAKING || foregroundMode==ForegroundMode.BUFFERING)
             showListeningState();
         } else if ("listening".equals(state)) {
-          if ("turn_incomplete".equals(obj.optString("reason")) && !pendingTurnId.isEmpty())
+          String reason = obj.optString("reason", "");
+          if (VoiceAudioRecoveryNotice.isSavedRecordingState(state, reason)) {
+            setForegroundMode(ForegroundMode.TEXT_ONLY,
+                getString(R.string.conversation_recording_untranscribed));
+          } else if ("turn_incomplete".equals(reason) && !pendingTurnId.isEmpty()) {
             setForegroundMode(ForegroundMode.CONTINUING, null);
-          else if (pendingTurnId.isEmpty() && foregroundMode != ForegroundMode.ANSWER_ERROR)
+          } else if (pendingTurnId.isEmpty() && foregroundMode != ForegroundMode.ANSWER_ERROR) {
             showListeningState();
+          }
         }
       } else if ("asr".equals(type)) {
         connectionTracker.onMediaAck(listenerGeneration, System.currentTimeMillis());
@@ -1089,7 +1094,7 @@ public class MainActivity extends Activity {
             latestUserTurnId = artifactId;
             replayUserAvailable = true;
             updateReplayRow();
-            setForegroundMode(ForegroundMode.READY,
+            setForegroundMode(ForegroundMode.TEXT_ONLY,
                 getString(R.string.conversation_recording_untranscribed));
           }
         } else if ("partial".equals(event)) {
@@ -1222,7 +1227,7 @@ public class MainActivity extends Activity {
         updateServiceHealth();
         if (VoiceAudioRecoveryNotice.isSavedRecordingError(
             stage, obj.optString("message", ""))) {
-          setForegroundMode(ForegroundMode.READY,
+          setForegroundMode(ForegroundMode.TEXT_ONLY,
               getString(R.string.conversation_recording_untranscribed));
         } else if ("stt".equals(stage) || "tts".equals(stage)) {
           setForegroundMode(ForegroundMode.READY, getString(R.string.health_strip_text_only));
