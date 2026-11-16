@@ -1079,6 +1079,19 @@ public class MainActivity extends Activity {
         String heard = obj.optString("text", "").trim();
         if ("artifact".equals(event)) {
           discardRejectedAsrPartial();
+          // All recognizers can fail after the original microphone WAV was
+          // durably saved. Expose replay immediately without fabricating an
+          // editable transcript or a submitted SWAAG message.
+          String artifactId = obj.optString("turn_id", "");
+          if (VoiceAudioRecoveryNotice.justSaved(event,
+              obj.optString("reason", ""), obj.optBoolean("has_user_audio", false),
+              artifactId)) {
+            latestUserTurnId = artifactId;
+            replayUserAvailable = true;
+            updateReplayRow();
+            setForegroundMode(ForegroundMode.READY,
+                getString(R.string.conversation_recording_untranscribed));
+          }
         } else if ("partial".equals(event)) {
           if (!heard.isEmpty() && pendingTurnId.isEmpty()) showSpeechPartial(heard);
         } else if ("final".equals(event)) {
@@ -1207,7 +1220,11 @@ public class MainActivity extends Activity {
         else if ("tts".equals(stage)) serverTtsReady = false;
         else if ("llm".equals(stage) || "agent".equals(stage)) serverAgentReady = false;
         updateServiceHealth();
-        if ("stt".equals(stage) || "tts".equals(stage)) {
+        if (VoiceAudioRecoveryNotice.isSavedRecordingError(
+            stage, obj.optString("message", ""))) {
+          setForegroundMode(ForegroundMode.READY,
+              getString(R.string.conversation_recording_untranscribed));
+        } else if ("stt".equals(stage) || "tts".equals(stage)) {
           setForegroundMode(ForegroundMode.READY, getString(R.string.health_strip_text_only));
         } else {
           setForegroundMode(ForegroundMode.UNAVAILABLE, getString(R.string.server_error));
@@ -3059,6 +3076,12 @@ public class MainActivity extends Activity {
         if (!user.trim().isEmpty()) {
           rendered.append("You\n").append(user).append("\n\n");
           lastUser = turnId;
+        }
+        if (VoiceAudioRecoveryNotice.inHistory(
+            status, turn.optBoolean("has_user_audio", false))) {
+          rendered.append("System\n")
+              .append(getString(R.string.conversation_recording_untranscribed))
+              .append("\n\n");
         }
         if (!assistant.trim().isEmpty()) {
           rendered.append("Agent\n").append(assistant).append("\n\n");

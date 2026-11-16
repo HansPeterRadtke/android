@@ -19,6 +19,7 @@
     <string name="status_answer_failed">SWAAG did not answer</string>
     <string name="detail_answer_failed">Your message arrived, but SWAAG failed to complete it. It was not automatically retried; the requested work may need inspection.</string>
     <string name="conversation_answer_failed">This request reached SWAAG, but its answer failed. No successful completion is confirmed.</string>
+    <string name="conversation_recording_untranscribed">Recording saved, but transcription failed. Replay it or record again. Nothing was sent to SWAAG.</string>
     <string name="restore_previous_message">Restore previous unsent message</string>
 
     <string name="status_finishing">Finishing</string>
