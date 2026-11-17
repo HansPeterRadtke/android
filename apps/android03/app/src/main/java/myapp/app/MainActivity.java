@@ -262,6 +262,7 @@ public class MainActivity extends Activity {
   private volatile boolean voiceActivityCues = true;
   private volatile boolean serverHelloReady = false;
   private volatile boolean serverCanCommit;
+  private volatile boolean serverCanRetrySavedAudio;
   private volatile String serverVersion = "";
   private volatile String serverAsr = "";
   private volatile String serverTts = "";
@@ -287,6 +288,8 @@ public class MainActivity extends Activity {
   private final ConversationTextModel conversationTextModel = new ConversationTextModel();
   private volatile boolean replayUserAvailable = false;
   private volatile boolean replayAssistantAvailable = false;
+  private volatile String savedRetryArtifactTurnId = "";
+  private volatile boolean savedRetryInFlight = false;
   private final WorkerEventSequencePolicy workerEventSequences = new WorkerEventSequencePolicy();
   private volatile String workerQuestionInventoryJson = "[]";
   private volatile boolean workerQuestionInventoryComplete = true;
@@ -1017,6 +1020,9 @@ public class MainActivity extends Activity {
         serverHelloReady = true;
         manualGreetingSocket = source;
         serverCanCommit=obj.optInt("commit_protocol",0)==1;
+        serverCanRetrySavedAudio=obj.optInt("saved_audio_retry_protocol",0)==1;
+        savedRetryInFlight=false;
+        savedRetryArtifactTurnId="";
         sendClientState();
         serverVersion = obj.optString("version", "");
         serverAsr = obj.optString("asr", "");
@@ -1048,7 +1054,16 @@ public class MainActivity extends Activity {
         replaceConversationHistory(obj.optJSONArray("turns"));
       } else if ("state".equals(type)) {
         String state = obj.optString("state", "");
-        if ("transcribing".equals(state))setForegroundMode(ForegroundMode.TRANSCRIBING,null);
+        if ("transcribing".equals(state)) {
+          String reason = obj.optString("reason", "");
+          if (VoiceSavedAudioRetryPolicy.isInProgress(reason)) {
+            savedRetryInFlight = true;
+            setForegroundMode(ForegroundMode.TRANSCRIBING,
+                getString(R.string.retry_saved_transcription_in_progress));
+          } else {
+            setForegroundMode(ForegroundMode.TRANSCRIBING, null);
+          }
+        }
         else if("checking_turn".equals(state))setForegroundMode(ForegroundMode.TRANSCRIBING,getString(R.string.checking_turn));
         else if("generating_speech".equals(state))setForegroundMode(ForegroundMode.BUFFERING,getString(R.string.generating_speech));
         else if ("thinking".equals(state)) setForegroundMode(ForegroundMode.THINKING, null);
@@ -1060,8 +1075,11 @@ public class MainActivity extends Activity {
             setAsrDraftText(lastFinalAsrText, false);
           }
           String reason = obj.optString("reason", "");
+          if (VoiceSavedAudioRetryPolicy.isReview(reason)) savedRetryInFlight = false;
           setForegroundMode(ForegroundMode.REVIEW,
-              "turn_classifier_unavailable".equals(reason) ? getString(R.string.turn_classifier_unavailable)
+              VoiceSavedAudioRetryPolicy.isReview(reason)
+                  ? getString(R.string.retry_saved_transcription_review)
+              : "turn_classifier_unavailable".equals(reason) ? getString(R.string.turn_classifier_unavailable)
               : "asr_verification_degraded".equals(reason) ? getString(R.string.transcription_needs_review)
               : null);
           updateTranscriptPanel();
@@ -1071,6 +1089,7 @@ public class MainActivity extends Activity {
         } else if ("listening".equals(state)) {
           String reason = obj.optString("reason", "");
           if (VoiceAudioRecoveryNotice.isSavedRecordingState(state, reason)) {
+            savedRetryInFlight = false;
             setForegroundMode(ForegroundMode.TEXT_ONLY,
                 getString(R.string.conversation_recording_untranscribed));
           } else if ("turn_incomplete".equals(reason) && !pendingTurnId.isEmpty()) {
@@ -1092,6 +1111,8 @@ public class MainActivity extends Activity {
               obj.optString("reason", ""), obj.optBoolean("has_user_audio", false),
               artifactId)) {
             latestUserTurnId = artifactId;
+            savedRetryArtifactTurnId = artifactId;
+            savedRetryInFlight = false;
             replayUserAvailable = true;
             updateReplayRow();
             setForegroundMode(ForegroundMode.TEXT_ONLY,
@@ -1101,6 +1122,10 @@ public class MainActivity extends Activity {
           if (!heard.isEmpty() && pendingTurnId.isEmpty()) showSpeechPartial(heard);
         } else if ("final".equals(event)) {
           pendingTurnId = obj.optString("turn_id", "");
+          if (pendingTurnId.equals(savedRetryArtifactTurnId)) {
+            savedRetryArtifactTurnId = "";
+            savedRetryInFlight = false;
+          }
           latestUserTurnId = pendingTurnId;
           replayUserAvailable = obj.optBoolean("has_user_audio", false);
           ManualTranscription request = manualTranscription;
@@ -1221,11 +1246,18 @@ public class MainActivity extends Activity {
           updateTranscriptPanel();
           return;
         }
+        if (VoiceSavedAudioRetryPolicy.isRetryError(stage, obj.optString("message", ""))) {
+          savedRetryInFlight = false;
+        }
         if ("stt".equals(stage)) serverSttReady = false;
         else if ("tts".equals(stage)) serverTtsReady = false;
         else if ("llm".equals(stage) || "agent".equals(stage)) serverAgentReady = false;
         updateServiceHealth();
-        if (VoiceAudioRecoveryNotice.isSavedRecordingError(
+        if (VoiceSavedAudioRetryPolicy.isRetryError(
+            stage, obj.optString("message", ""))) {
+          setForegroundMode(ForegroundMode.TEXT_ONLY,
+              getString(R.string.conversation_recording_untranscribed));
+        } else if (VoiceAudioRecoveryNotice.isSavedRecordingError(
             stage, obj.optString("message", ""))) {
           setForegroundMode(ForegroundMode.TEXT_ONLY,
               getString(R.string.conversation_recording_untranscribed));
@@ -1676,6 +1708,20 @@ public class MainActivity extends Activity {
       loadAssistant.setOnClickListener(v -> requestReplay("assistant"));
     }
 
+    // This is a user-triggered retry, never an automatic voice command.
+    // Older WebSocket servers cannot advertise this capability, so no
+    // unsupported request may be sent to production by accident.
+    MaterialButton retrySavedAudio = new MaterialButton(this);
+    if (!savedRetryArtifactTurnId.isEmpty()) {
+      retrySavedAudio.setText(R.string.retry_saved_transcription);
+      retrySavedAudio.setMinHeight(dp(48));
+      retrySavedAudio.setEnabled(VoiceSavedAudioRetryPolicy.canRequest(
+          savedRetryArtifactTurnId, serverCanRetrySavedAudio,
+          serverHelloReady && connectionTracker.isOpen(),
+          running.get() || savedRetryInFlight));
+      content.addView(retrySavedAudio, fullWrap());
+    }
+
     String previousDraft = historyPrefs.getString(LEGACY_DRAFT_BACKUP_PREF_KEY, "");
     if (previousDraft != null && !previousDraft.isEmpty()) {
       MaterialButton restore = new MaterialButton(this);
@@ -1706,6 +1752,10 @@ public class MainActivity extends Activity {
         .setPositiveButton(R.string.done, null)
         .create();
 
+    retrySavedAudio.setOnClickListener(v -> {
+      dialog.dismiss();
+      requestSavedAudioRetry();
+    });
     change.setOnClickListener(v -> {
       dialog.dismiss();
       showMicrophonePicker();
@@ -2539,6 +2589,37 @@ public class MainActivity extends Activity {
   }
 
 
+  private void requestSavedAudioRetry() {
+    String turnId = savedRetryArtifactTurnId;
+    WebSocket socket = webSocket;
+    if (!VoiceSavedAudioRetryPolicy.canRequest(
+        turnId, serverCanRetrySavedAudio,
+        socket != null && serverHelloReady && connectionTracker.isOpen(),
+        running.get() || savedRetryInFlight)) {
+      setPrimaryStatus(foregroundTitle(),
+          getString(R.string.retry_saved_transcription_unavailable));
+      return;
+    }
+    try {
+      JSONObject request = new JSONObject();
+      request.put("type", "retry_untranscribed_audio");
+      request.put("turn_id", turnId);
+      if (!socket.send(request.toString())) {
+        setPrimaryStatus(foregroundTitle(), getString(R.string.not_connected_action));
+        return;
+      }
+      // A socket queue acceptance is NOT a transcription result.
+      // Wait for server state/asr.final before claiming it was processed.
+      savedRetryInFlight = true;
+      setPrimaryStatus(getString(R.string.status_transcribing),
+          getString(R.string.retry_saved_transcription_requested));
+    } catch (Exception exc) {
+      savedRetryInFlight = false;
+      appendDiagnostic("Recorded audio retry request rejected: "
+          + exc.getClass().getSimpleName());
+    }
+  }
+
   private void requestReplay(String kind) {
     String turnId = "assistant".equals(kind) ? latestAssistantTurnId : latestUserTurnId;
     if (turnId.isEmpty()) {
@@ -3063,6 +3144,7 @@ public class MainActivity extends Activity {
     String lastAssistant = "";
     String draftTurn = "";
     String draftText = "";
+    String failedAudioTurn = "";
     boolean userAudio = false;
     boolean assistantAudio = false;
     if (turns != null) {
@@ -3073,6 +3155,10 @@ public class MainActivity extends Activity {
         String user = turn.optString("user", "");
         String assistant = turn.optString("assistant", "");
         String status = turn.optString("status", "");
+        if (i == turns.length() - 1 && VoiceAudioRecoveryNotice.inHistory(
+            status, turn.optBoolean("has_user_audio", false))) {
+          failedAudioTurn = turnId;
+        }
         if ("draft".equals(status)) {
           draftTurn = turnId;
           draftText = turn.optString("recognized_text", user);
@@ -3113,6 +3199,7 @@ public class MainActivity extends Activity {
     String finalLastAssistant = lastAssistant;
     String finalDraftTurn = draftTurn;
     String finalDraftText = draftText;
+    String finalFailedAudioTurn = failedAudioTurn;
     boolean finalUserAudio = userAudio;
     boolean finalAssistantAudio = assistantAudio;
     runOnUiThread(() -> {
@@ -3120,6 +3207,8 @@ public class MainActivity extends Activity {
       pendingTurnId = automaticSpeechToAgent() ? "" : finalDraftTurn;
       replayUserAvailable = finalUserAudio;
       replayAssistantAvailable = finalAssistantAudio;
+      savedRetryArtifactTurnId = finalFailedAudioTurn;
+      if (finalFailedAudioTurn.isEmpty()) savedRetryInFlight = false;
       if (!finalDraftTurn.isEmpty() && !automaticSpeechToAgent()) {
         if (!userClaimedAsrPartial) {
           setAsrDraftText(finalDraftText, false);

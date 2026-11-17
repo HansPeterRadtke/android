@@ -1,5 +1,9 @@
 # Android voice UI: saved original recording when every ASR service is down
 
+**Follow-up (November 17):** The separate isolated explicit
+re-transcription control and its server capability contract are
+documented in voice-retry-stored-recording-2026-11-17.md.
+
 Date: November 16, 2026. This is an isolated client development branch,
 not installed on the owner's physical device or deployed to production.
 

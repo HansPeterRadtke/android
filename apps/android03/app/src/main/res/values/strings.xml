@@ -19,7 +19,12 @@
     <string name="status_answer_failed">SWAAG did not answer</string>
     <string name="detail_answer_failed">Your message arrived, but SWAAG failed to complete it. It was not automatically retried; the requested work may need inspection.</string>
     <string name="conversation_answer_failed">This request reached SWAAG, but its answer failed. No successful completion is confirmed.</string>
-    <string name="conversation_recording_untranscribed">Recording saved, but transcription failed. Replay it or record again. Nothing was sent to SWAAG.</string>
+    <string name="conversation_recording_untranscribed">Recording saved, but transcription failed. Replay it or retry transcription. Nothing was sent to SWAAG.</string>
+    <string name="retry_saved_transcription">Retry saved recording transcription</string>
+    <string name="retry_saved_transcription_requested">Retry requested. Waiting for the server to confirm.</string>
+    <string name="retry_saved_transcription_unavailable">Saved transcription retry is unavailable on this server or while recording.</string>
+    <string name="retry_saved_transcription_in_progress">Recognizing the stored recording. Nothing is being sent to SWAAG.</string>
+    <string name="retry_saved_transcription_review">Stored recording transcribed. Review the text before sending.</string>
     <string name="restore_previous_message">Restore previous unsent message</string>
 
     <string name="status_finishing">Finishing</string>
