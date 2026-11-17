@@ -1122,7 +1122,12 @@ public class MainActivity extends Activity {
           if (!heard.isEmpty() && pendingTurnId.isEmpty()) showSpeechPartial(heard);
         } else if ("final".equals(event)) {
           pendingTurnId = obj.optString("turn_id", "");
-          if (pendingTurnId.equals(savedRetryArtifactTurnId)) {
+          if (!pendingTurnId.isEmpty() && !heard.isEmpty()
+              && !savedRetryArtifactTurnId.isEmpty()) {
+            // A different, newer final ASR has superseded the failed
+            // recording. Its old retry ID is no longer the latest canonical
+            // turn, even if it has not yet received the next history event.
+            // Clear the UI target immediately, not just after a history sync.
             savedRetryArtifactTurnId = "";
             savedRetryInFlight = false;
           }

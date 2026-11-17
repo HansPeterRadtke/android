@@ -1,5 +1,11 @@
 # Canonical Android voice draft review after reconnect — November 17, 2026
 
+**Later same-day emulator acceptance:** See
+voice-review-emulator-noaction-2026-11-17.md for seven actual
+Android Activity/UI tests, an additional independently reproduced
+stale saved-recording retry-target defect and its source fix.
+This remains isolated from the physical Android phone and SWAAG.
+
 **Status:** isolated source repair and offline unit/build verification.
 This has not been installed on a physical Android device or released
 to the live Jetson voice server. Previously denied Android lost-playback-
