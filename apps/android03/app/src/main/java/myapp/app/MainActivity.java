@@ -3160,8 +3160,12 @@ public class MainActivity extends Activity {
           failedAudioTurn = turnId;
         }
         if ("draft".equals(status)) {
-          draftTurn = turnId;
-          draftText = turn.optString("recognized_text", user);
+          String recognized = turn.optString("recognized_text", user);
+          if (VoicePendingDraftRecovery.isRestorableLatestDraft(
+              i, turns.length(), status, recognized)) {
+            draftTurn = turnId;
+            draftText = recognized;
+          }
           continue;
         }
         if (!user.trim().isEmpty()) {
@@ -3204,12 +3208,13 @@ public class MainActivity extends Activity {
     boolean finalAssistantAudio = assistantAudio;
     runOnUiThread(() -> {
       conversationTextModel.replaceHistory(finalRendered, finalLastUser, finalLastAssistant);
-      pendingTurnId = automaticSpeechToAgent() ? "" : finalDraftTurn;
+      pendingTurnId = VoicePendingDraftRecovery.recoveredTurnId(
+          finalDraftTurn, automaticSpeechToAgent());
       replayUserAvailable = finalUserAudio;
       replayAssistantAvailable = finalAssistantAudio;
       savedRetryArtifactTurnId = finalFailedAudioTurn;
       if (finalFailedAudioTurn.isEmpty()) savedRetryInFlight = false;
-      if (!finalDraftTurn.isEmpty() && !automaticSpeechToAgent()) {
+      if (!pendingTurnId.isEmpty()) {
         if (!userClaimedAsrPartial) {
           setAsrDraftText(finalDraftText, false);
         }

@@ -1,5 +1,8 @@
 # Android voice UI: saved original recording when every ASR service is down
 
+**November 17 follow-up:** The separate source-level restoration rule for the latest review-only voice draft, including automatic-mode reconnect and old-draft supersession, is documented in voice-review-reconnect-2026-11-17.md. The normal live server has not been replaced.
+
+
 **Follow-up (November 17):** The separate isolated explicit
 re-transcription control and its server capability contract are
 documented in voice-retry-stored-recording-2026-11-17.md.
