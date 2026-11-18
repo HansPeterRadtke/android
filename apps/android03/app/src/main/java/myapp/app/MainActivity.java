@@ -263,6 +263,8 @@ public class MainActivity extends Activity {
   private volatile boolean serverHelloReady = false;
   private volatile boolean serverCanCommit;
   private volatile boolean serverCanRetrySavedAudio;
+  // Capability advertised by the trusted WebSocket server, not a client claim.
+  private volatile boolean serverRequiresSpeakerManualReview;
   private volatile String serverVersion = "";
   private volatile String serverAsr = "";
   private volatile String serverTts = "";
@@ -916,6 +918,7 @@ public class MainActivity extends Activity {
       serverHelloReady = false;
       wsConnecting.set(false);
       serverCanCommit=false;
+      serverRequiresSpeakerManualReview=false;
       appendDiagnostic("WebSocket connected.");
       sendClientState();
       if (running.get()) {
@@ -1021,6 +1024,8 @@ public class MainActivity extends Activity {
         manualGreetingSocket = source;
         serverCanCommit=obj.optInt("commit_protocol",0)==1;
         serverCanRetrySavedAudio=obj.optInt("saved_audio_retry_protocol",0)==1;
+        serverRequiresSpeakerManualReview =
+            obj.optBoolean("automatic_voice_requires_manual_review", false);
         savedRetryInFlight=false;
         savedRetryArtifactTurnId="";
         sendClientState();
@@ -1079,6 +1084,8 @@ public class MainActivity extends Activity {
           setForegroundMode(ForegroundMode.REVIEW,
               VoiceSavedAudioRetryPolicy.isReview(reason)
                   ? getString(R.string.retry_saved_transcription_review)
+              : VoiceSpeakerReviewPolicy.needsManualSpeakerReview(reason)
+                  ? getString(R.string.speaker_identity_unverified_review)
               : "turn_classifier_unavailable".equals(reason) ? getString(R.string.turn_classifier_unavailable)
               : "asr_verification_degraded".equals(reason) ? getString(R.string.transcription_needs_review)
               : null);
@@ -1290,7 +1297,10 @@ public class MainActivity extends Activity {
       state.put("conversation", conversationId);
       state.put("auto_transcribe", autoTranscribe);
       state.put("auto_send_requested", autoSend);
-      state.put("auto_commit_ready", serverCanCommit);
+      state.put("auto_commit_ready",
+          VoiceSpeakerReviewPolicy.canAdvertiseAutomaticCommit(
+              VoiceAutomationPolicy.effectiveAutoSend(autoTranscribe, autoSend),
+              serverCanCommit, serverRequiresSpeakerManualReview));
       state.put("capture_failed", voiceService != null && !voiceService.captureError().isEmpty());
       state.put("auto_send", VoiceAutomationPolicy.effectiveAutoSend(autoTranscribe, autoSend)
           && serverCanCommit

@@ -202,6 +202,41 @@ public class VoiceReviewReconnectEmulatorTest {
     }
   }
 
+  @Test public void serverWithoutVerifiedSpeakerKeepsExplicitReviewInAutoMode() throws Exception {
+    try (ActivityScenario<MainActivity> scenario=ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(screen -> {
+        try {
+          enableAutomaticPreferenceForLaterTurns(screen);
+          String id="unverified-foreground-new-turn";
+          String words="Use folder B rather than the old folder A.";
+          JSONObject hello=new JSONObject().put("type","hello")
+              .put("connection_generation",0).put("version","no-action-test-server")
+              .put("commit_protocol",1)
+              .put("automatic_voice_requires_manual_review",true)
+              .put("foreground_speaker_authority","unverified");
+          invoke(screen,"handleWsJson",new Class<?>[]{String.class,long.class},
+              hello.toString(),0L);
+          assertTrue((Boolean)get(screen,"serverRequiresSpeakerManualReview"));
+          invoke(screen,"handleWsJson",new Class<?>[]{String.class,long.class},
+              new JSONObject().put("type","asr").put("event","final")
+                  .put("turn_id",id).put("text",words).put("raw_text",words)
+                  .put("auto_send",true).put("has_user_audio",true).toString(),0L);
+          invoke(screen,"handleWsJson",new Class<?>[]{String.class,long.class},
+              new JSONObject().put("type","state").put("state","awaiting_send")
+                  .put("reason","speaker_identity_unverified")
+                  .put("turn_id",id).toString(),0L);
+          assertLatestDraftReview(screen,id,words);
+          TextView notice=screen.findViewById(R.id.voice_status_detail);
+          assertTrue(notice.getText().toString().contains("Speaker identity is not verified"));
+          assertTrue(notice.getText().toString().contains("No automatic command was sent"));
+          assertFalse(((TextView) screen.findViewById(R.id.voice_conversation))
+              .getText().toString().contains(words));
+          // This is a test-only isolated screen. Never tap Send.
+        } catch (Exception failure) {throw new AssertionError(failure);}
+      });
+    }
+  }
+
   private static void assertLatestDraftReview(MainActivity activity,String id,String words) {
     assertEquals(id,get(activity,"pendingTurnId"));
     assertEquals(words,((TextInputEditText)activity.findViewById(R.id.voice_draft))
