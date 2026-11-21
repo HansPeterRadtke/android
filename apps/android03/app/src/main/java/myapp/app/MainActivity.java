@@ -82,6 +82,8 @@ public class MainActivity extends Activity {
   private static final String AUTO_SEND_PREF_KEY = "send_automatically_v3";
   private static final String AUTO_TRANSCRIBE_PREF_KEY = "transcribe_automatically_v1";
   private static final String DRAFT_PREF_KEY = "current_message_v1";
+  private static final String TYPED_REQUEST_PREF_KEY = "pending_typed_request_id_v1";
+  private static final String TYPED_TEXT_PREF_KEY = "pending_typed_request_text_v1";
   private static final String VOCAB_PREF_KEY = "vocabulary_v1";
   private static final String VOCAB_CONFIGURED_PREF_KEY = "vocabulary_configured_v1";
   private static final String MANUAL_RECORDING_FILE = "voice_unsent_manual.pcm";
@@ -136,6 +138,9 @@ public class MainActivity extends Activity {
   private volatile boolean manualTranscribePending = false;
   private volatile boolean manualTranscriptPendingSubmission = false;
   private volatile boolean typedSendPending = false;
+  // Every typed Send has a stable identity across connections and app restarts.
+  private volatile String pendingTypedRequestId = "";
+  private volatile String pendingTypedText = "";
   private volatile boolean stopRequested = false;
   private volatile int nextSeq = 0;
   private volatile long droppedLiveFrames = 0L;
@@ -249,6 +254,16 @@ public class MainActivity extends Activity {
         .build();
     connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
     buildScreen();
+    // Only a previous explicit Send can persist this ID. Restore exact-text
+    // retries, but never automatically submit changed text after a lost ACK.
+    pendingTypedRequestId = historyPrefs.getString(TYPED_REQUEST_PREF_KEY, "");
+    pendingTypedText = historyPrefs.getString(TYPED_TEXT_PREF_KEY, "");
+    if (VoiceTypedRequestPolicy.mayRetry(pendingTypedRequestId,
+        pendingTypedText, draftEdit.getText().toString())) {
+      typedSendPending = true;
+    } else if (!VoiceTypedRequestPolicy.isValidId(pendingTypedRequestId)) {
+      forgetPendingTypedRequest();
+    }
     registerNetworkObserver();
     refreshPreferredMicrophonePreview();
     startConnectionMonitor();
@@ -665,6 +680,7 @@ public class MainActivity extends Activity {
       if (webSocket == socket) webSocket = null;
       wsConnecting.set(false);
       appendDiagnostic("WebSocket closed: " + code + " " + reason);
+      schedulePendingTypedRetry();
       serverHelloReady = false;
       clearComponentHealth();
       updateServiceHealth();
@@ -676,6 +692,7 @@ public class MainActivity extends Activity {
       if (webSocket == socket) webSocket = null;
       wsConnecting.set(false);
       appendDiagnostic("WebSocket failure: " + failure.getClass().getSimpleName());
+      schedulePendingTypedRetry();
       serverHelloReady = false;
       clearComponentHealth();
       updateServiceHealth();
@@ -730,7 +747,21 @@ public class MainActivity extends Activity {
           sendVocabulary();
         }
         updateServiceHealth();
-        if (typedSendPending && !draftEdit.getText().toString().trim().isEmpty()) submitDraft();
+        if (typedSendPending && !draftEdit.getText().toString().trim().isEmpty()) {
+          String restoredDraft = draftEdit.getText().toString().trim();
+          if (VoiceTypedRequestPolicy.isValidId(pendingTypedRequestId)
+              && !VoiceTypedRequestPolicy.mayRetry(
+                  pendingTypedRequestId, pendingTypedText, restoredDraft)) {
+            // The old message may already have executed. New wording must
+            // require another explicit Send rather than a new auto-operation.
+            typedSendPending = false;
+            setForegroundMode(ForegroundMode.REVIEW,
+                getString(R.string.voice_retry_changed_draft));
+            updateTranscriptPanel();
+          } else {
+            submitDraft();
+          }
+        }
         if (manualTranscribePending) transcribeManualRecording();
         if (!running.get() && foregroundMode != ForegroundMode.THINKING && !manualTranscribePending) setForegroundMode(ForegroundMode.READY, getString(R.string.detail_ready_text));
       } else if ("history".equals(type)) {
@@ -770,15 +801,25 @@ public class MainActivity extends Activity {
           conversationTextModel.confirmUser(turnId, submitted);
           persistAndRenderConversation();
         }
-        pendingTurnId = "";
-        clearDraft();
-        manualTranscribePending = false;
-        if (manualTranscriptPendingSubmission) {
-          manualTranscriptPendingSubmission = false;
-          clearManualRecording();
+        boolean ackForSpeech = !pendingTurnId.isEmpty() && pendingTurnId.equals(turnId);
+        boolean ackForTyped = VoiceTypedRequestPolicy.matchesAck(
+            pendingTypedRequestId, pendingTypedText, turnId, submitted);
+        if (ackForSpeech) pendingTurnId = "";
+        if (ackForTyped) forgetPendingTypedRequest();
+        if (ackForSpeech || ackForTyped) {
+          typedSendPending = false;
+          // An old network ACK must not erase a newer or edited user draft.
+          if (submitted.equals(draftEdit.getText().toString().trim())) {
+            clearDraft();
+          }
+          manualTranscribePending = false;
+          if (manualTranscriptPendingSubmission) {
+            manualTranscriptPendingSubmission = false;
+            clearManualRecording();
+          }
+          setForegroundMode(ForegroundMode.THINKING, null);
         }
         updateTranscriptPanel();
-        setForegroundMode(ForegroundMode.THINKING, null);
       } else if ("assistant".equals(type)) {
         String reply = obj.optString("text", "").trim();
         String turnId = obj.optString("turn_id", "");
@@ -1364,6 +1405,23 @@ public class MainActivity extends Activity {
     return clean.isEmpty() ? base : base + "\n" + clean;
   }
 
+  private void forgetPendingTypedRequest() {
+    pendingTypedRequestId = "";
+    pendingTypedText = "";
+    // Removing a confirmed ID asynchronously is safe: if this app crashes
+    // before it is persisted, retrying the same ID only gets a duplicate ACK.
+    historyPrefs.edit().remove(TYPED_REQUEST_PREF_KEY)
+        .remove(TYPED_TEXT_PREF_KEY).apply();
+  }
+
+  private void schedulePendingTypedRetry() {
+    // OkHttp callback runs off the UI thread; compare the draft only after
+    // the next authenticated server hello on the main event path.
+    if (VoiceTypedRequestPolicy.isValidId(pendingTypedRequestId)) {
+      typedSendPending = true;
+    }
+  }
+
   private void submitDraft() {
     String value = draftEdit.getText().toString().trim();
     if (value.isEmpty()) {
@@ -1386,10 +1444,32 @@ public class MainActivity extends Activity {
         obj.put("turn_id", pendingTurnId);
       } else {
         obj.put("type", "text_turn");
+        if (!VoiceTypedRequestPolicy.mayRetry(
+            pendingTypedRequestId, pendingTypedText, value)) {
+          String nextRequestId = java.util.UUID.randomUUID().toString().replace("-", "");
+          // Durably persist the operation ID BEFORE queuing it on the socket.
+          // SharedPreferences.apply() could be lost after the server acts and
+          // before the phone process dies, causing duplicate user commands.
+          boolean durable = historyPrefs.edit()
+              .putString(TYPED_REQUEST_PREF_KEY, nextRequestId)
+              .putString(TYPED_TEXT_PREF_KEY, value)
+              .commit();
+          if (!durable) {
+            typedSendPending = false;
+            setForegroundMode(ForegroundMode.REVIEW,
+                getString(R.string.voice_request_id_save_failed));
+            appendDiagnostic("Typed request could not be saved; no message sent.");
+            updateTranscriptPanel();
+            return;
+          }
+          pendingTypedRequestId = nextRequestId;
+          pendingTypedText = value;
+        }
+        obj.put("client_request_id", pendingTypedRequestId);
       }
       obj.put("text", value);
-      typedSendPending = false;
       if (!socket.send(obj.toString())) throw new IOException("WebSocket send rejected");
+      typedSendPending = false;
       sendDraftButton.setEnabled(false);
       setPrimaryStatus(getString(R.string.sending_transcript), getString(R.string.detail_thinking));
     } catch (Exception failure) {

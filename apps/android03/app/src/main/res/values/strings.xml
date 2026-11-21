@@ -65,6 +65,8 @@
     <string name="no_user_audio">No user audio is available yet.</string>
     <string name="no_answer_audio">No answer audio is available yet.</string>
     <string name="not_connected_action">This action needs a live connection.</string>
+    <string name="voice_retry_changed_draft">Your message changed after the connection was lost. Review it and press Send to confirm a new request.</string>
+    <string name="voice_request_id_save_failed">Could not save the request safely. Nothing was sent; try again.</string>
     <string name="transcript_empty">Transcript cannot be empty.</string>
     <string name="server_error">The voice service reported an error.</string>
     <string name="voice_auth_missing">This private voice build has no service credential. Connect using a trusted private build; no request was sent.</string>
