@@ -124,6 +124,15 @@ public class MainActivity extends Activity {
   private VoicePcmPlayerView userPlayer;
   private VoicePcmPlayerView assistantPlayer;
   private volatile VoicePcmPlayerView activePcmPlayer;
+  // These are taken only from the authenticated server's audio start event.
+  // Never treat network EOF or AudioTrack.write as a playback receipt.
+  // Network callbacks and AudioTrack's UI-thread completion callback are
+  // different threads. Volatile gives cross-thread visibility; the actual
+  // server also validates the entire turn+stream+generation tuple atomically.
+  private volatile String liveAudioTurnId = "";
+  private volatile String liveAudioStreamId = "";
+  private volatile int liveAudioGeneration = -1;
+  private volatile boolean playbackReceiptAwaitingServerAck = false;
   private MaterialButton startButton;
   private MaterialButton settingsButton;
   private MaterialButton diagnosticsButton;
@@ -358,10 +367,12 @@ public class MainActivity extends Activity {
     assistantPlayer = new VoicePcmPlayerView(this, appConfig.sampleRate, appConfig.playerMaxBytes, getString(R.string.assistant_audio));
     assistantPlayer.setId(R.id.voice_assistant_player);
     assistantPlayer.setRemoteStopListener(() -> {
+      forgetCurrentPlaybackReceipt();
       activePcmPlayer = null;
       sendControl("cancel", "user_stopped_playback", -1, 0.0, 0.0);
       showListeningState();
     });
+    assistantPlayer.setPlaybackCompletedListener(this::ackAssistantPlayback);
     LinearLayout audioContext = new LinearLayout(this);
     audioContext.setOrientation(LinearLayout.VERTICAL);
     audioContext.addView(userPlayer, fullWrap());
@@ -771,6 +782,10 @@ public class MainActivity extends Activity {
           sendVocabulary();
         }
         updateServiceHealth();
+        // If the phone played the previous audio but the server's durable
+        // receipt ACK was lost, send the SAME completion proof on reconnect.
+        // The server deduplicates these using the exact stream identity.
+        sendPendingPlaybackReceipt();
         if (typedSendPending && !draftEdit.getText().toString().trim().isEmpty()) {
           String restoredDraft = draftEdit.getText().toString().trim();
           if (VoiceTypedRequestPolicy.isValidId(pendingTypedRequestId)
@@ -788,6 +803,15 @@ public class MainActivity extends Activity {
         }
         if (manualTranscribePending) transcribeManualRecording();
         if (!running.get() && foregroundMode != ForegroundMode.THINKING && !manualTranscribePending) setForegroundMode(ForegroundMode.READY, getString(R.string.detail_ready_text));
+      } else if ("playback_ack".equals(type)) {
+        if (playbackReceiptAwaitingServerAck
+            && VoicePlaybackReceiptPolicy.matches(
+                liveAudioTurnId,liveAudioStreamId,liveAudioGeneration,
+                obj.optString("turn_id",""),obj.optString("stream_id",""),
+                obj.optInt("generation",-1))) {
+          forgetCurrentPlaybackReceipt();
+          appendDiagnostic("Assistant playback receipt confirmed by server.");
+        }
       } else if ("history".equals(type)) {
         replaceConversationHistory(obj.optJSONArray("turns"));
       } else if ("state".equals(type)) {
@@ -1850,6 +1874,14 @@ public class MainActivity extends Activity {
     VoicePcmPlayerView player = user ? userPlayer : assistantPlayer;
     activePcmPlayer = player;
     boolean liveAssistant = !user && "audio".equals(type);
+    if (liveAssistant) {
+      // A new stream supersedes an older incomplete receipt. The server
+      // identifies exactly which audio generation it can acknowledge.
+      liveAudioTurnId = obj.optString("turn_id", "");
+      liveAudioStreamId = obj.optString("stream_id", "");
+      liveAudioGeneration = obj.optInt("generation", -1);
+      playbackReceiptAwaitingServerAck = false;
+    }
     player.startStream(true, liveAssistant, liveAssistant);
     if (liveAssistant) setForegroundMode(ForegroundMode.BUFFERING, null);
     else setPrimaryStatus(getString(R.string.loading_replay), "");
@@ -1869,12 +1901,62 @@ public class MainActivity extends Activity {
 
   private void markPlaybackRemoteEnded(int generation) {
     VoicePcmPlayerView player = activePcmPlayer;
+    if (player == assistantPlayer && !liveAudioTurnId.isEmpty()
+        && liveAudioGeneration != generation) {
+      appendDiagnostic("Ignored old assistant audio end from another generation.");
+      return;
+    }
     if (player != null) player.endStream();
     activePcmPlayer = null;
+    // The network is done, but AudioTrack may still be audibly playing.
+    // The playback-head callback, not this network EOF, completes the reply.
+    if (player != assistantPlayer || liveAudioTurnId.isEmpty()) showListeningState();
+  }
+
+  private void forgetCurrentPlaybackReceipt() {
+    liveAudioTurnId = "";
+    liveAudioStreamId = "";
+    liveAudioGeneration = -1;
+    playbackReceiptAwaitingServerAck = false;
+  }
+
+  private void ackAssistantPlayback() {
+    // Called only once the OS playback head has covered all PCM frames.
+    if (liveAudioTurnId.isEmpty() || liveAudioStreamId.isEmpty()
+        || liveAudioGeneration < 0) return;
+    playbackReceiptAwaitingServerAck = true;
     showListeningState();
+    sendPendingPlaybackReceipt();
+  }
+
+  private void sendPendingPlaybackReceipt() {
+    if (!playbackReceiptAwaitingServerAck || liveAudioTurnId.isEmpty()
+        || liveAudioStreamId.isEmpty() || liveAudioGeneration < 0) return;
+    WebSocket socket = webSocket;
+    if (socket == null || !connectionTracker.isOpen()) return;
+    try {
+      // Capture a single set of values for one WebSocket message. If a new
+      // stream races this callback, the server rejects mismatched identities.
+      String turnId = liveAudioTurnId;
+      String streamId = liveAudioStreamId;
+      int generation = liveAudioGeneration;
+      if (!VoicePlaybackReceiptPolicy.matches(turnId,streamId,generation,
+          liveAudioTurnId,liveAudioStreamId,liveAudioGeneration)) return;
+      JSONObject receipt = new JSONObject();
+      receipt.put("type", "playback_completed");
+      receipt.put("turn_id", turnId);
+      receipt.put("stream_id", streamId);
+      receipt.put("generation", generation);
+      if (!socket.send(receipt.toString())) {
+        appendDiagnostic("Playback completion could not be sent; retained for reconnect.");
+      }
+    } catch (Exception failure) {
+      appendDiagnostic("Playback completion receipt was retained for reconnect.");
+    }
   }
 
   private void stopPlaybackLocal(String reason, boolean notifyServer) {
+    forgetCurrentPlaybackReceipt();
     if (assistantPlayer != null) assistantPlayer.cancelStream();
     if (userPlayer != null && activePcmPlayer == userPlayer) userPlayer.cancelStream();
     activePcmPlayer = null;

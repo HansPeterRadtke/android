@@ -7,6 +7,7 @@ import android.media.AudioFormat;
 import android.media.AudioTrack;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.LinearLayout;
@@ -70,6 +71,8 @@ final class VoicePcmPlayerView extends LinearLayout {
   private volatile int positionBytes;
   private volatile long serial;
   private Runnable remoteStopListener;
+  private Runnable playbackCompletedListener;
+  private boolean playbackCompletionSent;
   private boolean userSeeking;
 
   VoicePcmPlayerView(Context context, int sampleRate, int maxBytes, String label) {
@@ -137,6 +140,7 @@ final class VoicePcmPlayerView extends LinearLayout {
   }
 
   void setRemoteStopListener(Runnable listener) { remoteStopListener = listener; }
+  void setPlaybackCompletedListener(Runnable listener) { playbackCompletedListener = listener; }
 
   boolean startStream(boolean autoPlay, boolean cancelable, boolean autoHideAfterFinish) {
     synchronized (lock) {
@@ -146,6 +150,7 @@ final class VoicePcmPlayerView extends LinearLayout {
       positionBytes = 0;
       streamOpen = true;
       remoteCancelable = cancelable;
+      playbackCompletionSent = false;
       autoHideAfterNaturalFinish = autoHideAfterFinish;
       autoStartPolicy = new VoiceStreamingPlaybackPolicy(autoPlay);
       playing = false;
@@ -183,6 +188,7 @@ final class VoicePcmPlayerView extends LinearLayout {
       streamOpen = false;
       playing = false;
       remoteCancelable = false;
+      playbackCompletionSent = false;
       autoStartPolicy = new VoiceStreamingPlaybackPolicy(false);
       serial++;
       stopTrackLocked();
@@ -196,6 +202,7 @@ final class VoicePcmPlayerView extends LinearLayout {
       playing = false;
       streamOpen = false;
       remoteCancelable = false;
+      playbackCompletionSent = false;
       autoHideAfterNaturalFinish = false;
       autoStartPolicy = new VoiceStreamingPlaybackPolicy(false);
       stopTrackLocked();
@@ -250,6 +257,7 @@ final class VoicePcmPlayerView extends LinearLayout {
       streamOpen = false;
       playing = false;
       remoteCancelable = false;
+      playbackCompletionSent = false;
       autoStartPolicy = new VoiceStreamingPlaybackPolicy(false);
       serial++;
       positionBytes = 0;
@@ -282,6 +290,7 @@ final class VoicePcmPlayerView extends LinearLayout {
   private void playbackLoop(long mine) {
     byte[] chunk = new byte[Math.max(960, sampleRate * SAMPLE_WIDTH / 20)];
     boolean naturalFinish = false;
+    boolean audiblePlaybackComplete = false;
     try {
       while (playing && serial == mine) {
         int got;
@@ -307,8 +316,30 @@ final class VoicePcmPlayerView extends LinearLayout {
         } else if (streamOpen) {
           Thread.sleep(15L);
         } else {
+          // The last AudioTrack.write only QUEUES the samples. Do not mark
+          // an answer delivered until Android's playback head has played them.
+          if (remoteCancelable && positionBytes > 0) {
+            long deadline = SystemClock.elapsedRealtime() + 5000L;
+            while (playing && serial == mine && SystemClock.elapsedRealtime() < deadline) {
+              int playedFrames;
+              synchronized (lock) {
+                if (serial != mine || track == null || !playing) break;
+                try { playedFrames = track.getPlaybackHeadPosition(); }
+                catch (IllegalStateException stopped) { break; }
+              }
+              if (VoicePlaybackCompletionPolicy.allFramesPlayed(
+                  positionBytes, playedFrames, SAMPLE_WIDTH * CHANNELS)) {
+                audiblePlaybackComplete = true;
+                break;
+              }
+              Thread.sleep(15L);
+            }
+            naturalFinish = audiblePlaybackComplete;
+          } else {
+            // Manual replay/local audio has no canonical completion receipt.
+            naturalFinish = true;
+          }
           playing = false;
-          naturalFinish = true;
           break;
         }
       }
@@ -316,6 +347,22 @@ final class VoicePcmPlayerView extends LinearLayout {
       Thread.currentThread().interrupt();
     } finally {
       final boolean hide = naturalFinish && autoHideAfterNaturalFinish;
+      Runnable onComplete = null;
+      if (audiblePlaybackComplete) {
+        synchronized (lock) {
+          if (serial == mine && !playbackCompletionSent && remoteCancelable) {
+            playbackCompletionSent = true;
+            onComplete = playbackCompletedListener;
+          }
+        }
+      }
+      final Runnable audibleReceipt = onComplete;
+      if (audibleReceipt != null) {
+        handler.post(() -> {
+          // A new stream, manual stop or cancel fences stale callbacks.
+          if (serial == mine) audibleReceipt.run();
+        });
+      }
       post(() -> { if (hide) setVisibility(GONE); updateUi(); });
     }
   }
