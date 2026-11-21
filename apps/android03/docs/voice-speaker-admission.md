@@ -45,3 +45,34 @@ verification/replay-resistance system, test the complete authoritative
 server-to-client protocol with source-pinned credentials and a reversible
 release, and perform explicit physical phone acceptance. Never embed
 production voice tokens in a public APK, commit, example or test log.
+
+## Protected WebSocket handshake and absent-token behavior
+
+The existing Jetson `/ws` endpoint requires an authenticated bearer. The
+previous published Android03 `MainActivity` sent an unauthenticated upgrade
+(`new Request.Builder().url(url).build()`), which cannot connect to that
+protected endpoint. This source gap was independently verified against the
+canonical revision after the speaker gate correction.
+
+Android03 now constructs the WSS request through `VoiceWebSocketAuth`, which
+requires a nonempty valid build-time private credential, validates the exact
+owner WSS host/path and refuses plaintext WS, non-owner hosts, URL userinfo,
+fragments, and token-like query parameters. The WebSocket client also has
+redirect following disabled for private authenticated handshakes. The bearer appears **only in the
+Authorization header**, never in a URL or log. No credentials are tracked in
+Git. `apps/android03/app/build.gradle` provisions the generated
+`BuildConfig.VOICE_AGENT_AUTH_TOKEN` exclusively from the private
+`VOICE_AGENT_AUTH_TOKEN` build environment variable. A missing credential
+leaves `BuildConfig` empty; the UI reports the missing configuration and
+**does not open a socket or repeatedly retry**. The established public health
+URL is not bearer-authenticated and must not be used as a credential target.
+
+A debug APK compiled with `VOICE_AGENT_AUTH_TOKEN=''` is intentionally a
+**non-connecting, test-only artifact**. Do not install it on an occupied
+phone as if it were a working voice client. An authenticated private build
+requires a controlled secret-injection procedure, retention limits and actual
+physical phone/Jetson acceptance. A bearer embedded in an APK can be
+extracted by someone who obtains that APK; it proves possession, not a
+server-verified speaker identity. For production prefer replaceable per-device
+credentials in securely managed storage, and never distribute an authenticated
+APK publicly. This source-only fix is not proof of a user-ready client.

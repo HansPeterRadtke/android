@@ -67,6 +67,7 @@
     <string name="not_connected_action">This action needs a live connection.</string>
     <string name="transcript_empty">Transcript cannot be empty.</string>
     <string name="server_error">The voice service reported an error.</string>
+    <string name="voice_auth_missing">This private voice build has no service credential. Connect using a trusted private build; no request was sent.</string>
     <string name="buffering_reply">Live • Buffering reply</string>
     <string name="detail_buffering_reply">Building a small playback buffer for continuous speech.</string>
     <plurals name="reconnect_media_age">

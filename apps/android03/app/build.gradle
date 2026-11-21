@@ -16,7 +16,13 @@ dependencies {
 android {
     namespace 'myapp.app'
     compileSdk 34
+    buildFeatures {
+        buildConfig true
+    }
     defaultConfig {
+        // Never put a production bearer token in Git or a public APK.
+        // Absent private build-time provisioning, the client MUST NOT connect.
+        buildConfigField "String", "VOICE_AGENT_AUTH_TOKEN", groovy.json.JsonOutput.toJson(System.getenv("VOICE_AGENT_AUTH_TOKEN") ?: "")
         applicationId "myapp.app"
         minSdk 24
         targetSdk 34

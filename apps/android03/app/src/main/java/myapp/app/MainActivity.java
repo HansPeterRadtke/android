@@ -241,6 +241,10 @@ public class MainActivity extends Activity {
     wsClient = new OkHttpClient.Builder()
         .connectTimeout(appConfig.connectTimeoutMs, TimeUnit.MILLISECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
+        // Never follow a redirect with a private bearer credential, even
+        // when an upstream proxy claims a different voice endpoint.
+        .followRedirects(false)
+        .followSslRedirects(false)
         .retryOnConnectionFailure(true)
         .build();
     connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
@@ -518,6 +522,16 @@ public class MainActivity extends Activity {
 
   private void connectWebSocket() {
     if (!connectionWanted.get() || wsClient == null || connectionTracker.isOpen() || wsConnecting.get()) return;
+    // The current server requires a private bearer on every WebSocket
+    // handshake. A missing credential is a permanent configuration error,
+    // not an outage to retry indefinitely or to put in a query string.
+    if (!VoiceWebSocketAuth.configured(BuildConfig.VOICE_AGENT_AUTH_TOKEN)) {
+      connectionWanted.set(false);
+      captureStartPending = false;
+      setForegroundMode(ForegroundMode.UNAVAILABLE, getString(R.string.voice_auth_missing));
+      appendDiagnostic("Voice service credential unavailable; WebSocket not attempted.");
+      return;
+    }
     long generation = connectionTracker.beginConnect();
     reconnectScheduledGeneration = -1L;
     wsConnecting.set(true);
@@ -530,7 +544,7 @@ public class MainActivity extends Activity {
           + "?conversation=" + enc(conversationId)
           + "&generation=" + generation;
       WebSocket candidate = wsClient.newWebSocket(
-          new Request.Builder().url(url).build(),
+          VoiceWebSocketAuth.request(url, BuildConfig.VOICE_AGENT_AUTH_TOKEN),
           new VoiceWebSocketListener(generation));
       if (connectionTracker.owns(generation)) webSocket = candidate;
       else candidate.cancel();
