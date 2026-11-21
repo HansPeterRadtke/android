@@ -174,6 +174,9 @@ public class MainActivity extends Activity {
   private volatile boolean manualRecordingAvailable = false;
   private volatile long lastLevelUiMs = 0L;
   private volatile String pendingTurnId = "";
+  private volatile boolean speechDraftVisible = false;
+  private volatile boolean updatingDraftFromServer = false;
+  private volatile boolean userClaimedDraft = false;
   private volatile String latestUserTurnId = "";
   private volatile String latestAssistantTurnId = "";
   private final ConversationTextModel conversationTextModel = new ConversationTextModel();
@@ -390,6 +393,19 @@ public class MainActivity extends Activity {
       @Override public void onTextChanged(CharSequence value, int start, int before, int count) {}
       @Override public void afterTextChanged(Editable editable) {
         historyPrefs.edit().putString(DRAFT_PREF_KEY, editable.toString()).apply();
+        if (VoiceDraftClaimPolicy.shouldClaim(
+            updatingDraftFromServer, autoTranscribe, speechDraftVisible,
+            !pendingTurnId.isEmpty(), userClaimedDraft)) {
+          userClaimedDraft = true;
+          // Once the user changes recognized speech, the server must not
+          // overwrite it or treat later ASR completion as an auto command.
+          sendControl("draft_claim", "user_edited_transcript", -1, 0.0, 0.0);
+          // The server deliberately discards further microphone frames once
+          // this draft is claimed. Stop the capture thread immediately instead
+          // of showing a false live-recording indicator or wasting battery.
+          if (running.get()) stopSession();
+          setForegroundMode(ForegroundMode.REVIEW, getString(R.string.detail_review));
+        }
         updateTranscriptPanel();
       }
     });
@@ -509,6 +525,14 @@ public class MainActivity extends Activity {
   }
 
   private void beginCaptureNow() {
+    // The voice server intentionally stops microphone acceptance after a
+    // human edits an ASR draft. Do not show a misleading "recording" state
+    // while all subsequent audio would be silently discarded by that guard.
+    if (userClaimedDraft) {
+      captureStartPending = false;
+      setForegroundMode(ForegroundMode.REVIEW, getString(R.string.detail_review));
+      return;
+    }
     if (!running.compareAndSet(false, true)) return;
     captureStartPending = false;
     stopRequested = false;
@@ -780,16 +804,20 @@ public class MainActivity extends Activity {
         connectionTracker.onMediaAck(listenerGeneration, System.currentTimeMillis());
         String heard = obj.optString("text", "").trim();
         if ("partial".equals(event)) {
-          if (!heard.isEmpty() && pendingTurnId.isEmpty()) setDraftText(heard, true);
+          if (!heard.isEmpty() && pendingTurnId.isEmpty()) {
+            speechDraftVisible = true;
+            if (!userClaimedDraft) setDraftText(heard, true);
+          }
         } else if ("final".equals(event)) {
           pendingTurnId = obj.optString("turn_id", "");
           latestUserTurnId = pendingTurnId;
           replayUserAvailable = obj.optBoolean("has_user_audio", false);
+          speechDraftVisible = !heard.isEmpty() || !pendingTurnId.isEmpty();
           if (manualTranscribePending) {
             manualTranscriptPendingSubmission = true;
             manualTranscribePending = false;
           }
-          setDraftText(heard, true);
+          if (!userClaimedDraft) setDraftText(heard, true);
           updateReplayRow();
           if (!autoSend) setForegroundMode(ForegroundMode.REVIEW, null);
           updateTranscriptPanel();
@@ -808,10 +836,9 @@ public class MainActivity extends Activity {
         if (ackForTyped) forgetPendingTypedRequest();
         if (ackForSpeech || ackForTyped) {
           typedSendPending = false;
-          // An old network ACK must not erase a newer or edited user draft.
-          if (submitted.equals(draftEdit.getText().toString().trim())) {
-            clearDraft();
-          }
+          // Recheck on the UI thread: a new edit might arrive while the
+          // server ACK is waiting in Android's event queue.
+          clearDraftIfMatches(submitted);
           manualTranscribePending = false;
           if (manualTranscriptPendingSubmission) {
             manualTranscriptPendingSubmission = false;
@@ -887,6 +914,7 @@ public class MainActivity extends Activity {
       state.put("build", buildLabel());
       state.put("conversation", conversationId);
       state.put("auto_send", VoiceAutomationPolicy.effectiveAutoSend(autoTranscribe, autoSend));
+      state.put("draft_claimed", userClaimedDraft);
       socket.send(state.toString());
     } catch (Exception failure) {
       appendDiagnostic("Client state failed: " + failure.getClass().getSimpleName());
@@ -1759,17 +1787,33 @@ public class MainActivity extends Activity {
   private void setDraftText(String text, boolean editable) {
     String value = text == null ? "" : text;
     runOnUiThread(() -> {
-      draftEdit.setText(value);
-      draftEdit.setSelection(draftEdit.length());
-      draftEdit.setEnabled(true);
+      // A queued ASR UI update may arrive AFTER the human has begun editing.
+      if (userClaimedDraft) return;
+      updatingDraftFromServer = true;
+      try {
+        draftEdit.setText(value);
+        draftEdit.setSelection(draftEdit.length());
+        draftEdit.setEnabled(true);
+      } finally {
+        updatingDraftFromServer = false;
+      }
       updateTranscriptPanel();
     });
   }
 
-  private void clearDraft() {
+  private void clearDraftIfMatches(String submittedText) {
     runOnUiThread(() -> {
-      draftEdit.setText("");
-      draftEdit.setEnabled(true);
+      if (submittedText == null || !submittedText.equals(
+          draftEdit.getText().toString().trim())) return;
+      speechDraftVisible = false;
+      userClaimedDraft = false;
+      updatingDraftFromServer = true;
+      try {
+        draftEdit.setText("");
+        draftEdit.setEnabled(true);
+      } finally {
+        updatingDraftFromServer = false;
+      }
       historyPrefs.edit().remove(DRAFT_PREF_KEY).apply();
       updateTranscriptPanel();
     });
@@ -2056,6 +2100,10 @@ public class MainActivity extends Activity {
   }
 
   private void showListeningState() {
+    if (userClaimedDraft) {
+      setForegroundMode(ForegroundMode.REVIEW, getString(R.string.detail_review));
+      return;
+    }
     if (!running.get()) {
       setForegroundMode(ForegroundMode.READY, getString(R.string.detail_ready_text));
     } else if (!autoTranscribe) {
@@ -2184,20 +2232,43 @@ public class MainActivity extends Activity {
     boolean finalAssistantAudio = assistantAudio;
     runOnUiThread(() -> {
       conversationTextModel.replaceHistory(finalRendered, finalLastUser, finalLastAssistant);
+      String priorSpeechTurn = pendingTurnId;
       pendingTurnId = finalDraftTurn;
       replayUserAvailable = finalUserAudio;
       replayAssistantAvailable = finalAssistantAudio;
       if (!finalDraftTurn.isEmpty()) {
-        draftEdit.setText(finalDraftText);
-        draftEdit.setSelection(draftEdit.length());
-        conversationTextModel.setLiveUser(finalDraftTurn, finalDraftText);
+        speechDraftVisible = true;
+        if (userClaimedDraft && !priorSpeechTurn.isEmpty()
+            && !priorSpeechTurn.equals(finalDraftTurn)) {
+          // This is a DIFFERENT server speech draft; do not attach an old
+          // human edit to a new turn after reconnect.
+          userClaimedDraft = false;
+        }
+        if (!userClaimedDraft) {
+          updatingDraftFromServer = true;
+          try {
+            draftEdit.setText(finalDraftText);
+            draftEdit.setSelection(draftEdit.length());
+          } finally {
+            updatingDraftFromServer = false;
+          }
+        }
+        conversationTextModel.setLiveUser(finalDraftTurn,
+            userClaimedDraft ? draftEdit.getText().toString().trim() : finalDraftText);
       } else {
-        // Server history owns submitted turns, but an unsent local text draft is
-        // independent UI state and must survive reconnect/history refresh.
+        // An edited speech partial can exist even before the server has a
+        // final turn ID; keep that human text instead of replacing it.
+        if (!userClaimedDraft) speechDraftVisible = false;
         String localDraft = historyPrefs.getString(DRAFT_PREF_KEY, "");
-        if (localDraft != null && !localDraft.equals(draftEdit.getText().toString())) {
-          draftEdit.setText(localDraft);
-          draftEdit.setSelection(draftEdit.length());
+        if (!userClaimedDraft && localDraft != null
+            && !localDraft.equals(draftEdit.getText().toString())) {
+          updatingDraftFromServer = true;
+          try {
+            draftEdit.setText(localDraft);
+            draftEdit.setSelection(draftEdit.length());
+          } finally {
+            updatingDraftFromServer = false;
+          }
         }
       }
       persistAndRenderConversation();
