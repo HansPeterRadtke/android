@@ -1332,7 +1332,11 @@ public class MainActivity extends Activity {
           .show();
       return;
     }
-    String[] labels = new String[current.size() + 1];
+    boolean offerBluetoothPermission = VoiceAudioPermissionPolicy.shouldOfferBluetoothAccess(
+        Build.VERSION.SDK_INT, hasRequiredAudioPermissions(),
+        Build.VERSION.SDK_INT < 31 || ContextCompat.checkSelfPermission(
+            this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED);
+    String[] labels = new String[current.size() + (offerBluetoothPermission ? 2 : 1)];
     int checked = -1;
     for (int i = 0; i < current.size(); i++) {
       AudioInputOption option = current.get(i);
@@ -1340,12 +1344,22 @@ public class MainActivity extends Activity {
       if (option.getDeviceId() == selectedDeviceId) checked = i;
     }
     labels[current.size()] = getString(R.string.refresh_microphones);
+    if (offerBluetoothPermission) {
+      labels[current.size() + 1] = getString(R.string.enable_bluetooth_microphones);
+    }
     new MaterialAlertDialogBuilder(this)
         .setTitle(R.string.microphone_picker_title)
         .setSingleChoiceItems(labels, checked, (dialog, which) -> {
           if (which == current.size()) {
             dialog.dismiss();
             showMicrophonePicker();
+            return;
+          }
+          if (offerBluetoothPermission && which == current.size() + 1) {
+            // Ask only after the user explicitly wants Bluetooth microphones.
+            dialog.dismiss();
+            ActivityCompat.requestPermissions(this,
+                new String[]{Manifest.permission.BLUETOOTH_CONNECT}, PERMISSION_REQUEST);
             return;
           }
           AudioInputOption selected = current.get(which);
@@ -2047,22 +2061,21 @@ public class MainActivity extends Activity {
   }
 
   private boolean hasRequiredAudioPermissions() {
-    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-        != PackageManager.PERMISSION_GRANTED) return false;
-    return Build.VERSION.SDK_INT < 31
-        || ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
-        == PackageManager.PERMISSION_GRANTED;
+    return VoiceAudioPermissionPolicy.mayCapture(
+        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            == PackageManager.PERMISSION_GRANTED,
+        Build.VERSION.SDK_INT < 31 || ContextCompat.checkSelfPermission(
+            this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED);
   }
 
   private void requestMissingAudioPermissions() {
-    ArrayList<String> missing = new ArrayList<>();
+    // Only the microphone permission is required for built-in/wired/USB capture.
+    // Bluetooth routing permission is optional and requested by the explicit
+    // microphone picker action; a denial cannot disable the local microphone.
     if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-        != PackageManager.PERMISSION_GRANTED) missing.add(Manifest.permission.RECORD_AUDIO);
-    if (Build.VERSION.SDK_INT >= 31
-        && ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
-        != PackageManager.PERMISSION_GRANTED) missing.add(Manifest.permission.BLUETOOTH_CONNECT);
-    if (!missing.isEmpty()) {
-      ActivityCompat.requestPermissions(this, missing.toArray(new String[0]), PERMISSION_REQUEST);
+        != PackageManager.PERMISSION_GRANTED) {
+      ActivityCompat.requestPermissions(this,
+          new String[]{Manifest.permission.RECORD_AUDIO}, PERMISSION_REQUEST);
     }
   }
 

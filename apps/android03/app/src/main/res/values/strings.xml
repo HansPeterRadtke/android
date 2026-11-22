@@ -46,6 +46,7 @@
     <string name="done">Done</string>
     <string name="back">Back</string>
     <string name="refresh_microphones">Refresh microphone list</string>
+    <string name="enable_bluetooth_microphones">Enable Bluetooth microphones (optional)</string>
     <string name="microphone_picker_title">Choose microphone</string>
     <string name="microphone_none">No physical microphone is currently available to Android.</string>
     <string name="microphone_permission_denied">Microphone permission is not available.</string>
