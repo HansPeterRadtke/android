@@ -272,7 +272,10 @@ public class MainActivity extends Activity {
     pendingTypedText = historyPrefs.getString(TYPED_TEXT_PREF_KEY, "");
     if (VoiceTypedRequestPolicy.mayRetry(pendingTypedRequestId,
         pendingTypedText, draftEdit.getText().toString())) {
-      typedSendPending = true;
+      // Preserve the durable original request ID, but never show a pending
+      // send on a build that lacks even a credential to connect. A future
+      // trusted build can resume exactly the same verified operation ID.
+      typedSendPending = VoiceWebSocketAuth.configured(BuildConfig.VOICE_AGENT_AUTH_TOKEN);
     } else if (!VoiceTypedRequestPolicy.isValidId(pendingTypedRequestId)) {
       forgetPendingTypedRequest();
     }
@@ -578,8 +581,12 @@ public class MainActivity extends Activity {
     if (!VoiceWebSocketAuth.configured(BuildConfig.VOICE_AGENT_AUTH_TOKEN)) {
       connectionWanted.set(false);
       captureStartPending = false;
+      typedSendPending = false;
       setForegroundMode(ForegroundMode.UNAVAILABLE, getString(R.string.voice_auth_missing));
       appendDiagnostic("Voice service credential unavailable; WebSocket not attempted.");
+      // An offline typed request may have been waiting for network recovery.
+      // Without a private credential it was never sent, so keep it editable.
+      updateTranscriptPanel();
       return;
     }
     long generation = connectionTracker.beginConnect();
@@ -1492,6 +1499,19 @@ public class MainActivity extends Activity {
     String value = draftEdit.getText().toString().trim();
     if (value.isEmpty()) {
       setForegroundMode(ForegroundMode.REVIEW, getString(R.string.transcript_empty));
+      return;
+    }
+    // A typed Send is explicit human intent, but no usable credential means
+    // there is nowhere authorized to send it. Never arm a phantom retry,
+    // disable the composer, or claim to be connecting forever. The draft and
+    // any older durable typed request ID remain intact for a trusted build.
+    if (!VoiceWebSocketAuth.configured(BuildConfig.VOICE_AGENT_AUTH_TOKEN)) {
+      typedSendPending = false;
+      connectionWanted.set(false);
+      captureStartPending = false;
+      setForegroundMode(ForegroundMode.UNAVAILABLE, getString(R.string.voice_auth_missing));
+      appendDiagnostic("Typed message kept locally; no service credential, no send attempted.");
+      updateTranscriptPanel();
       return;
     }
     WebSocket socket = webSocket;
