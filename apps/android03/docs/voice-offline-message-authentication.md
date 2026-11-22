@@ -79,3 +79,13 @@ shared emulator change, real speech capture, SWAAG/LLM/TTS call, live server
 restart or provider account effect. The emulator was deliberately offline and
 has no voice-service credential; the work cannot verify a real authenticated
 voice conversation or safe production release.
+
+
+## November 22: superseding current credential provisioning
+
+The previous build-time `BuildConfig.VOICE_AGENT_AUTH_TOKEN` provision is
+**historical only** and must NOT be used for new APKs. The current source
+loads a bearer only from separately configured AndroidKeyStore-protected
+private device storage, and no credential is embedded in an APK. See
+`voice-device-credential-2026-11-22.md` for the new implementation, opt-in
+Android acceptance and remaining server/physical-phone release gates.

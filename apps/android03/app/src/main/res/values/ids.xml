@@ -7,6 +7,9 @@
     <item name="voice_replay_row" type="id"/>
     <item name="voice_start_stop" type="id"/>
     <item name="voice_settings" type="id"/>
+    <item name="voice_private_key_setup" type="id"/>
+    <item name="voice_private_key_remove" type="id"/>
+    <item name="voice_private_key_entry" type="id"/>
     <item name="voice_diagnostics" type="id"/>
     <item name="voice_draft" type="id"/>
     <item name="voice_transcribe" type="id"/>

@@ -37,7 +37,7 @@ public class NoCredentialSubmitUiTest {
     Assume.assumeTrue("Explicit isolated offline no-credential acceptance only",
         "1".equals(args.getString("offlineNoCredentialAcceptance")));
     Assume.assumeFalse("Do not risk a real authenticated WebSocket or user command",
-        VoiceWebSocketAuth.configured(BuildConfig.VOICE_AGENT_AUTH_TOKEN));
+        VoiceCredentialVault.configured(InstrumentationRegistry.getInstrumentation().getTargetContext()));
     Context ctx = InstrumentationRegistry.getInstrumentation().getTargetContext();
     return ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE);
   }

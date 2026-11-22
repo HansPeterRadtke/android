@@ -275,7 +275,7 @@ public class MainActivity extends Activity {
       // Preserve the durable original request ID, but never show a pending
       // send on a build that lacks even a credential to connect. A future
       // trusted build can resume exactly the same verified operation ID.
-      typedSendPending = VoiceWebSocketAuth.configured(BuildConfig.VOICE_AGENT_AUTH_TOKEN);
+      typedSendPending = VoiceCredentialVault.configured(this);
     } else if (!VoiceTypedRequestPolicy.isValidId(pendingTypedRequestId)) {
       forgetPendingTypedRequest();
     }
@@ -575,10 +575,14 @@ public class MainActivity extends Activity {
 
   private void connectWebSocket() {
     if (!connectionWanted.get() || wsClient == null || connectionTracker.isOpen() || wsConnecting.get()) return;
+    // Unwrap a separately provisioned, non-exportable Keystore-protected
+    // credential only for this authenticated handshake. Never store it in an
+    // APK, history, URL or logging. Corrupt/missing device storage fails shut.
+    String privateBearer = VoiceCredentialVault.read(this);
     // The current server requires a private bearer on every WebSocket
     // handshake. A missing credential is a permanent configuration error,
     // not an outage to retry indefinitely or to put in a query string.
-    if (!VoiceWebSocketAuth.configured(BuildConfig.VOICE_AGENT_AUTH_TOKEN)) {
+    if (!VoiceWebSocketAuth.configured(privateBearer)) {
       connectionWanted.set(false);
       captureStartPending = false;
       typedSendPending = false;
@@ -601,7 +605,7 @@ public class MainActivity extends Activity {
           + "?conversation=" + enc(conversationId)
           + "&generation=" + generation;
       WebSocket candidate = wsClient.newWebSocket(
-          VoiceWebSocketAuth.request(url, BuildConfig.VOICE_AGENT_AUTH_TOKEN),
+          VoiceWebSocketAuth.request(url, privateBearer),
           new VoiceWebSocketListener(generation));
       if (connectionTracker.owns(generation)) webSocket = candidate;
       else candidate.cancel();
@@ -1174,6 +1178,34 @@ public class MainActivity extends Activity {
     version.setPadding(0, 0, 0, dp(12));
     content.addView(version, fullWrap());
 
+    // A private WSS bearer must never be embedded in a distributed APK.
+    // The settings screen exposes only whether a device-local protected key
+    // exists, not the value, fingerprint, preview or encrypted blob.
+    TextView privateVoiceTitle = new TextView(this);
+    privateVoiceTitle.setText(R.string.voice_private_connection_title);
+    privateVoiceTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+    privateVoiceTitle.setTextSize(16);
+    content.addView(privateVoiceTitle, fullWrap());
+    boolean privateKeyReady = VoiceCredentialVault.configured(this);
+    TextView privateVoiceStatus = new TextView(this);
+    privateVoiceStatus.setText(privateKeyReady
+        ? R.string.voice_private_connection_ready : R.string.voice_private_connection_missing);
+    privateVoiceStatus.setTextSize(13);
+    content.addView(privateVoiceStatus, fullWrap());
+    MaterialButton privateKeySetup = new MaterialButton(this);
+    privateKeySetup.setId(R.id.voice_private_key_setup);
+    privateKeySetup.setText(privateKeyReady
+        ? R.string.voice_private_connection_replace : R.string.voice_private_connection_add);
+    privateKeySetup.setMinHeight(dp(48));
+    privateKeySetup.setEnabled(!running.get());
+    content.addView(privateKeySetup, fullWrap());
+    MaterialButton privateKeyRemove = new MaterialButton(this);
+    privateKeyRemove.setId(R.id.voice_private_key_remove);
+    privateKeyRemove.setText(R.string.voice_private_connection_remove);
+    privateKeyRemove.setMinHeight(dp(48));
+    privateKeyRemove.setEnabled(privateKeyReady && !running.get());
+    content.addView(privateKeyRemove, fullWrap());
+
     TextView microphone = new TextView(this);
     microphone.setText(getString(R.string.microphone_current,
         currentMicrophoneLabel.isEmpty() ? getString(R.string.microphone_unknown) : currentMicrophoneLabel));
@@ -1273,6 +1305,32 @@ public class MainActivity extends Activity {
         .setPositiveButton(R.string.done, null)
         .create();
 
+    privateKeySetup.setOnClickListener(v -> {
+      dialog.dismiss();
+      showPrivateVoiceKeyEntry();
+    });
+    privateKeyRemove.setOnClickListener(v -> {
+      dialog.dismiss();
+      new MaterialAlertDialogBuilder(this)
+          .setTitle(R.string.voice_private_connection_remove)
+          .setMessage(R.string.voice_private_connection_remove_confirm)
+          .setNegativeButton(R.string.back, null)
+          .setPositiveButton(R.string.voice_private_connection_remove, (prompt, ignored) -> {
+            if (!VoiceCredentialVault.clear(this)) {
+              setForegroundMode(ForegroundMode.UNAVAILABLE,
+                  getString(R.string.voice_private_connection_remove_failed));
+              return;
+            }
+            connectionWanted.set(false);
+            typedSendPending = false;
+            captureStartPending = false;
+            closeCurrentSocket("private_credential_removed", true);
+            setForegroundMode(ForegroundMode.UNAVAILABLE,
+                getString(R.string.voice_private_connection_remove_done));
+            updateTranscriptPanel();
+          })
+          .show();
+    });
     change.setOnClickListener(v -> {
       dialog.dismiss();
       showMicrophonePicker();
@@ -1308,6 +1366,57 @@ public class MainActivity extends Activity {
       dialog.dismiss();
       showDiagnosticsDialog();
     });
+    dialog.show();
+  }
+
+  private void showPrivateVoiceKeyEntry() {
+    // Entering a private key is a one-time explicit user action. The app
+    // never exposes its value in diagnostics or in history, and a missing
+    // key cannot trigger a request or a reconnect loop.
+    TextInputLayout layout = new TextInputLayout(this);
+    layout.setPadding(dp(20), dp(8), dp(20), 0);
+    layout.setHint(R.string.voice_private_connection_hint);
+    TextInputEditText field = new TextInputEditText(layout.getContext());
+    field.setId(R.id.voice_private_key_entry);
+    field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+    field.setSingleLine(true);
+    if (Build.VERSION.SDK_INT >= 26) {
+      field.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+    }
+    field.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+    layout.addView(field, fullWrap());
+    AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+        .setTitle(R.string.voice_private_connection_title)
+        .setMessage(R.string.voice_private_connection_explain)
+        .setView(layout)
+        .setNegativeButton(R.string.back, null)
+        .setPositiveButton(R.string.voice_private_connection_add, null)
+        .create();
+    dialog.setOnShowListener(ignored -> {
+      if (dialog.getWindow() != null) {
+        dialog.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+      }
+      dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(button -> {
+        String token = field.getText() == null ? "" : field.getText().toString();
+        if (!VoiceCredentialVault.save(this, token)) {
+          layout.setError(getString(R.string.voice_private_connection_invalid));
+          return;
+        }
+        // Discard the visible entry immediately. The Keystore-protected
+        // copy is provisioned before the first authenticated request.
+        field.setText("");
+        dialog.dismiss();
+        connectionWanted.set(false);
+        closeCurrentSocket("private_credential_updated", true);
+        connectionWanted.set(true);
+        typedSendPending = VoiceTypedRequestPolicy.mayRetry(
+            pendingTypedRequestId, pendingTypedText, draftEdit.getText().toString());
+        if (hasUsableNetwork()) connectWebSocket();
+        else updateServiceHealth();
+        updateTranscriptPanel();
+      });
+    });
+    dialog.setOnDismissListener(ignored -> field.setText(""));
     dialog.show();
   }
 
@@ -1505,7 +1614,7 @@ public class MainActivity extends Activity {
     // there is nowhere authorized to send it. Never arm a phantom retry,
     // disable the composer, or claim to be connecting forever. The draft and
     // any older durable typed request ID remain intact for a trusted build.
-    if (!VoiceWebSocketAuth.configured(BuildConfig.VOICE_AGENT_AUTH_TOKEN)) {
+    if (!VoiceCredentialVault.configured(this)) {
       typedSendPending = false;
       connectionWanted.set(false);
       captureStartPending = false;
