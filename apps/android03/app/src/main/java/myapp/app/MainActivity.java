@@ -490,6 +490,7 @@ public class MainActivity extends Activity {
       root.addView(lowerControls, fullWrap());
     }
 
+    customizeVoiceClientScreen(root);
     setContentView(root);
     loadConversationHistory();
     setForegroundMode(ForegroundMode.READY, null);
@@ -601,11 +602,11 @@ public class MainActivity extends Activity {
     if (previous != null) previous.cancel();
     setForegroundMode(ForegroundMode.CONNECTING, null);
     try {
-      String url = appConfig.websocketUrl
+      String url = getVoiceWebSocketEndpoint()
           + "?conversation=" + enc(conversationId)
           + "&generation=" + generation;
       WebSocket candidate = wsClient.newWebSocket(
-          VoiceWebSocketAuth.request(url, privateBearer),
+          authorizeVoiceWebSocket(url, privateBearer),
           new VoiceWebSocketListener(generation));
       if (connectionTracker.owns(generation)) webSocket = candidate;
       else candidate.cancel();
@@ -940,6 +941,17 @@ public class MainActivity extends Activity {
     }
   }
 
+  // Shared transport extension points; Android03 behavior is unchanged.
+  protected void customizeVoiceClientScreen(LinearLayout root) {}
+  protected void customizeVoiceClientState(JSONObject message) throws Exception {}
+  protected void onVoiceClientStatus(String state) {}
+  protected boolean isVoiceClientSessionActive() { return running.get(); }
+  protected String getVoiceWebSocketEndpoint() { return appConfig.websocketUrl; }
+  protected String getVoiceHealthEndpoint() { return appConfig.healthUrl; }
+  protected Request authorizeVoiceWebSocket(String url, String bearer) {
+    return VoiceWebSocketAuth.request(url, bearer);
+  }
+
   private void sendClientState() {
     WebSocket socket = webSocket;
     if (socket == null || !connectionTracker.isOpen()) return;
@@ -950,6 +962,7 @@ public class MainActivity extends Activity {
       state.put("conversation", conversationId);
       state.put("auto_send", VoiceAutomationPolicy.effectiveAutoSend(autoTranscribe, autoSend));
       state.put("draft_claimed", userClaimedDraft);
+      customizeVoiceClientState(state);
       socket.send(state.toString());
     } catch (Exception failure) {
       appendDiagnostic("Client state failed: " + failure.getClass().getSimpleName());
@@ -1517,7 +1530,7 @@ public class MainActivity extends Activity {
   }
 
   private void healthCheck(TextView stateView, TextView logsView) {
-    Request request = new Request.Builder().url(appConfig.healthUrl).get().build();
+    Request request = new Request.Builder().url(getVoiceHealthEndpoint()).get().build();
     wsClient.newCall(request).enqueue(new Callback() {
       @Override public void onFailure(Call call, IOException failure) {
         appendDiagnostic("Health failed: " + failure.getClass().getSimpleName());
@@ -2321,6 +2334,7 @@ public class MainActivity extends Activity {
     String title = getString(titleRes);
     String detail = detailOverride == null ? getString(detailRes) : detailOverride;
     setPrimaryStatus(title, detail);
+    onVoiceClientStatus(mode.name());
   }
 
   private void showListeningState() {
