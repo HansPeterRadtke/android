@@ -48,3 +48,45 @@ Android Keystore and erases the staged bytes. Release builds ignore staging.
 Do not stage a token in shared storage, expose it in tooling output, or
 place credentials in the downloadable Raspi APK. A general public release
 will need explicit authenticated enrollment/secure pairing.
+
+## 2026-11-26 latest verified deployment state and unresolved release gate
+
+- Latest source checkpoint on Android repository main: 4ae4a71.
+- Latest APK version 0.3, debug build, 2,805,118 bytes, SHA-256:
+  68e30c4078b669fa4d23e8fbf1186cdf3ef8f3cc3b3a036c685817848ccbb33f.
+  The exact bytes are staged on Raspi at
+  /data/var/web_portal/uploads/Multiverse-VoiceAgent-0.3.apk.
+  Android emulator install/launch and 58 new-client unit tests plus 49
+  original Android03 tests passed. No native inference libraries in APK.
+- NOT accepted as a connected physical phone release.
+  Blackview XPLORE 1 at 192.168.0.48:5555 was reachable through G3 ADB,
+  but the new package com.multiverse.voiceclient was not installed
+  as of the last observed package inventory.
+- Actual ADB transport tests: regular shell commands, a 24-byte local
+  TCP-listener round trip and a tiny helper via ASCII/base64 command worked.
+  Large ADB push/exec-in installs and writes repeatedly broke at about
+  19-30 seconds, emitting EOF/device-offline; receiver files remained zero
+  bytes. Restarting adbd in TCP mode did not fix bulk transfers.
+  A temporary phone netcat listener accepted a short G3 TCP probe, but
+  larger direct TCP transfer failed. Windows temporary inbound firewall
+  rule and Python test HTTP servers were stopped/removed, and phone
+  temporary files cleared. Do not interpret a sender-side '1 file pushed'
+  line as successful installation without the independent device digest.
+- Server health and authentication: Jetson gateway loopback
+  127.0.0.1:13483 exposed the expected secure WS handshake, and a
+  local authenticated test conversation received hello and history
+  events without assistant model actions. The live server requires the
+  private bearer. The app has no bearer packaged; a new installation
+  will not connect until securely paired/provisioned into Android Keystore.
+  The debug APK supports only owner-operated one-time app-private
+  ADB bootstrap, not unauthenticated auto-enrollment.
+  Do not print, embed or publish the bearer.
+- Voice selection: client_state.voice_id is not supported by the live
+  Jetson gateway yet. The app-side setting alone does not choose a
+  different voice. Easton and Qwen services on Nitro exist separately.
+  An acknowledged, allowlisted server-side implementation is required.
+- Remaining acceptance: physical install, secure enrollment,
+  phone authenticated WebSocket hello, bidirectional PCM, complete
+  speech and playback, interruption handling, selected server voice,
+  and real end-to-end first-audio measurements. Do not promote to a
+  stable release before these pass.
