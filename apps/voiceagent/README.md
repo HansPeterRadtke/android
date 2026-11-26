@@ -37,3 +37,14 @@ headset routing, background/foreground and accessibility on physical phones.
 
 Emulator and unit tests do not establish physical-phone microphone input,
 real authenticated server audio or end-to-end response latency.
+
+## One-time personal-phone provisioning (development only)
+
+The owner-side release is debuggable for local Android ADB testing. A trusted
+operator can pipe the private token from a protected credential file into
+the app's private files using Android's run-as sandbox, never as a command
+argument, URL query, or baked APK value. The next app launch encrypts it with
+Android Keystore and erases the staged bytes. Release builds ignore staging.
+Do not stage a token in shared storage, expose it in tooling output, or
+place credentials in the downloadable Raspi APK. A general public release
+will need explicit authenticated enrollment/secure pairing.

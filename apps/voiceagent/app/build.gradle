@@ -16,8 +16,8 @@ android {
    applicationId 'com.multiverse.voiceclient'
    minSdk 24
    targetSdk 34
-   versionCode 1
-   versionName '0.1'
+   versionCode 3
+   versionName '0.3'
    testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
  }
  sourceSets {
@@ -30,7 +30,18 @@ android {
    test { java.srcDir file('../../android03/app/src/test/java') }
  }
  compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
- buildTypes { release { minifyEnabled false } }
+ buildTypes {
+  debug {
+    minifyEnabled true
+    shrinkResources true
+    proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+  }
+  release {
+    minifyEnabled true
+    shrinkResources true
+    proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+  }
+}
  lint { disable 'GradleDependency' }
  packagingOptions { resources { excludes += ['META-INF/LGPL2.1'] } }
 }

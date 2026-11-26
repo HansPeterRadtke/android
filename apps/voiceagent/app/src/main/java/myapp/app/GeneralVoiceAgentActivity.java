@@ -44,6 +44,52 @@ public final class GeneralVoiceAgentActivity extends MainActivity {
   private static final String[] ANIMATIONS = {"Pulse", "Wave bars", "Ring", "Still"};
   private static final String[] SIZES = {"Compact", "Standard", "Large"};
 
+  /**
+   * Owner-controlled ADB provisioning for a debuggable personal-device build.
+   * No token is shipped with, logged by, or fetched anonymously by the APK.
+   * A private app-UID file is accepted only in this debug installation,
+   * encrypted into Android Keystore once, then erased and deleted before
+   * network startup. Release APKs never use this mechanism.
+   */
+  @Override protected void onCreate(Bundle savedInstanceState) {
+    if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+      java.io.File staged = new java.io.File(getFilesDir(), "voice_provision_once");
+      if (staged.isFile()) {
+        byte[] bytes = null;
+        try {
+          if (staged.length() > 0 && staged.length() < 512) {
+            bytes = java.nio.file.Files.readAllBytes(staged.toPath());
+            String bearer = new String(bytes, java.nio.charset.StandardCharsets.US_ASCII).trim();
+            if (VoiceWebSocketAuth.configured(bearer)) {
+              VoiceCredentialVault.save(this, bearer);
+            }
+          }
+        } catch (Exception ignored) {
+          // No logging, no fallback that embeds or broadcasts a credential.
+        } finally {
+          if (bytes != null) java.util.Arrays.fill(bytes, (byte)0);
+          try {
+            if (staged.isFile()) {
+              try (java.io.RandomAccessFile file = new java.io.RandomAccessFile(staged, "rw")) {
+                byte[] zero = new byte[128];
+                long remaining = file.length();
+                file.seek(0);
+                while (remaining > 0) {
+                  int amount = (int)Math.min(zero.length, remaining);
+                  file.write(zero, 0, amount);
+                  remaining -= amount;
+                }
+                file.getFD().sync();
+              }
+              staged.delete();
+            }
+          } catch (Exception ignored) {}
+        }
+      }
+    }
+    super.onCreate(savedInstanceState);
+  }
+
   private GeneralVoiceVisual visual;
   private ImageView avatar;
   private LinearLayout skinRow;
