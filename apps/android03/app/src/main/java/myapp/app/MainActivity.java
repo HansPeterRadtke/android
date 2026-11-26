@@ -946,6 +946,19 @@ public class MainActivity extends Activity {
   protected void customizeVoiceClientState(JSONObject message) throws Exception {}
   protected void onVoiceClientStatus(String state) {}
   protected boolean isVoiceClientSessionActive() { return running.get(); }
+  protected final void showVoiceClientPairingStatus(String title, String explanation) {
+    runOnUiThread(() -> setPrimaryStatus(title, explanation));
+  }
+  protected final void reconnectVoiceClientAfterProvisioning() {
+    // The base client fails closed and disables retries without a bearer.
+    // Device pairing re-enables connection only after Android Keystore
+    // confirms that a protected credential has actually been saved.
+    if (!VoiceCredentialVault.configured(this)) return;
+    connectionWanted.set(true);
+    if (hasUsableNetwork()) connectWebSocket();
+    else updateServiceHealth();
+    updateTranscriptPanel();
+  }
   protected String getVoiceWebSocketEndpoint() { return appConfig.websocketUrl; }
   protected String getVoiceHealthEndpoint() { return appConfig.healthUrl; }
   protected Request authorizeVoiceWebSocket(String url, String bearer) {

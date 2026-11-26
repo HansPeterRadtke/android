@@ -124,3 +124,44 @@ is still required for real authenticated voice transport. There is no
 owner-free production onboarding or supported dynamic server voice switching
 in this build. Do not disable gateway authentication or publish the private
 bearer in a generic APK merely to make the status say connected.
+
+## Current version 0.4 — owner-approved first-use connection
+
+Version 0.4 keeps the same separately installable package ID,
+com.multiverse.voiceclient, with no local STT/LLM/TTS or Jetson bearer in
+the APK. Recognition, language processing and voice synthesis remain on the
+existing servers, using the existing Android03 microphone/streaming player.
+
+Version 0.3 was not able to connect without a preconfigured private bearer.
+Version 0.4 displays Connect to server. The phone creates an independent
+256-bit private proof and sends only its hash to Raspi by HTTPS. It opens the
+Raspi admin login/approval in the browser. Successful admin login returns
+to the exact pending approval; the owner taps Approve this phone and returns
+to the app. The phone polls Raspi with its Keystore-protected private proof,
+receives the bearer once after approval, stores it in its own Android
+Keystore, clears pending state and connects to Jetson with the existing
+authenticated WebSocket. It does not require typing a token or endpoint.
+Pending requests expire after ten minutes.
+
+The companion Raspi portal pairing service lives in the separate Infra
+repository under the existing /explorer/voice-agent/pair/ HTTPS prefix.
+Administrator session, origin/CSRF and one-time private proof are required.
+Public/guest users cannot approve a phone. The Jetson gateway's existing
+WebSocket authentication is not relaxed. Pairing uses the current shared
+Jetson bearer and does not provide independent per-device revocation.
+
+Verified: the Android app builds, new-client and original Android03 unit
+suites pass, and two Android Keystore device tests pass on an emulator.
+The emulator's actual Connect button reached public Raspi HTTPS and opened
+Chrome on the correct admin-login URL containing the public pending request
+ID; returning to the client retained the pending approval status. The
+Raspi pairing security tests pass, including unapproved, wrong-proof,
+guest denied, expiry, CSRF and one-time retrieval cases.
+
+Not verified: the Ulefone Power Armor 18T was not attached to any available
+ADB interface. Actual Ulefone install, approval, WebSocket hello and
+streaming audio, interruptions, microphone route and first-audio latency
+must still be checked on that phone. Neither the prior Blackview work nor
+emulator/server-only checks prove Ulefone functionality. Voice ID selection
+is not yet honored by the Jetson TTS gateway; it requires separate
+server-side implementation and acknowledgment before claiming voice choice.

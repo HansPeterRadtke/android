@@ -26,6 +26,13 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import org.json.JSONObject;
 import okhttp3.Request;
 import java.io.InputStream;
+import android.os.Handler;
+import android.os.Looper;
+import com.google.android.material.button.MaterialButton;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.io.IOException;
 
 /**
  * General-purpose UI skin over the single existing Android03 PCM/WS transport.
@@ -88,6 +95,115 @@ public final class GeneralVoiceAgentActivity extends MainActivity {
       }
     }
     super.onCreate(savedInstanceState);
+  }
+
+  private final GeneralVoicePairing pairing = new GeneralVoicePairing();
+  private final ExecutorService pairNetwork = Executors.newSingleThreadExecutor();
+  private final Handler pairHandler = new Handler(Looper.getMainLooper());
+  private final AtomicBoolean pairInFlight = new AtomicBoolean(false);
+  private volatile boolean pairingForeground = false;
+  private MaterialButton connectButton;
+  private final Runnable refreshPairing = new Runnable() {
+    @Override public void run() {
+      pollPairingOnce();
+    }
+  };
+
+  private boolean needsPairing() {
+    return GeneralVoiceProfile.DEFAULT_ENDPOINT.equals(endpoint())
+        && !VoiceCredentialVault.configured(this);
+  }
+
+  private void pairingStatus(String text) {
+    if(needsPairing()) showVoiceClientPairingStatus("Connect this phone",text);
+  }
+
+  private void connectPhone() {
+    if(!needsPairing())return;
+    GeneralVoicePairing.Session existing=GeneralVoicePairVault.load(this);
+    if(existing!=null && System.currentTimeMillis()<existing.expiresAt) {
+      openApproval(existing.pairId);
+      return;
+    }
+    if(!pairInFlight.compareAndSet(false,true))return;
+    pairingStatus("Requesting one-time approval from Raspi.");
+    pairNetwork.execute(() -> {
+      GeneralVoicePairing.Session pending=null;
+      try {pending=pairing.begin();}
+      catch(Exception ignored) {}
+      final GeneralVoicePairing.Session issued=pending;
+      runOnUiThread(() -> {
+        pairInFlight.set(false);
+        if(isFinishing() || isDestroyed())return;
+        if(issued==null || !GeneralVoicePairVault.save(this,issued)) {
+          pairingStatus("Unable to reach Raspi. Tap Connect to retry.");
+          return;
+        }
+        if(pairingForeground) openApproval(issued.pairId);
+        else pairingStatus("Return here and tap Connect to approve this phone.");
+      });
+    });
+  }
+
+  private void openApproval(String pairId) {
+    try {
+      // The browser sends Raspi's existing secure admin session cookie.
+      // The private proof is NOT in this URL and NOT shared with the browser.
+      Intent browser=new Intent(Intent.ACTION_VIEW,
+          Uri.parse(GeneralVoicePairing.approvalUrl(pairId)));
+      pairingStatus("Approve this phone in Raspi, then return here.");
+      startActivity(browser);
+    }catch(Exception failed) {
+      pairingStatus("Cannot open Raspi approval. Tap Connect to retry.");
+    }
+  }
+
+  private void pollPairingOnce() {
+    if(!pairingForeground || !needsPairing())return;
+    final GeneralVoicePairing.Session pending=GeneralVoicePairVault.load(this);
+    if(pending==null)return;
+    if(!pairInFlight.compareAndSet(false,true))return;
+    pairNetwork.execute(() -> {
+      GeneralVoicePairing.Poll result=null;
+      boolean expired=false;
+      try {
+        result=pairing.poll(pending);
+      }catch(GeneralVoicePairing.PairExpiredException expiredOnServer){
+        expired=true;
+      }catch(IOException failed){
+        expired=System.currentTimeMillis()>=pending.expiresAt;
+      }
+      final GeneralVoicePairing.Poll received=result;
+      final boolean stale=expired;
+      runOnUiThread(() -> {
+        pairInFlight.set(false);
+        if(isFinishing() || isDestroyed())return;
+        if(stale){
+          GeneralVoicePairVault.clear(this);
+          pairingStatus("Approval expired. Tap Connect to start again.");
+          return;
+        }
+        if(received!=null && "paired".equals(received.status)) {
+          if(VoiceCredentialVault.save(this,received.bearer)){
+            GeneralVoicePairVault.clear(this);
+            if(connectButton!=null)connectButton.setVisibility(View.GONE);
+            showVoiceClientPairingStatus("Connecting","Server pairing completed securely.");
+            if(pairingForeground) reconnectVoiceClientAfterProvisioning();
+            return;
+          }
+          GeneralVoicePairVault.clear(this);
+          pairingStatus("Cannot protect the server credential. Tap Connect to retry.");
+        } else if(received!=null && "pending".equals(received.status)) {
+          pairingStatus("Approve this phone in Raspi, then return here.");
+        } else {
+          pairingStatus("Waiting for private Raspi pairing. Tap Connect to retry.");
+        }
+        if(pairingForeground && needsPairing()) {
+          pairHandler.removeCallbacks(refreshPairing);
+          pairHandler.postDelayed(refreshPairing,3000);
+        }
+      });
+    });
   }
 
   private GeneralVoiceVisual visual;
@@ -183,11 +299,21 @@ public final class GeneralVoiceAgentActivity extends MainActivity {
     customize.setOnClickListener(v->showClientConfiguration());
     skinRow.addView(customize,new LinearLayout.LayoutParams(dp(105),dp(52)));
     root.addView(skinRow,1);
+    if(needsPairing()) {
+      connectButton = new MaterialButton(this);
+      connectButton.setText("Connect to server");
+      connectButton.setMinHeight(dp(48));
+      connectButton.setContentDescription("Securely approve this phone in the private Raspi portal");
+      connectButton.setOnClickListener(v -> connectPhone());
+      root.addView(connectButton,2);
+    }
   }
 
   @Override protected void onVoiceClientStatus(String state) {
     currentState=state;
     if(visual!=null)visual.state(state);
+    if("UNAVAILABLE".equals(state) && needsPairing())
+      pairingStatus("Tap Connect to authorize this phone in Raspi.");
   }
 
   private Bitmap loadBoundedImage(Uri uri) throws Exception {
@@ -366,11 +492,28 @@ public final class GeneralVoiceAgentActivity extends MainActivity {
   }
 
   @Override protected void onPause() {
+    pairingForeground = false;
+    pairHandler.removeCallbacks(refreshPairing);
     if(visual!=null)visual.state("READY");
     super.onPause();
   }
   @Override protected void onResume() {
     super.onResume();
+    pairingForeground = true;
     if(visual!=null)visual.state(currentState);
+    if(VoiceCredentialVault.configured(this)) {
+      reconnectVoiceClientAfterProvisioning();
+    }
+    if(needsPairing()) {
+      pairingStatus("Tap Connect to authorize this phone in Raspi.");
+      pairHandler.removeCallbacks(refreshPairing);
+      pairHandler.postDelayed(refreshPairing,250);
+    }
+  }
+  @Override protected void onDestroy() {
+    pairingForeground = false;
+    pairHandler.removeCallbacks(refreshPairing);
+    pairNetwork.shutdownNow();
+    super.onDestroy();
   }
 }
