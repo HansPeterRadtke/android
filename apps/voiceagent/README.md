@@ -90,3 +90,37 @@ will need explicit authenticated enrollment/secure pairing.
   speech and playback, interruption handling, selected server voice,
   and real end-to-end first-audio measurements. Do not promote to a
   stable release before these pass.
+
+## Additional current observation, 26 November 2026, Blackview connection investigation
+
+Device inspection through G3 wireless ADB at approximately 18:45 Berlin time
+confirmed Blackview XPLORE 1 user zero has installed
+com.multiverse.voiceagent version 0.15, the old phone-inference feasibility app.
+It **does not** have com.multiverse.voiceclient, the new general thin client,
+installed, and there is no Multiverse VoiceAgent APK in its Downloads folder.
+This proves a mismatch on the *inspected Blackview only*; another phone or
+profile cannot be inferred from this check. The Jetson gateway's live health
+was OK with zero active sessions, and the existing authenticated WebSocket
+health/hello test was successful from a server-side test client. A healthy
+server does not authenticate a phone that lacks its device-held credential.
+
+Further independent transfer diagnostics: Blackview wireless ADB can run short
+shell commands and can receive a 24-byte TCP probe from G3. A multi-kilobyte
+TCP probe and larger ADB/exec-in transfers stall and leave zero-byte files.
+Phone-to-G3 Java HTTP downloads started but timed out with zero payload;
+the Android shell's custom Java app_process download helper was killed by
+Android before an APK was downloaded. Small test jars were transferred
+with individually verified base64 chunks, so the failure is not explained
+by a corrupt helper jar. Even a restart of TCP ADB did not establish a
+reliable multi-megabyte path. Temporary G3 HTTP listener/firewall rule and
+phone-side testing files were removed. Do **not** claim the real phone app
+has been installed. Only a separate verified user/device install would
+change this status.
+
+The current 0.3 beta has app-private, one-shot *debug-only* ADB token
+provisioning with Android Keystore; it intentionally has no server bearer
+embedded in its APK. After actual installation, per-device secure pairing
+is still required for real authenticated voice transport. There is no
+owner-free production onboarding or supported dynamic server voice switching
+in this build. Do not disable gateway authentication or publish the private
+bearer in a generic APK merely to make the status say connected.
